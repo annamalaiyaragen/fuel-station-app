@@ -161,6 +161,7 @@ html,body{margin:0;padding:0;}
 .suggest-row { padding:7px 10px; cursor:pointer; font-size:13px; }
 .suggest-row:hover { background: var(--surface-1); }
 .btn-block { width:100%; text-align:left; }
+.drive-banner { display:flex; align-items:center; justify-content:center; gap:14px; padding:10px 16px; background: var(--amber-dim); color:#fff8ec; font-size:13px; font-weight:500; flex-wrap:wrap; }
 .btn-link { background:none; border:none; color: var(--amber); text-decoration:underline; cursor:pointer; font-family:'JetBrains Mono', monospace; font-size:13px; padding:0; }
 .denom-mini { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; border-bottom:1px dashed var(--border); }
 .date-picker-btn { min-width: 130px; }
@@ -505,6 +506,14 @@ function App() {
     const [salaryRuns, setSalaryRuns] = useState({});
     const [bankRecon, setBankRecon] = useState({ book: [], entries: [], proposals: [], lastSucceeded: {} });
     const [tab, setTab] = useState('dashboard');
+    const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+    useEffect(() => {
+        const on = () => setIsOnline(true);
+        const off = () => setIsOnline(false);
+        window.addEventListener('online', on);
+        window.addEventListener('offline', off);
+        return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off); };
+    }, []);
     const [unlocked, setUnlocked] = useState(() => { try {
         return window.sessionStorage.getItem('fs_unlocked') === '1';
     }
@@ -625,8 +634,12 @@ function App() {
                 driveFileIdRef.current = file.id;
                 const cloudData = await driveDownload(token, file.id);
                 const localHasAnyData = msLog.length > 0 || dieselLog.length > 0 || Object.keys(dayClosing).length > 0 || (config.employees && config.employees.length > 0);
+                const alreadyInSync = localHasAnyData && lastLocalChange && cloudData.savedAt && cloudData.savedAt === lastLocalChange;
                 const cloudIsNewer = cloudData.savedAt && (!localHasAnyData || !lastLocalChange || cloudData.savedAt > lastLocalChange);
-                if (cloudIsNewer) {
+                if (alreadyInSync) {
+                    // identical timestamps \u2014 this device produced exactly this backup already, nothing to do
+                }
+                else if (cloudIsNewer) {
                     applyCloudData(cloudData, false);
                     window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, cloudData.savedAt);
                     showToast(`Loaded newer data from Google Drive (saved ${new Date(cloudData.savedAt).toLocaleString('en-IN')})`);
@@ -760,7 +773,8 @@ function App() {
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
         advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, showToast };
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'master' && (unlocked ? React.createElement(MasterData, shared) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'settings' && (unlocked ? React.createElement(SettingsTab, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData })) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
+    const showDriveBanner = configuredClientId && driveReady && !driveConnected && isOnline;
+    return React.createElement(React.Fragment, null, showDriveBanner && React.createElement("div", { className: "drive-banner" }, React.createElement("span", null, "Google Drive isn't connected yet \u2014 connect now to enable automatic backup."), React.createElement("button", { className: "btn btn-primary btn-sm", onClick: connectDrive }, "Connect Google Drive")), React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'master' && (unlocked ? React.createElement(MasterData, shared) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'settings' && (unlocked ? React.createElement(SettingsTab, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData })) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg)));
 }
 function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt }) {
     const items = [
