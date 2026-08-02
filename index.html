@@ -525,6 +525,7 @@ function App() {
     const suppressPushRef = useRef(false);
     const pushTimerRef = useRef(null);
     const driveSyncInFlightRef = useRef(false);
+    const initialLoadStampSkippedRef = useRef(false);
     const configuredClientId = GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('PASTE_');
     useEffect(() => {
         (async () => {
@@ -623,7 +624,8 @@ function App() {
             if (file) {
                 driveFileIdRef.current = file.id;
                 const cloudData = await driveDownload(token, file.id);
-                const cloudIsNewer = cloudData.savedAt && (!lastLocalChange || cloudData.savedAt > lastLocalChange);
+                const localHasAnyData = msLog.length > 0 || dieselLog.length > 0 || Object.keys(dayClosing).length > 0 || (config.employees && config.employees.length > 0);
+                const cloudIsNewer = cloudData.savedAt && (!localHasAnyData || !lastLocalChange || cloudData.savedAt > lastLocalChange);
                 if (cloudIsNewer) {
                     applyCloudData(cloudData, false);
                     window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, cloudData.savedAt);
@@ -721,13 +723,19 @@ function App() {
         // eslint-disable-next-line
     }, [driveConnected, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
     useEffect(() => {
-        // stamp "when did local data last change" independent of Drive connection \u2014
-        // this is what lets a future reconnect decide which copy (local vs cloud) is actually newer
+        if (!ready)
+            return; // still loading saved data \u2014 not a real edit yet
+        // stamp "when did local data last change" \u2014 but the very first time this fires after loading
+        // is just the initial async load populating state, not a real edit, so skip that one
+        if (!initialLoadStampSkippedRef.current) {
+            initialLoadStampSkippedRef.current = true;
+            return;
+        }
         try {
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, new Date().toISOString());
         }
         catch (e) { }
-    }, [config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
+    }, [ready, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
     useEffect(() => {
         if (!driveConnected)
             return;
