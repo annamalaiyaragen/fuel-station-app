@@ -739,7 +739,9 @@ function App() {
         if (!ready)
             return; // still loading saved data \u2014 not a real edit yet
         // stamp "when did local data last change" \u2014 but the very first time this fires after loading
-        // is just the initial async load populating state, not a real edit, so skip that one
+        // is just the initial async load populating state, not a real edit, so skip that one.
+        // Deliberately excludes msReadings/msDrafts/dieselData (raw in-progress typing before Save is
+        // clicked on MS Daily / Diesel Daily) \u2014 only committed saves count as a real change here.
         if (!initialLoadStampSkippedRef.current) {
             initialLoadStampSkippedRef.current = true;
             return;
@@ -748,7 +750,7 @@ function App() {
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, new Date().toISOString());
         }
         catch (e) { }
-    }, [ready, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
+    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
     useEffect(() => {
         if (!driveConnected)
             return;
@@ -761,7 +763,7 @@ function App() {
         pushTimerRef.current = setTimeout(() => { pushNow(); }, 3000);
         return () => clearTimeout(pushTimerRef.current);
         // eslint-disable-next-line
-    }, [config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, driveConnected]);
+    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, driveConnected]);
     useEffect(() => {
         const onOnline = () => { if (driveConnected)
             pushNow(); };
@@ -773,8 +775,11 @@ function App() {
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
         advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, showToast };
-    const showDriveBanner = configuredClientId && driveReady && !driveConnected && isOnline;
-    return React.createElement(React.Fragment, null, showDriveBanner && React.createElement("div", { className: "drive-banner" }, React.createElement("span", null, "Google Drive isn't connected yet \u2014 connect now to enable automatic backup."), React.createElement("button", { className: "btn btn-primary btn-sm", onClick: connectDrive }, "Connect Google Drive")), React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'master' && (unlocked ? React.createElement(MasterData, shared) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'settings' && (unlocked ? React.createElement(SettingsTab, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData })) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg)));
+    const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline;
+    if (mustConnectFirst) {
+        return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
+    }
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'master' && (unlocked ? React.createElement(MasterData, shared) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'settings' && (unlocked ? React.createElement(SettingsTab, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData })) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
 }
 function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt }) {
     const items = [
