@@ -256,6 +256,7 @@ const GOOGLE_CLIENT_ID = '510184910102-9gd9iudnjq2260okdc301qilm9p71qv1.apps.goo
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILE_NAME = 'fuel_station_backup.json';
 const LS_DRIVE_FLAG = 'fuelapp_drive_was_connected';
+const LS_LAST_LOCAL_CHANGE = 'fuelapp_last_local_change';
 async function driveFindFile(token) {
     const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
     const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)`, { headers: { Authorization: `Bearer ${token}` } });
@@ -519,11 +520,11 @@ function App() {
     const [driveConnected, setDriveConnected] = useState(false);
     const [syncStatus, setSyncStatus] = useState('idle');
     const [lastSyncedAt, setLastSyncedAt] = useState(null);
-    const [cloudConflict, setCloudConflict] = useState(null);
     const tokenClientRef = useRef(null);
     const driveFileIdRef = useRef(null);
     const suppressPushRef = useRef(false);
     const pushTimerRef = useRef(null);
+    const driveSyncInFlightRef = useRef(false);
     const configuredClientId = GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('PASTE_');
     useEffect(() => {
         (async () => {
@@ -565,8 +566,6 @@ function App() {
             if (window.google && window.google.accounts && window.google.accounts.oauth2) {
                 tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({ client_id: GOOGLE_CLIENT_ID, scope: DRIVE_SCOPE, callback: () => { } });
                 setDriveReady(true);
-                if (window.localStorage.getItem(LS_DRIVE_FLAG) === '1')
-                    requestToken('').then((token) => handleConnected(token)).catch(() => { });
             }
             else if (tries < 40) {
                 tries += 1;
@@ -620,38 +619,51 @@ function App() {
         setSyncStatus('syncing');
         try {
             const file = await driveFindFile(token);
-            const localHasData = msLog.length > 0 || dieselLog.length > 0;
+            const lastLocalChange = window.localStorage.getItem(LS_LAST_LOCAL_CHANGE);
             if (file) {
                 driveFileIdRef.current = file.id;
                 const cloudData = await driveDownload(token, file.id);
-                if (localHasData) {
-                    setCloudConflict({ cloudData, cloudModifiedTime: file.modifiedTime });
-                    setSyncStatus('idle');
+                const cloudIsNewer = cloudData.savedAt && (!lastLocalChange || cloudData.savedAt > lastLocalChange);
+                if (cloudIsNewer) {
+                    applyCloudData(cloudData, false);
+                    window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, cloudData.savedAt);
+                    showToast(`Loaded newer data from Google Drive (saved ${new Date(cloudData.savedAt).toLocaleString('en-IN')})`);
                 }
                 else {
-                    applyCloudData(cloudData, false);
-                    setSyncStatus('synced');
-                    setLastSyncedAt(new Date());
+                    const payload = buildPayload();
+                    await driveUpdate(token, file.id, payload);
+                    window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
+                    showToast('This device had the newer data \u2014 backed it up to Google Drive');
                 }
             }
             else {
-                const created = await driveCreate(token, buildPayload());
+                const payload = buildPayload();
+                const created = await driveCreate(token, payload);
                 driveFileIdRef.current = created.id;
-                setSyncStatus('synced');
-                setLastSyncedAt(new Date());
+                window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
             }
+            setSyncStatus('synced');
+            setLastSyncedAt(new Date());
         }
         catch (e) {
             setSyncStatus('error');
         }
     }
-    const connectDrive = async () => { try {
-        const token = await requestToken('consent');
-        await handleConnected(token);
-    }
-    catch (e) {
-        showToast('Could not connect to Google Drive.', 'red');
-    } };
+    const connectDrive = async () => {
+        if (driveSyncInFlightRef.current)
+            return;
+        driveSyncInFlightRef.current = true;
+        try {
+            const token = await requestToken('consent');
+            await handleConnected(token);
+        }
+        catch (e) {
+            showToast('Could not connect to Google Drive.', 'red');
+        }
+        finally {
+            driveSyncInFlightRef.current = false;
+        }
+    };
     const exportData = () => {
         const payload = buildPayload();
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -680,32 +692,15 @@ function App() {
         reader.readAsText(file);
     };
     const disconnectDrive = () => { setDriveConnected(false); driveFileIdRef.current = null; setSyncStatus('idle'); window.localStorage.removeItem(LS_DRIVE_FLAG); showToast('Disconnected from Google Drive'); };
-    const resolveConflict = (choice) => {
-        if (!cloudConflict)
-            return;
-        if (choice === 'cloud') {
-            applyCloudData(cloudConflict.cloudData, false);
-            showToast('Loaded data from Google Drive');
-        }
-        else {
-            showToast("Keeping this device's data \u2014 it will be backed up to Drive now");
-        }
-        setCloudConflict(null);
-        setSyncStatus('synced');
-        setLastSyncedAt(new Date());
-    };
     const pushNow = useCallback(async () => {
-        if (!driveConnected)
+        if (!driveConnected || driveSyncInFlightRef.current)
             return;
+        driveSyncInFlightRef.current = true;
         setSyncStatus('syncing');
         try {
-            let token;
-            try {
-                token = await requestToken('');
-            }
-            catch (e) {
-                token = await requestToken('consent');
-            }
+            // silent only here \u2014 this can run from a background timer with no user gesture behind it,
+            // so we never risk popping (or having blocked) a real consent screen; reconnecting is always an explicit click
+            const token = await requestToken('');
             const payload = buildPayload();
             if (driveFileIdRef.current)
                 await driveUpdate(token, driveFileIdRef.current, payload);
@@ -713,16 +708,28 @@ function App() {
                 const created = await driveCreate(token, payload);
                 driveFileIdRef.current = created.id;
             }
+            window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
             setSyncStatus('synced');
             setLastSyncedAt(new Date());
         }
         catch (e) {
             setSyncStatus(navigator.onLine ? 'error' : 'offline');
         }
+        finally {
+            driveSyncInFlightRef.current = false;
+        }
         // eslint-disable-next-line
     }, [driveConnected, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
     useEffect(() => {
-        if (!driveConnected || cloudConflict)
+        // stamp "when did local data last change" independent of Drive connection \u2014
+        // this is what lets a future reconnect decide which copy (local vs cloud) is actually newer
+        try {
+            window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, new Date().toISOString());
+        }
+        catch (e) { }
+    }, [config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
+    useEffect(() => {
+        if (!driveConnected)
             return;
         if (suppressPushRef.current) {
             suppressPushRef.current = false;
@@ -745,7 +752,7 @@ function App() {
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
         advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, showToast };
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'master' && (unlocked ? React.createElement(MasterData, shared) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'settings' && (unlocked ? React.createElement(SettingsTab, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData })) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'reports' && React.createElement(ReportsTab, shared)), cloudConflict && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, "Cloud backup found"), React.createElement("p", null, `Google Drive already has a backup from ${new Date(cloudConflict.cloudModifiedTime).toLocaleString('en-IN')}, and this device also has data. Which should be kept?`), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: () => resolveConflict('device') }, "Keep This Device's Data"), React.createElement("button", { className: "btn btn-primary", onClick: () => resolveConflict('cloud') }, "Load Data From Drive")))), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'master' && (unlocked ? React.createElement(MasterData, shared) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'settings' && (unlocked ? React.createElement(SettingsTab, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData })) : React.createElement(PasswordGate, { onUnlock: unlock })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
 }
 function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt }) {
     const items = [
