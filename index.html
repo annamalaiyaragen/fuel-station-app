@@ -129,6 +129,7 @@ html,body{margin:0;padding:0;}
 .print-only { display:none; }
 @media print {
   .no-print { display:none !important; }
+  .print-hide { display:none !important; }
   .fuel-app { background:#fff; color:#111; display:block; }
   .main { padding:0; max-width:none; }
   .card { background:#fff; border-color:#ccc; }
@@ -437,6 +438,7 @@ const K = {
     DIESEL_DATA: 'fs_diesel_data', DIESEL_LOG: 'fs_diesel_log',
     DAY_CLOSING: 'fs_day_closing', ADVANCE: 'fs_advance', SALARY_RUNS: 'fs_salary_runs',
     BANK_RECON: 'fs_bank_recon',
+    DSR_DATA: 'fs_dsr_data',
 };
 const BANK_TXN_TYPES = [{ key: 'deposit', label: 'Bank deposit' }, { key: 'phonepe', label: 'PhonePe settlement' }, { key: 'paytm', label: 'Paytm settlement' }, { key: 'hppay', label: 'HP Pay / DTPlus' }];
 function defaultBankTypeSetting() { return { delimiter: 'tab', dateCol: 1, amountCol: 3, keyword: '' }; }
@@ -488,6 +490,7 @@ const defaultConfig = {
     ],
     employees: [],
     terminals: [],
+    tanks: [],
     bankSettings: defaultBankSettings(),
     oilPrice: 320, pktPrice: 23,
     meterOpeningReadings: {},
@@ -507,6 +510,7 @@ function App() {
     const [advance, setAdvance] = useState({ balances: {}, log: [] });
     const [salaryRuns, setSalaryRuns] = useState({});
     const [bankRecon, setBankRecon] = useState({ book: [], entries: [], proposals: [], lastSucceeded: {} });
+    const [dsrData, setDsrData] = useState({});
     const [tab, setTab] = useState('dashboard');
     const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
     useEffect(() => {
@@ -540,10 +544,11 @@ function App() {
     const configuredClientId = GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('PASTE_');
     useEffect(() => {
         (async () => {
-            const [c, mr, md, ml, dd, dl, dc, av, sr, br] = await Promise.all([
+            const [c, mr, md, ml, dd, dl, dc, av, sr, br, dsr] = await Promise.all([
                 storageGet(K.CONFIG, defaultConfig), storageGet(K.MS_READINGS, {}), storageGet(K.MS_DRAFTS, {}), storageGet(K.MS_LOG, []),
                 storageGet(K.DIESEL_DATA, {}), storageGet(K.DIESEL_LOG, []), storageGet(K.DAY_CLOSING, {}),
                 storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, { book: [], entries: [], proposals: [], lastSucceeded: {} }),
+                storageGet(K.DSR_DATA, {}),
             ]);
             setConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (c.bankSettings || {})) }));
             setMsReadings(mr);
@@ -555,6 +560,7 @@ function App() {
             setAdvance(av);
             setSalaryRuns(sr);
             setBankRecon(br);
+            setDsrData(dsr);
             setReady(true);
         })();
     }, []);
@@ -569,6 +575,7 @@ function App() {
     const persistAdvance = useCallback(async (next) => { setAdvance(next); await storageSet(K.ADVANCE, next); }, []);
     const persistSalaryRuns = useCallback(async (next) => { setSalaryRuns(next); await storageSet(K.SALARY_RUNS, next); }, []);
     const persistBankRecon = useCallback(async (next) => { setBankRecon(next); await storageSet(K.BANK_RECON, next); }, []);
+    const persistDsrData = useCallback(async (next) => { setDsrData(next); await storageSet(K.DSR_DATA, next); }, []);
     /* ---------- Google Drive sync (backs up everything as one payload) ---------- */
     useEffect(() => {
         if (!configuredClientId)
@@ -600,7 +607,7 @@ function App() {
         });
     }
     function buildPayload() {
-        return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon };
+        return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData };
     }
     function applyCloudData(data, push = true) {
         suppressPushRef.current = !push;
@@ -624,6 +631,8 @@ function App() {
             persistSalaryRuns(data.salaryRuns);
         if (data.bankRecon)
             persistBankRecon(data.bankRecon);
+        if (data.dsrData)
+            persistDsrData(data.dsrData);
     }
     async function handleConnected(token) {
         setDriveConnected(true);
@@ -752,7 +761,7 @@ function App() {
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, new Date().toISOString());
         }
         catch (e) { }
-    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
+    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData]);
     useEffect(() => {
         if (!driveConnected)
             return;
@@ -765,7 +774,7 @@ function App() {
         pushTimerRef.current = setTimeout(() => { pushNow(); }, 3000);
         return () => clearTimeout(pushTimerRef.current);
         // eslint-disable-next-line
-    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, driveConnected]);
+    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, driveConnected]);
     useEffect(() => {
         const onOnline = () => { if (driveConnected)
             pushNow(); };
@@ -779,7 +788,7 @@ function App() {
     }
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
-        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, showToast };
+        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, dsrData, persistDsrData, showToast };
     const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline;
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
@@ -869,17 +878,40 @@ function diffByProductForShift(config, pump, meterCalc, shiftIndex) {
     });
     return result;
 }
-function computeShiftFinance(config, pump, diffByProduct, shiftDraft) {
+function perMeterBreakdown(config, pump, meterCalc, shiftIndex, testingByProduct) {
+    // Testing is entered per product for the whole pump, not per individual nozzle \u2014 split evenly
+    // across same-product meters at this pump so DSR tank attribution has a per-nozzle figure to use.
+    const countByProduct = {};
+    (pump.meterIds || []).forEach((mid) => { const m = config.meters.find((x) => x.id === mid); if (m)
+        countByProduct[m.productId] = (countByProduct[m.productId] || 0) + 1; });
+    const out = {};
+    (pump.meterIds || []).forEach((mid) => {
+        var _a, _b;
+        const m = config.meters.find((x) => x.id === mid);
+        if (!m)
+            return;
+        const diff = (_b = (_a = meterCalc[mid]) === null || _a === void 0 ? void 0 : _a.diffs) === null || _b === void 0 ? void 0 : _b[shiftIndex];
+        if (diff === null || diff === undefined)
+            return;
+        const testingForProduct = testingByProduct[m.productId] || 0;
+        const share = testingForProduct / (countByProduct[m.productId] || 1);
+        out[mid] = { diff: round2(diff), testing: round2(share) };
+    });
+    return out;
+}
+function computeShiftFinance(config, pump, diffByProduct, shiftDraft, meterCalc, shiftIndex) {
     var _a, _b;
     const productMap = {};
     config.products.forEach((p) => (productMap[p.id] = p));
     const testing = (shiftDraft === null || shiftDraft === void 0 ? void 0 : shiftDraft.testing) || {};
     let total = 0;
     const lineItems = [];
+    const testingByProduct = {};
     Object.keys(diffByProduct).forEach((pid) => {
         var _a, _b, _c, _d;
         const rate = (_b = (_a = shiftDraft === null || shiftDraft === void 0 ? void 0 : shiftDraft.priceOverride) === null || _a === void 0 ? void 0 : _a[pid]) !== null && _b !== void 0 ? _b : (((_c = productMap[pid]) === null || _c === void 0 ? void 0 : _c.rate) || 0);
         const t = testing[pid] !== undefined ? (Number(testing[pid]) || 0) : defaultTesting(pump, pid, config.meters);
+        testingByProduct[pid] = t;
         const net = (diffByProduct[pid] || 0) - t;
         const amt = net * rate;
         total += amt;
@@ -901,7 +933,8 @@ function computeShiftFinance(config, pump, diffByProduct, shiftDraft) {
     const phonepe = effectiveAmount(shiftDraft === null || shiftDraft === void 0 ? void 0 : shiftDraft.phonepeDetail);
     const paytm = effectiveAmount(shiftDraft === null || shiftDraft === void 0 ? void 0 : shiftDraft.paytmDetail);
     const finalCash = total - cashDeposited - phonepe - paytm;
-    return { total: round2(total), finalCash: round2(finalCash), lineItems, cashDeposited, phonepe, paytm };
+    const perMeter = meterCalc && shiftIndex !== undefined ? perMeterBreakdown(config, pump, meterCalc, shiftIndex, testingByProduct) : {};
+    return { total: round2(total), finalCash: round2(finalCash), lineItems, cashDeposited, phonepe, paytm, perMeter };
 }
 function emptyMsDraft() {
     return { cashier: '', testing: {}, priceOverride: {}, oil: '', packetOil: '', cashDeposited: '',
@@ -940,7 +973,7 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
             return;
         }
         const diffByProduct = diffByProductForShift(config, pump, meterCalc, i);
-        const fin = computeShiftFinance(config, pump, diffByProduct, draft);
+        const fin = computeShiftFinance(config, pump, diffByProduct, draft, meterCalc, i);
         const dEntered = denomEntered(draft.denom);
         const dTotal = denomTotal(draft.denom);
         const dOff = Math.abs(dTotal - fin.finalCash);
@@ -949,7 +982,7 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
         const recordId = `${entryDate}_${pump.id}_shift${i}`;
         const record = { id: recordId, date: entryDate, slotId: pump.id, shiftIndex: i,
             slotLabel: shiftCount > 1 ? `${pump.label} \u2013 shift ${i + 1}` : pump.label,
-            cashier: draft.cashier.trim(), lineItems: fin.lineItems, total: fin.total,
+            cashier: draft.cashier.trim(), lineItems: fin.lineItems, perMeter: fin.perMeter, total: fin.total,
             cashDeposited: fin.cashDeposited, phonepe: fin.phonepe, paytm: fin.paytm, finalCash: fin.finalCash,
             phonepeNightClosing: Number((_b = draft.phonepeDetail) === null || _b === void 0 ? void 0 : _b.nightClosing) || 0, paytmNightClosing: Number((_c = draft.paytmDetail) === null || _c === void 0 ? void 0 : _c.nightClosing) || 0,
             phonepeOpening: Number((_d = draft.phonepeDetail) === null || _d === void 0 ? void 0 : _d.opening) || 0, paytmOpening: Number((_e = draft.paytmDetail) === null || _e === void 0 ? void 0 : _e.opening) || 0,
@@ -991,7 +1024,7 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
     })()), pump && Array.from({ length: shiftCount }).map((_, i) => {
         var _a;
         return React.createElement(MsShiftCard, {
-            key: i, shiftIndex: i, shiftCount, pump, config, msLog, dieselLog, entryDate,
+            key: i, shiftIndex: i, shiftCount, pump, config, msLog, dieselLog, entryDate, meterCalc,
             diffByProduct: diffByProductForShift(config, pump, meterCalc, i),
             draft: ((_a = rec.shiftDrafts) === null || _a === void 0 ? void 0 : _a[i]) || emptyMsDraft(),
             updateDraft: (patch) => updateShiftDraft(i, patch),
@@ -1000,9 +1033,9 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
         });
     }));
 }
-function MsShiftCard({ shiftIndex, shiftCount, pump, config, msLog, dieselLog, entryDate, diffByProduct, draft, updateDraft, savedRecord, onSave, suggestFor, setSuggestFor }) {
+function MsShiftCard({ shiftIndex, shiftCount, pump, config, msLog, dieselLog, entryDate, meterCalc, diffByProduct, draft, updateDraft, savedRecord, onSave, suggestFor, setSuggestFor }) {
     const [confirming, setConfirming] = useState(false);
-    const fin = useMemo(() => computeShiftFinance(config, pump, diffByProduct, draft), [config, pump, diffByProduct, draft]);
+    const fin = useMemo(() => computeShiftFinance(config, pump, diffByProduct, draft, meterCalc, shiftIndex), [config, pump, diffByProduct, draft, meterCalc, shiftIndex]);
     const productIdsInSlot = Object.keys(diffByProduct);
     const dEntered = denomEntered(draft.denom);
     const dTotal = denomTotal(draft.denom);
@@ -1200,7 +1233,7 @@ function computeDieselFinance(config, dieselData, dateStr, rec, msLog) {
                 netDiff = diff - take;
                 testingRemaining -= take;
             }
-            segs.push({ diff, rate });
+            segs.push({ diff, netDiff: round2(netDiff), rate });
             dieselAmt += netDiff * rate;
             running = Number(cp);
         }
@@ -1290,7 +1323,7 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
             phonepeTerminalId: ((_e = rec.phonepeDetail) === null || _e === void 0 ? void 0 : _e.terminalId) || '', paytmTerminalId: ((_f = rec.paytmDetail) === null || _f === void 0 ? void 0 : _f.terminalId) || '',
             phonepeMorningClosing: ((_g = rec.phonepeDetail) === null || _g === void 0 ? void 0 : _g.morningClosing) !== '' ? Number((_h = rec.phonepeDetail) === null || _h === void 0 ? void 0 : _h.morningClosing) || 0 : undefined,
             paytmMorningClosing: ((_j = rec.paytmDetail) === null || _j === void 0 ? void 0 : _j.morningClosing) !== '' ? Number((_k = rec.paytmDetail) === null || _k === void 0 ? void 0 : _k.morningClosing) || 0 : undefined,
-            lubeBatchDetail, msGodownTransfers: rec.msGodownTransfers || {}, savedAt: new Date().toISOString() };
+            lubeBatchDetail, msGodownTransfers: rec.msGodownTransfers || {}, dieselPointSegments: fin.dieselPointSegments, savedAt: new Date().toISOString() };
         persistDieselLog([...dieselLog.filter((r) => r.id !== recordId), record]);
         const lubeClosingBalances = {};
         const godownClosingBalances = {};
@@ -1394,8 +1427,17 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     const upd = (path, value) => setLocal((c) => { const next = Object.assign({}, c); let o = next; for (let i = 0; i < path.length - 1; i++)
         o = o[path[i]]; o[path[path.length - 1]] = value; return Object.assign({}, next); });
     // employees
-    const addEmployee = () => setLocal((c) => (Object.assign(Object.assign({}, c), { employees: [...c.employees, { id: uid('e'), name: 'New employee', isAdmin: false, salary: '', pfOn: false, pf: '', bonusOn: false, bonus: '' }] })));
+    const addEmployee = () => setLocal((c) => (Object.assign(Object.assign({}, c), { employees: [...c.employees, { id: uid('e'), name: 'New employee', isAdmin: false, salary: '', pfOn: false, pf: '', bonusOn: false, bonus: '', airOn: false, airRate: '' }] })));
     const addTerminal = (type) => setLocal((c) => (Object.assign(Object.assign({}, c), { terminals: [...(c.terminals || []), { id: uid('t'), label: 'New terminal', terminalNumber: '', type }] })));
+    const addTank = () => setLocal((c) => { var _a; return (Object.assign(Object.assign({}, c), { tanks: [...(c.tanks || []), { id: uid('tank'), name: 'New Tank', productId: ((_a = c.products[0]) === null || _a === void 0 ? void 0 : _a.id) || 'p_ms', nozzleIds: [] }] })); });
+    const updTank = (idx, patch) => setLocal((c) => (Object.assign(Object.assign({}, c), { tanks: c.tanks.map((t, i) => i === idx ? Object.assign(Object.assign({}, t), patch) : t) })));
+    const removeTank = (idx) => setLocal((c) => (Object.assign(Object.assign({}, c), { tanks: c.tanks.filter((_, i) => i !== idx) })));
+    const toggleTankNozzle = (idx, nozzleId) => setLocal((c) => (Object.assign(Object.assign({}, c), { tanks: c.tanks.map((t, i) => {
+            if (i !== idx)
+                return t;
+            const has = (t.nozzleIds || []).includes(nozzleId);
+            return Object.assign(Object.assign({}, t), { nozzleIds: has ? t.nozzleIds.filter((x) => x !== nozzleId) : [...(t.nozzleIds || []), nozzleId] });
+        }) })));
     const updTerminal = (idx, patch) => setLocal((c) => (Object.assign(Object.assign({}, c), { terminals: c.terminals.map((t, i) => i === idx ? Object.assign(Object.assign({}, t), patch) : t) })));
     const removeTerminal = (idx) => setLocal((c) => (Object.assign(Object.assign({}, c), { terminals: c.terminals.filter((_, i) => i !== idx) })));
     const updEmployee = (idx, patch) => setLocal((c) => (Object.assign(Object.assign({}, c), { employees: c.employees.map((e, i) => i === idx ? Object.assign(Object.assign({}, e), patch) : e) })));
@@ -1423,15 +1465,18 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
         persistDieselData(next);
         showToast('Stock history cleared for this lube \u2014 it will restart from the Master Data values above.');
     };
-    const tabs = [['station', 'Station & Pumps'], ['employees', 'Employees'], ['terminals', 'Terminals'], ['products', 'Products & Lubes'], ['opening', 'Opening Readings']];
+    const tabs = [['station', 'Station & Pumps'], ['employees', 'Employees'], ['terminals', 'Terminals'], ['tanks', 'Tanks'], ['products', 'Products & Lubes'], ['opening', 'Opening Readings']];
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Master Data", subtitle: "Configure your station, employees, rates, lubes, and terminals.",
-        action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, React.createElement(IconSave, { size: 15 }), " Save") }), React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))), sub === 'station' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station")), React.createElement(Field, { label: "Station Name" }, React.createElement("input", { className: "text-input", value: local.stationName, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { stationName: e.target.value }))) }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pumps")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Turn on 2T Oil / Packet Oil for whichever pumps sell them \u2014 these show up as extra fields on that pump's shift card in MS Daily."), local.slots.map((s, idx) => React.createElement("div", { key: s.id, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, s.label), React.createElement("div", { className: "toggle-row" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includeOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includeOil: e.target.checked }) : x) }))) }), " 2T Oil"), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includePacketOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includePacketOil: e.target.checked }) : x) }))) }), " Packet Oil")))))), sub === 'employees' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Employees"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addEmployee }, React.createElement(IconPlus, { size: 14 }), " Add Employee")), local.employees.map((emp, idx) => React.createElement("div", { key: emp.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: emp.name, onChange: (e) => updEmployee(idx, { name: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeEmployee(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { className: "toggle-row", style: { flexWrap: 'wrap', gap: 16 } }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.isAdmin, onChange: (e) => updEmployee(idx, { isAdmin: e.target.checked }) }), " Admin staff"), emp.isAdmin && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Salary", React.createElement("input", { className: "text-input", style: { width: 100 }, value: emp.salary, onChange: (e) => updEmployee(idx, { salary: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.pfOn, onChange: (e) => updEmployee(idx, { pfOn: e.target.checked }) }), " PF"), emp.pfOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.pf, onChange: (e) => updEmployee(idx, { pf: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.bonusOn, onChange: (e) => updEmployee(idx, { bonusOn: e.target.checked }) }), " Bonus"), emp.bonusOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.bonus, onChange: (e) => updEmployee(idx, { bonus: e.target.value }) }))))), React.createElement("div", { className: "empty-hint" }, "Advance is tracked on its own page (Salary \u2192 Advance) and isn't part of this master data.")), sub === 'terminals' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "PhonePe / Paytm Terminals")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set up each terminal once. In MS Daily and Diesel Daily, picking a terminal auto-fills the Opening value from that terminal's Morning closing the previous day \u2014 you only enter it manually the very first time."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 6 } }, "PhonePe"), (local.terminals || []).filter((t) => t.type === 'phonepe').map((t) => {
+        action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, React.createElement(IconSave, { size: 15 }), " Save") }), React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))), sub === 'station' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station")), React.createElement(Field, { label: "Station Name" }, React.createElement("input", { className: "text-input", value: local.stationName, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { stationName: e.target.value }))) }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pumps")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Turn on 2T Oil / Packet Oil for whichever pumps sell them \u2014 these show up as extra fields on that pump's shift card in MS Daily."), local.slots.map((s, idx) => React.createElement("div", { key: s.id, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, s.label), React.createElement("div", { className: "toggle-row" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includeOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includeOil: e.target.checked }) : x) }))) }), " 2T Oil"), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includePacketOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includePacketOil: e.target.checked }) : x) }))) }), " Packet Oil")))))), sub === 'employees' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Employees"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addEmployee }, React.createElement(IconPlus, { size: 14 }), " Add Employee")), local.employees.map((emp, idx) => React.createElement("div", { key: emp.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: emp.name, onChange: (e) => updEmployee(idx, { name: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeEmployee(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { className: "toggle-row", style: { flexWrap: 'wrap', gap: 16 } }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.isAdmin, onChange: (e) => updEmployee(idx, { isAdmin: e.target.checked }) }), " Admin staff"), emp.isAdmin && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Salary", React.createElement("input", { className: "text-input", style: { width: 100 }, value: emp.salary, onChange: (e) => updEmployee(idx, { salary: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.pfOn, onChange: (e) => updEmployee(idx, { pfOn: e.target.checked }) }), " PF"), emp.pfOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.pf, onChange: (e) => updEmployee(idx, { pf: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.bonusOn, onChange: (e) => updEmployee(idx, { bonusOn: e.target.checked }) }), " Bonus"), emp.bonusOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.bonus, onChange: (e) => updEmployee(idx, { bonus: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.airOn, onChange: (e) => updEmployee(idx, { airOn: e.target.checked }) }), " Air man"), emp.airOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Per day rate", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.airRate, onChange: (e) => updEmployee(idx, { airRate: e.target.value }) }))))), React.createElement("div", { className: "empty-hint" }, "Advance is tracked on its own page (Salary \u2192 Advance) and isn't part of this master data.")), sub === 'terminals' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "PhonePe / Paytm Terminals")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set up each terminal once. In MS Daily and Diesel Daily, picking a terminal auto-fills the Opening value from that terminal's Morning closing the previous day \u2014 you only enter it manually the very first time."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 6 } }, "PhonePe"), (local.terminals || []).filter((t) => t.type === 'phonepe').map((t) => {
         const idx = local.terminals.findIndex((x) => x.id === t.id);
         return React.createElement("div", { key: t.id, style: { display: 'flex', gap: 10, marginBottom: 8, alignItems: 'center' } }, React.createElement("input", { className: "text-input", style: { width: 180 }, value: t.label, onChange: (e) => updTerminal(idx, { label: e.target.value }) }), React.createElement("input", { className: "text-input", style: { width: 160 }, placeholder: "Terminal number", value: t.terminalNumber, onChange: (e) => updTerminal(idx, { terminalNumber: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeTerminal(idx) }, React.createElement(IconTrash, { size: 14 })));
     }), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => addTerminal('phonepe') }, React.createElement(IconPlus, { size: 14 }), " Add PhonePe terminal"), React.createElement("div", { style: { fontWeight: 500, margin: '14px 0 6px' } }, "Paytm"), (local.terminals || []).filter((t) => t.type === 'paytm').map((t) => {
         const idx = local.terminals.findIndex((x) => x.id === t.id);
         return React.createElement("div", { key: t.id, style: { display: 'flex', gap: 10, marginBottom: 8, alignItems: 'center' } }, React.createElement("input", { className: "text-input", style: { width: 180 }, value: t.label, onChange: (e) => updTerminal(idx, { label: e.target.value }) }), React.createElement("input", { className: "text-input", style: { width: 160 }, placeholder: "Terminal number", value: t.terminalNumber, onChange: (e) => updTerminal(idx, { terminalNumber: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeTerminal(idx) }, React.createElement(IconTrash, { size: 14 })));
-    }), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => addTerminal('paytm') }, React.createElement(IconPlus, { size: 14 }), " Add Paytm terminal")), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Feeds MS item", "Avg. barrel volume", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 }))))))))), sub === 'opening' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Opening Readings (first-time setup)")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Only used when a meter or diesel point has no previous day's reading yet \u2014 set these once when you start using the app."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "MS / Power meters"), React.createElement("div", { className: "form-grid", style: { marginBottom: 14 } }, local.meters.map((m) => {
+    }), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => addTerminal('paytm') }, React.createElement(IconPlus, { size: 14 }), " Add Paytm terminal")), sub === 'tanks' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Tanks"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addTank }, React.createElement(IconPlus, { size: 14 }), " Add Tank")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Group nozzles (meters/diesel points) into the physical tank they draw from \u2014 this feeds the Daily Stock Register report. Two tanks can hold the same grade (e.g. MS1 and MS2)."), (local.tanks || []).map((t, idx) => {
+        const nozzleOptions = t.productId === 'p_diesel' ? local.dieselPoints.map((p) => ({ id: p.id, label: p.label })) : local.meters.filter((m) => m.productId === t.productId).map((m) => ({ id: m.id, label: m.label }));
+        return React.createElement("div", { key: t.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: t.name, onChange: (e) => updTank(idx, { name: e.target.value }) }), React.createElement("select", { className: "select-input", style: { width: 140 }, value: t.productId, onChange: (e) => updTank(idx, { productId: e.target.value, nozzleIds: [] }) }, local.products.map((p) => React.createElement("option", { key: p.id, value: p.id }, p.name))), React.createElement("button", { className: "icon-btn", onClick: () => removeTank(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { style: { fontSize: 12, color: 'var(--text-muted)', margin: '6px 0 4px' } }, "Nozzles feeding this tank:"), React.createElement("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, nozzleOptions.map((n) => React.createElement("label", { key: n.id, className: "toggle" }, React.createElement("input", { type: "checkbox", checked: (t.nozzleIds || []).includes(n.id), onChange: () => toggleTankNozzle(idx, n.id) }), " ", n.label))));
+    })), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Feeds MS item", "Avg. barrel volume", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 }))))))))), sub === 'opening' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Opening Readings (first-time setup)")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Only used when a meter or diesel point has no previous day's reading yet \u2014 set these once when you start using the app."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "MS / Power meters"), React.createElement("div", { className: "form-grid", style: { marginBottom: 14 } }, local.meters.map((m) => {
         var _a, _b;
         return React.createElement(Field, { key: m.id, label: m.label }, React.createElement(NumInput, { value: (_b = (_a = local.meterOpeningReadings) === null || _a === void 0 ? void 0 : _a[m.id]) !== null && _b !== void 0 ? _b : '', onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { meterOpeningReadings: Object.assign(Object.assign({}, c.meterOpeningReadings), { [m.id]: v }) }))) }));
     })), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Diesel points"), React.createElement("div", { className: "form-grid" }, local.dieselPoints.map((p) => {
@@ -1776,11 +1821,17 @@ function shiftCommission(lineItems) {
     return total;
 }
 function msPowerVolume(lineItems) { return (lineItems || []).filter((li) => li.productId === 'p_ms' || li.productId === 'p_power').reduce((s, li) => s + (li.diff || 0) - (li.testing || 0), 0); }
+function msVolumeOnly(lineItems) { return (lineItems || []).filter((li) => li.productId === 'p_ms').reduce((s, li) => s + (li.diff || 0) - (li.testing || 0), 0); }
+function powerVolumeOnly(lineItems) { return (lineItems || []).filter((li) => li.productId === 'p_power').reduce((s, li) => s + (li.diff || 0) - (li.testing || 0), 0); }
 function computeSalaryWorking(config, msLog, dieselLog, monthKey) {
-    const credits = {}; // name -> {msPowerComm, volume, dieselDayPay, dieselSplitShare}
-    function credit(name, field, amt) { if (!name)
-        return; if (!credits[name])
-        credits[name] = { msPowerComm: 0, volume: 0, dieselDayPay: 0, dieselSplitShare: 0 }; credits[name][field] += amt; }
+    const credits = {};
+    function ensure(name) { if (!name)
+        return null; if (!credits[name])
+        credits[name] = { msVolume: 0, powerVolume: 0, msPowerComm: 0, volume: 0, dieselDays: 0, pumpBoyDays: 0, dieselDayPay: 0, dieselSplitShare: 0, attdDates: new Set() }; return credits[name]; }
+    function credit(name, field, amt) { const c = ensure(name); if (c)
+        c[field] += amt; }
+    function markAttendance(name, date) { const c = ensure(name); if (c)
+        c.attdDates.add(date); }
     msLog.filter((r) => monthKeyOf(r.date) === monthKey).forEach((r) => {
         const comm = shiftCommission(r.lineItems);
         const vol = msPowerVolume(r.lineItems);
@@ -1803,27 +1854,49 @@ function computeSalaryWorking(config, msLog, dieselLog, monthKey) {
         else {
             credit(r.cashier, 'msPowerComm', comm);
             credit(r.cashier, 'volume', vol);
+            credit(r.cashier, 'msVolume', msVolumeOnly(r.lineItems));
+            credit(r.cashier, 'powerVolume', powerVolumeOnly(r.lineItems));
+            markAttendance(r.cashier, r.date);
         }
     });
     dieselLog.filter((r) => monthKeyOf(r.date) === monthKey).forEach((r) => {
         if (r.personShiftChangeOn) {
             const pct = (Number(r.shiftSplitPercent) || 50) / 100;
-            if (r.cashier)
+            if (r.cashier) {
                 credit(r.cashier, 'dieselDayPay', DIESEL_ATTENDANT_RATE * pct);
-            if (r.cashier2)
+                credit(r.cashier, 'dieselDays', pct);
+                markAttendance(r.cashier, r.date);
+            }
+            if (r.cashier2) {
                 credit(r.cashier2, 'dieselDayPay', DIESEL_ATTENDANT_RATE * (1 - pct));
-            if (r.pumpBoy)
+                credit(r.cashier2, 'dieselDays', 1 - pct);
+                markAttendance(r.cashier2, r.date);
+            }
+            if (r.pumpBoy) {
                 credit(r.pumpBoy, 'dieselDayPay', DIESEL_PUMPBOY_RATE * pct);
-            if (r.pumpBoy2)
+                credit(r.pumpBoy, 'pumpBoyDays', pct);
+                markAttendance(r.pumpBoy, r.date);
+            }
+            if (r.pumpBoy2) {
                 credit(r.pumpBoy2, 'dieselDayPay', DIESEL_PUMPBOY_RATE * (1 - pct));
+                credit(r.pumpBoy2, 'pumpBoyDays', 1 - pct);
+                markAttendance(r.pumpBoy2, r.date);
+            }
         }
         else {
-            if (r.cashier)
+            if (r.cashier) {
                 credit(r.cashier, 'dieselDayPay', DIESEL_ATTENDANT_RATE);
-            if (r.pumpBoy)
+                credit(r.cashier, 'dieselDays', 1);
+                markAttendance(r.cashier, r.date);
+            }
+            if (r.pumpBoy) {
                 credit(r.pumpBoy, 'dieselDayPay', DIESEL_PUMPBOY_RATE);
+                credit(r.pumpBoy, 'pumpBoyDays', 1);
+                markAttendance(r.pumpBoy, r.date);
+            }
         }
     });
+    Object.values(credits).forEach((c) => { c.attd = c.attdDates.size; delete c.attdDates; });
     return credits;
 }
 function advanceTier(balance) {
@@ -1842,41 +1915,54 @@ function advanceTier(balance) {
 }
 function SalaryTab(props) {
     const [sub, setSub] = useState('working');
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Salary" }), React.createElement("div", { className: "tab-switch" }, ['working', 'net', 'advance'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'working' ? 'Working Report' : s === 'net' ? 'Net Salary Report' : 'Advance'))), sub === 'working' && React.createElement(SalaryWorkingReport, props), sub === 'net' && React.createElement(NetSalaryReport, props), sub === 'advance' && React.createElement(AdvancePage, props));
+    return React.createElement("div", { className: "page" }, React.createElement("div", { className: "print-hide" }, React.createElement(PageHeader, { title: "Salary" }), React.createElement("div", { className: "tab-switch" }, ['working', 'net', 'advance'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'working' ? 'Working Report' : s === 'net' ? 'Net Salary Report' : 'Advance')))), sub === 'working' && React.createElement(SalaryWorkingReport, props), sub === 'net' && React.createElement(NetSalaryReport, props), sub === 'advance' && React.createElement(AdvancePage, props));
 }
 function MonthSelect({ value, onChange }) {
     return React.createElement("select", { className: "select-input", value, onChange: (e) => onChange(e.target.value) }, recentMonthKeys(18).map((m) => React.createElement("option", { key: m, value: m }, monthLabel(m))));
 }
-function SalaryWorkingReport({ config, msLog, dieselLog }) {
+function SalaryWorkingReport({ config, msLog, dieselLog, salaryRuns }) {
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
     const credits = useMemo(() => computeSalaryWorking(config, msLog, dieselLog, month), [config, msLog, dieselLog, month]);
-    const names = Object.keys(credits);
-    const grand = names.reduce((acc, n) => { const c = credits[n]; acc.msPowerComm += c.msPowerComm; acc.volume += c.volume; acc.dieselDayPay += c.dieselDayPay; acc.dieselSplitShare += c.dieselSplitShare; acc.subtotal += c.msPowerComm + c.dieselDayPay + c.dieselSplitShare; return acc; }, { msPowerComm: 0, volume: 0, dieselDayPay: 0, dieselSplitShare: 0, subtotal: 0 });
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement(MonthSelect, { value: month, onChange: setMonth }) }), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "MS+Power volume (L)", "MS/Power commission", "Diesel day pay", "Diesel-tag split share", "Subtotal"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, names.map((n) => {
-        const c = credits[n];
-        const sub = c.msPowerComm + c.dieselDayPay + c.dieselSplitShare;
-        return React.createElement("tr", { key: n }, React.createElement("td", null, n), React.createElement("td", { className: "mono" }, fmtNum(c.volume)), React.createElement("td", { className: "mono" }, fmt(c.msPowerComm)), React.createElement("td", { className: "mono" }, fmt(c.dieselDayPay)), React.createElement("td", { className: "mono" }, fmt(c.dieselSplitShare)), React.createElement("td", { className: "mono" }, fmt(sub)));
-    })), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Grand total")), React.createElement("td", { className: "mono" }, fmtNum(grand.volume)), React.createElement("td", { className: "mono" }, fmt(grand.msPowerComm)), React.createElement("td", { className: "mono" }, fmt(grand.dieselDayPay)), React.createElement("td", { className: "mono" }, fmt(grand.dieselSplitShare)), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.subtotal)))))));
+    const runData = salaryRuns[month] || { overrides: {} };
+    const names = [...new Set([...Object.keys(credits), ...config.employees.filter((e) => e.airOn).map((e) => e.name)])];
+    const rows = names.map((n) => {
+        var _a, _b;
+        const emp = config.employees.find((e) => e.name === n);
+        const c = credits[n] || { attd: 0, dieselDays: 0, pumpBoyDays: 0, msVolume: 0, powerVolume: 0, msPowerComm: 0, dieselDayPay: 0, dieselSplitShare: 0 };
+        const totalMS = round2((c.msVolume || 0) + (c.powerVolume || 0));
+        const isAir = !!(emp && emp.airOn);
+        const airDays = isAir ? (Number((_b = (_a = runData.overrides) === null || _a === void 0 ? void 0 : _a[n]) === null || _b === void 0 ? void 0 : _b.airAttendance) || 0) : 0;
+        const totalSalary = isAir ? round2(airDays * (Number(emp.airRate) || 0)) : round2((c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
+        return { name: n, attd: c.attd || 0, dieselDays: c.dieselDays || 0, pumpBoyDays: c.pumpBoyDays || 0, msVolume: c.msVolume || 0, powerVolume: c.powerVolume || 0, totalMS, isAir, airDays, totalSalary };
+    });
+    const grand = rows.reduce((acc, r) => { acc.attd += r.attd; acc.dieselDays += r.dieselDays; acc.pumpBoyDays += r.pumpBoyDays; acc.msVolume += r.msVolume; acc.powerVolume += r.powerVolume; acc.totalMS += r.totalMS; acc.airDays += r.airDays; acc.totalSalary += r.totalSalary; return acc; }, { attd: 0, dieselDays: 0, pumpBoyDays: 0, msVolume: 0, powerVolume: 0, totalMS: 0, airDays: 0, totalSalary: 0 });
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), React.createElement("div", { className: "empty-hint print-hide" }, "Air attendance is entered on the Net Salary Report tab \u2014 shown here read-only for reference."), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attd", "Sum of Diesel", "Pump boy", "Sum of MS", "Sum of Power", "Total MS", "Sum of Air", "Total Salary"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.attd)), React.createElement("td", { className: "mono" }, r.dieselDays ? fmtNum(r.dieselDays) : ''), React.createElement("td", { className: "mono" }, r.pumpBoyDays ? fmtNum(r.pumpBoyDays) : ''), React.createElement("td", { className: "mono" }, r.msVolume ? fmtNum(r.msVolume) : ''), React.createElement("td", { className: "mono" }, r.powerVolume ? fmtNum(r.powerVolume) : ''), React.createElement("td", { className: "mono" }, fmtNum(r.totalMS)), React.createElement("td", { className: "mono" }, r.isAir ? fmtNum(r.airDays) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.totalSalary))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Grand Total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.attd))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.dieselDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.pumpBoyDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.msVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.powerVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.totalMS))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.airDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.totalSalary)))))));
 }
-function NetSalaryReport({ config, msLog, dieselLog, advance, salaryRuns, persistSalaryRuns, persistAdvance, showToast }) {
+function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, salaryRuns, persistSalaryRuns, showToast }) {
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
     const credits = useMemo(() => computeSalaryWorking(config, msLog, dieselLog, month), [config, msLog, dieselLog, month]);
     const runData = salaryRuns[month] || { overrides: {} };
     const updOverride = (name, field, value) => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { overrides: Object.assign(Object.assign({}, runData.overrides), { [name]: Object.assign(Object.assign({}, (runData.overrides[name] || {})), { [field]: value }) }) }) }));
     const names = [...new Set([...Object.keys(credits), ...config.employees.map((e) => e.name)])];
     const rows = names.map((name) => {
+        var _a;
         const emp = config.employees.find((e) => e.name === name);
         const c = credits[name] || { msPowerComm: 0, volume: 0, dieselDayPay: 0, dieselSplitShare: 0 };
-        const salary = emp && emp.isAdmin ? (Number(emp.salary) || 0) : round2(c.msPowerComm + c.dieselDayPay + c.dieselSplitShare);
+        const ov = runData.overrides[name] || {};
+        const airAttendance = (_a = ov.airAttendance) !== null && _a !== void 0 ? _a : '';
+        const salary = emp && emp.isAdmin ? (Number(emp.salary) || 0)
+            : emp && emp.airOn ? round2((Number(airAttendance) || 0) * (Number(emp.airRate) || 0))
+                : round2(c.msPowerComm + c.dieselDayPay + c.dieselSplitShare);
         const defaultPf = emp && emp.pfOn ? (Number(emp.pf) || 0) : 0;
         const defaultBonus = (emp && emp.bonusOn ? (Number(emp.bonus) || 0) : 0) + (c.volume > BONUS_VOLUME_THRESHOLD ? BONUS_VOLUME_AMOUNT : 0);
         const defaultAdvance = advanceTier(advance.balances[name] || 0);
-        const ov = runData.overrides[name] || {};
+        const quit = !!ov.quit;
+        const fullBalance = round2(advance.balances[name] || 0);
         const pf = ov.pf !== undefined ? ov.pf : defaultPf;
-        const adv = ov.advance !== undefined ? ov.advance : defaultAdvance;
+        const adv = quit ? fullBalance : (ov.advance !== undefined ? ov.advance : defaultAdvance);
         const bonus = ov.bonus !== undefined ? ov.bonus : defaultBonus;
         const net = salary - (Number(pf) || 0) - (Number(adv) || 0) + (Number(bonus) || 0);
-        return { name, salary, pf, adv, bonus, net, defaultPf, defaultAdvance, defaultBonus };
+        return { name, salary, pf, adv, bonus, net, defaultPf, defaultAdvance, defaultBonus, quit, fullBalance, isAir: !!(emp && emp.airOn), airAttendance };
     });
     const grandNet = rows.reduce((s, r) => s + r.net, 0);
     const submitted = runData.submitted;
@@ -1906,7 +1992,8 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, salaryRuns, persis
         persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { submitted: null, confirmReRun: false }) }));
         setTimeout(doSubmit, 0);
     };
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-primary", onClick: submit }, submitted ? 'Submitted \u2013 re-run' : 'Submit salary statement'), React.createElement(Pill, { tone: submitted ? 'green' : 'muted' }, submitted ? 'Submitted' : 'Not submitted')) }), runData.confirmReRun && React.createElement(ConfirmBar, { message: `A salary statement for ${monthLabel(month)} was already submitted. Re-running will reverse those advance recoveries first, then reapply with the new figures.`, confirmLabel: "Reverse and re-run", onConfirm: reverseAndReRun, onCancel: () => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: false }) })) }), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Salary", "PF", "Advance", "Bonus", "Net"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmt(r.salary)), React.createElement("td", null, React.createElement(NumInput, { value: r.pf, onChange: (v) => updOverride(r.name, 'pf', v) })), React.createElement("td", null, React.createElement(NumInput, { value: r.adv, onChange: (v) => updOverride(r.name, 'advance', v) })), React.createElement("td", null, React.createElement(NumInput, { value: r.bonus, onChange: (v) => updOverride(r.name, 'bonus', v) })), React.createElement("td", { className: "mono" }, fmt(r.net))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 5 }, React.createElement("b", null, "Grand total net")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grandNet)))))));
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-primary", onClick: submit }, submitted ? 'Submitted \u2013 re-run' : 'Submit salary statement'), React.createElement(Pill, { tone: submitted ? 'green' : 'muted' }, submitted ? 'Submitted' : 'Not submitted'), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), runData.confirmReRun && React.createElement(ConfirmBar, { message: `A salary statement for ${monthLabel(month)} was already submitted. Re-running will reverse those advance recoveries first, then reapply with the new figures.`, confirmLabel: "Reverse and re-run", onConfirm: reverseAndReRun, onCancel: () => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: false }) })) }), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Air attendance (days)", "Salary", "PF", "Advance", "Quit (deduct all)", "Bonus", "Net"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", null, r.isAir ? React.createElement(NumInput, { value: r.airAttendance, onChange: (v) => updOverride(r.name, 'airAttendance', v) }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", { className: "mono" }, fmt(r.salary)), React.createElement("td", null, React.createElement(NumInput, { value: r.pf, onChange: (v) => updOverride(r.name, 'pf', v) })), React.createElement("td", null, React.createElement(NumInput, { value: r.adv, onChange: (v) => updOverride(r.name, 'advance', v), disabled: r.quit })), React.createElement("td", { className: "print-hide" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: r.quit,
+        onChange: (e) => updOverride(r.name, 'quit', e.target.checked) }), ` ${fmt(r.fullBalance)} owed`)), React.createElement("td", null, React.createElement(NumInput, { value: r.bonus, onChange: (v) => updOverride(r.name, 'bonus', v) })), React.createElement("td", { className: "mono" }, fmt(r.net))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 7 }, React.createElement("b", null, "Grand total net")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grandNet)))))));
 }
 function fmtLogDate(d) {
     if (!d)
@@ -2194,8 +2281,9 @@ function ReportsTab(props) {
         ['employeePerf', 'Employee Performance'],
         ['creditLedger', 'Credit Sales & Recovery'],
         ['terminals', 'Terminal Settlement'],
+        ['dsr', 'Daily Stock Register'],
     ];
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Reports" }), React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))), sub === 'lubeReceipts' && React.createElement(LubeReceiptsReport, props), sub === 'barrelUsage' && React.createElement(BarrelUsageReport, props), sub === 'employeePerf' && React.createElement(EmployeePerformanceReport, props), sub === 'creditLedger' && React.createElement(CreditLedgerReport, props), sub === 'terminals' && React.createElement(TerminalSettlementReport, props));
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Reports" }), React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))), sub === 'lubeReceipts' && React.createElement(LubeReceiptsReport, props), sub === 'barrelUsage' && React.createElement(BarrelUsageReport, props), sub === 'employeePerf' && React.createElement(EmployeePerformanceReport, props), sub === 'creditLedger' && React.createElement(CreditLedgerReport, props), sub === 'dsr' && React.createElement(DSRReport, props), sub === 'terminals' && React.createElement(TerminalSettlementReport, props));
 }
 function LubeReceiptsReport({ config, dieselData }) {
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
@@ -2304,6 +2392,81 @@ function TerminalSettlementReport({ config, msLog, dieselLog }) {
     }, [config, msLog, dieselLog, month]);
     return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement(MonthSelect, { value: month, onChange: setMonth }) }), rows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No terminals set up yet \u2014 add them in Master Data.") :
         React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Terminal", "Number", "Type", "Days used", "Total settled"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r, i) => React.createElement("tr", { key: i }, React.createElement("td", null, r.name), React.createElement("td", null, r.number), React.createElement("td", null, r.type), React.createElement("td", { className: "mono" }, r.days), React.createElement("td", { className: "mono" }, fmt(r.total)))))));
+}
+function getPrevTankDip(dsrData, dateStr, tankId, masterDefault) {
+    var _a, _b;
+    const dates = Object.keys(dsrData).filter((d) => d < dateStr).sort().reverse();
+    for (const d of dates) {
+        const v = (_b = (_a = dsrData[d]) === null || _a === void 0 ? void 0 : _a[tankId]) === null || _b === void 0 ? void 0 : _b.dipStock;
+        if (v !== undefined && v !== '' && v !== null)
+            return Number(v) || 0;
+    }
+    return Number(masterDefault) || 0;
+}
+function tankSalesForDate(tank, msLog, dieselLog, date) {
+    let salesByMeter = 0, pumpTest = 0;
+    if (tank.productId === 'p_diesel') {
+        const dlog = dieselLog.find((r) => r.date === date);
+        const segs = dlog === null || dlog === void 0 ? void 0 : dlog.dieselPointSegments;
+        if (segs)
+            (tank.nozzleIds || []).forEach((nid) => { (segs[nid] || []).forEach((s) => { if (s.diff !== null && s.diff !== undefined) {
+                salesByMeter += s.diff;
+                const net = s.netDiff !== undefined ? s.netDiff : s.diff;
+                pumpTest += (s.diff - net);
+            } }); });
+    }
+    else {
+        msLog.filter((r) => r.date === date).forEach((r) => { (tank.nozzleIds || []).forEach((nid) => { var _a; const pm = (_a = r.perMeter) === null || _a === void 0 ? void 0 : _a[nid]; if (pm) {
+            salesByMeter += pm.diff || 0;
+            pumpTest += pm.testing || 0;
+        } }); });
+    }
+    return { salesByMeter: round2(salesByMeter), pumpTest: round2(pumpTest), netSales: round2(salesByMeter - pumpTest) };
+}
+function computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, monthKey) {
+    var _a, _b, _c, _d;
+    const [y, m] = monthKey.split('-');
+    const daysInMonth = new Date(Number(y), Number(m), 0).getDate();
+    let cumSales = 0, cumVariation = 0;
+    let cumVariationStarted = false;
+    const rows = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+        const date = `${monthKey}-${String(d).padStart(2, '0')}`;
+        const opening = getPrevTankDip(dsrData, date, tank.id, 0);
+        const receipt = Number((_b = (_a = dsrData[date]) === null || _a === void 0 ? void 0 : _a[tank.id]) === null || _b === void 0 ? void 0 : _b.receipt) || 0;
+        const totalStock = round2(opening + receipt);
+        const { salesByMeter, pumpTest, netSales } = tankSalesForDate(tank, msLog, dieselLog, date);
+        cumSales = round2(cumSales + netSales);
+        const closingStock = round2(totalStock - netSales);
+        const dipRaw = (_d = (_c = dsrData[date]) === null || _c === void 0 ? void 0 : _c[tank.id]) === null || _d === void 0 ? void 0 : _d.dipStock;
+        const dipStock = dipRaw !== undefined && dipRaw !== '' ? Number(dipRaw) : null;
+        let variation = null;
+        if (dipStock !== null) {
+            variation = round2(dipStock - closingStock);
+            cumVariation = round2(cumVariation + variation);
+            cumVariationStarted = true;
+        }
+        rows.push({ date, opening, receipt, totalStock, salesByMeter, pumpTest, netSales, cumSales, closingStock, dipStock, variation, cumVariation: cumVariationStarted ? cumVariation : null });
+    }
+    return rows;
+}
+function DSRReport({ config, msLog, dieselLog, dsrData, persistDsrData }) {
+    var _a;
+    const tanks = config.tanks || [];
+    const [tankId, setTankId] = useState(((_a = tanks[0]) === null || _a === void 0 ? void 0 : _a.id) || '');
+    const [month, setMonth] = useState(monthKeyOf(todayStr()));
+    const tank = tanks.find((t) => t.id === tankId);
+    const rows = useMemo(() => tank ? computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, month) : [], [tank, msLog, dieselLog, dsrData, month]);
+    const setField = (date, field, value) => {
+        var _a;
+        persistDsrData(Object.assign(Object.assign({}, dsrData), { [date]: Object.assign(Object.assign({}, (dsrData[date] || {})), { [tankId]: Object.assign(Object.assign({}, (((_a = dsrData[date]) === null || _a === void 0 ? void 0 : _a[tankId]) || {})), { [field]: value }) }) }));
+    };
+    if (tanks.length === 0)
+        return React.createElement("div", { className: "card" }, React.createElement("div", { className: "empty-hint" }, "No tanks set up yet \u2014 add them in Master Data \u2192 Tanks, and group the nozzles that feed each one."));
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group" }, React.createElement("select", { className: "select-input", value: tankId, onChange: (e) => setTankId(e.target.value) }, tanks.map((t) => React.createElement("option", { key: t.id, value: t.id }, t.name))), React.createElement(MonthSelect, { value: month, onChange: setMonth })) }), React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Opening Stock", "Receipt", "Total Stock", "Sales by Meter", "Pump Test", "Net Sales", "Cumulative Sales", "Closing Stock", "Dip Stock", "Daily Variation", "Cumulative Variation"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => {
+        var _a, _b, _c, _d, _e, _f;
+        return React.createElement("tr", { key: r.date, style: r.variation !== null && Math.abs(r.variation) > 25 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", null, React.createElement(NumInput, { value: (_c = (_b = (_a = dsrData[r.date]) === null || _a === void 0 ? void 0 : _a[tankId]) === null || _b === void 0 ? void 0 : _b.receipt) !== null && _c !== void 0 ? _c : '', onChange: (v) => setField(r.date, 'receipt', v) })), React.createElement("td", { className: "mono" }, fmtNum(r.totalStock)), React.createElement("td", { className: "mono" }, fmtNum(r.salesByMeter)), React.createElement("td", { className: "mono" }, fmtNum(r.pumpTest)), React.createElement("td", { className: "mono" }, fmtNum(r.netSales)), React.createElement("td", { className: "mono" }, fmtNum(r.cumSales)), React.createElement("td", { className: "mono" }, fmtNum(r.closingStock)), React.createElement("td", null, React.createElement(NumInput, { value: (_f = (_e = (_d = dsrData[r.date]) === null || _d === void 0 ? void 0 : _d[tankId]) === null || _e === void 0 ? void 0 : _e.dipStock) !== null && _f !== void 0 ? _f : '', onChange: (v) => setField(r.date, 'dipStock', v) })), React.createElement("td", { className: "mono" }, r.variation !== null ? ((r.variation > 0 ? '+' : '') + fmtNum(r.variation)) : '\u2014'), React.createElement("td", { className: "mono" }, r.cumVariation !== null ? ((r.cumVariation > 0 ? '+' : '') + fmtNum(r.cumVariation)) : '\u2014'));
+    })))), React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Opening Stock carries from the previous day's physical Dip reading (not the computed Closing Stock) \u2014 exactly matching a statutory stock register. Rows with a variation beyond \u00b125 are highlighted."));
 }
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
 
