@@ -2111,6 +2111,27 @@ function splitLine(line, delimiter) {
         return line.split('|').map((s) => s.trim());
     return line.split(delimiter);
 }
+const MONTH_ABBR = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+function parseDateFlexible(raw) {
+    const s = String(raw).trim();
+    // Text-month formats: "01-Aug-26", "01 Aug 2026", "01/Aug/26" etc.
+    const monthMatch = s.match(/(\d{1,2})[-\/\s]+([A-Za-z]{3,})[a-z]*[-\/\s]+(\d{2,4})/);
+    if (monthMatch) {
+        const mm = MONTH_ABBR[monthMatch[2].slice(0, 3).toLowerCase()];
+        if (mm) {
+            const yy = monthMatch[3];
+            const year = yy.length === 4 ? yy : ('20' + yy.padStart(2, '0'));
+            return `${year}-${String(mm).padStart(2, '0')}-${monthMatch[1].padStart(2, '0')}`;
+        }
+    }
+    // Purely numeric formats: "01-08-2026", "2026-08-01", "01.08.26" etc.
+    const numMatch = s.match(/(\d{1,4})[-\/.](\d{1,2})[-\/.](\d{1,4})/);
+    if (numMatch) {
+        const [, a, b, c] = numMatch;
+        return a.length === 4 ? `${a}-${b.padStart(2, '0')}-${c.padStart(2, '0')}` : `${c.length === 4 ? c : '20' + c.padStart(2, '0')}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`;
+    }
+    return null;
+}
 function parseTransactionLine(line, cfg) {
     if (cfg.keyword && !line.toUpperCase().includes(cfg.keyword.toUpperCase()))
         return { ok: false, reason: `Keyword "${cfg.keyword}" not found \u2014 line skipped.` };
@@ -2124,12 +2145,9 @@ function parseTransactionLine(line, cfg) {
     const amount = parseFloat(amtClean);
     if (isNaN(amount))
         return { ok: false, reason: `Amount "${amtRaw}" isn't a recognizable number \u2014 check the column or a stray symbol/comma.` };
-    // Accept dash, slash, or dot as date separators, with 1\u20134 digit day/month/year groups, ignoring any trailing time
-    const dm = String(dateRaw).trim().match(/(\d{1,4})[-\/.](\d{1,2})[-\/.](\d{1,4})/);
-    if (!dm)
+    const dateNorm = parseDateFlexible(dateRaw);
+    if (!dateNorm)
         return { ok: false, reason: `Date "${dateRaw}" doesn't match a recognizable date format \u2014 check the column.` };
-    const [, a, b, c] = dm;
-    const dateNorm = a.length === 4 ? `${a}-${b.padStart(2, '0')}-${c.padStart(2, '0')}` : `${c.length === 4 ? c : '20' + c.padStart(2, '0')}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`;
     return { ok: true, date: dateNorm, amount: round2(amount) };
 }
 function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
