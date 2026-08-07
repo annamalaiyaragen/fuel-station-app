@@ -2111,6 +2111,27 @@ function splitLine(line, delimiter) {
         return line.split('|').map((s) => s.trim());
     return line.split(delimiter);
 }
+function parseTransactionLine(line, cfg) {
+    if (cfg.keyword && !line.toUpperCase().includes(cfg.keyword.toUpperCase()))
+        return { ok: false, reason: `Keyword "${cfg.keyword}" not found \u2014 line skipped.` };
+    const parts = splitLine(line, cfg.delimiter);
+    const dateRaw = parts[(Number(cfg.dateCol) || 1) - 1];
+    const amtRaw = parts[(Number(cfg.amountCol) || 1) - 1];
+    if (dateRaw === undefined || amtRaw === undefined)
+        return { ok: false, reason: "Column not found \u2014 check delimiter/column number." };
+    // Strip thousands separators (commas, incl. Indian lakh/crore grouping) and any currency symbols/whitespace before parsing
+    const amtClean = String(amtRaw).replace(/,/g, '').replace(/[^\d.\-]/g, '');
+    const amount = parseFloat(amtClean);
+    if (isNaN(amount))
+        return { ok: false, reason: `Amount "${amtRaw}" isn't a recognizable number \u2014 check the column or a stray symbol/comma.` };
+    // Accept dash, slash, or dot as date separators, with 1\u20134 digit day/month/year groups, ignoring any trailing time
+    const dm = String(dateRaw).trim().match(/(\d{1,4})[-\/.](\d{1,2})[-\/.](\d{1,4})/);
+    if (!dm)
+        return { ok: false, reason: `Date "${dateRaw}" doesn't match a recognizable date format \u2014 check the column.` };
+    const [, a, b, c] = dm;
+    const dateNorm = a.length === 4 ? `${a}-${b.padStart(2, '0')}-${c.padStart(2, '0')}` : `${c.length === 4 ? c : '20' + c.padStart(2, '0')}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`;
+    return { ok: true, date: dateNorm, amount: round2(amount) };
+}
 function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
     const out = [];
     if (type === 'deposit') {
@@ -2150,25 +2171,12 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
         let added = 0, skipped = 0;
         const entries = [...st.entries];
         lines.forEach((line) => {
-            if (cfg.keyword && !line.toUpperCase().includes(cfg.keyword.toUpperCase())) {
+            const result = parseTransactionLine(line, cfg);
+            if (!result.ok) {
                 skipped += 1;
                 return;
             }
-            const parts = splitLine(line, cfg.delimiter);
-            const dateRaw = parts[(Number(cfg.dateCol) || 1) - 1];
-            const amtRaw = parts[(Number(cfg.amountCol) || 1) - 1];
-            const amount = parseFloat(amtRaw);
-            if (dateRaw === undefined || isNaN(amount)) {
-                skipped += 1;
-                return;
-            }
-            const dm = dateRaw.match(/(\d{2,4})[-\/](\d{2})[-\/](\d{2,4})/);
-            let dateNorm = dateRaw;
-            if (dm) {
-                const [, a, b, c] = dm;
-                dateNorm = a.length === 4 ? `${a}-${b}-${c.padStart(2, '0')}` : `${c.length === 4 ? c : '20' + c}-${b}-${a.padStart(2, '0')}`;
-            }
-            entries.push({ id: uid('k'), date: dateNorm, amount: round2(amount), consumed: false });
+            entries.push({ id: uid('k'), date: result.date, amount: result.amount, consumed: false });
             added += 1;
         });
         setParseMsg(`Parsed ${added} entr${added === 1 ? 'y' : 'ies'}` + (skipped ? `, ${skipped} line(s) skipped` : '.'));
@@ -2228,20 +2236,16 @@ function BankSettingsPane({ config, persistConfig }) {
     const dirty = JSON.stringify(local) !== JSON.stringify(config.bankSettings);
     const save = () => persistConfig(Object.assign(Object.assign({}, config), { bankSettings: local }));
     const [testLine, setTestLine] = useState({});
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save settings") }), React.createElement("div", { className: "tab-switch" }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("button", { key: b, className: bankTab === b ? 'active' : '', onClick: () => setBankTab(b) }, b))), BANK_TXN_TYPES.map((t) => {
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save settings") }), dirty && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)', marginBottom: 12 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "You have unsaved changes. The Test parse preview below reflects them, but the Reconcile page will keep using the last saved settings until you click \"Save settings\" above.")), React.createElement("div", { className: "tab-switch" }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("button", { key: b, className: bankTab === b ? 'active' : '', onClick: () => setBankTab(b) }, b))), BANK_TXN_TYPES.map((t) => {
         const cfg = local[bankTab][t.key];
         const tkey = bankTab + '_' + t.key;
         const tl = testLine[tkey] || '';
         let preview = null;
         if (tl.trim()) {
-            const keywordOk = !cfg.keyword || tl.toUpperCase().includes(cfg.keyword.toUpperCase());
-            const parts = splitLine(tl, cfg.delimiter);
-            if (!keywordOk)
-                preview = React.createElement("span", { style: { color: 'var(--red)' } }, `Keyword "${cfg.keyword}" not found \u2014 would be skipped.`);
-            else if (parts[(Number(cfg.dateCol) || 1) - 1] === undefined || parts[(Number(cfg.amountCol) || 1) - 1] === undefined)
-                preview = React.createElement("span", { style: { color: 'var(--red)' } }, "Column not found \u2014 check delimiter/column number.");
-            else
-                preview = React.createElement("span", { style: { color: 'var(--green)' } }, `Parsed \u2014 date: ${parts[(Number(cfg.dateCol) || 1) - 1]}, amount: ${parts[(Number(cfg.amountCol) || 1) - 1]}`);
+            const result = parseTransactionLine(tl, cfg);
+            preview = result.ok
+                ? React.createElement("span", { style: { color: 'var(--green)' } }, `Parsed \u2014 date: ${result.date}, amount: ${fmt(result.amount)}`)
+                : React.createElement("span", { style: { color: 'var(--red)' } }, result.reason);
         }
         return React.createElement("div", { key: t.key, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, t.label), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Delimiter" }, React.createElement("select", { className: "select-input", value: cfg.delimiter, onChange: (e) => upd(bankTab, t.key, 'delimiter', e.target.value) }, React.createElement("option", { value: "tab" }, "Tab"), React.createElement("option", { value: "comma" }, "Comma"), React.createElement("option", { value: "pipe" }, "Pipe |"))), React.createElement(Field, { label: "Date column #" }, React.createElement(NumInput, { value: cfg.dateCol, onChange: (v) => upd(bankTab, t.key, 'dateCol', v) })), React.createElement(Field, { label: "Amount column #" }, React.createElement(NumInput, { value: cfg.amountCol, onChange: (v) => upd(bankTab, t.key, 'amountCol', v) })), React.createElement(Field, { label: "Keyword filter" }, React.createElement("input", { className: "text-input", value: cfg.keyword, onChange: (e) => upd(bankTab, t.key, 'keyword', e.target.value) }))), React.createElement(Field, { label: "Test parse \u2014 paste a sample line" }, React.createElement("input", { className: "text-input", style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: tl, onChange: (e) => setTestLine(Object.assign(Object.assign({}, testLine), { [tkey]: e.target.value })) })), preview && React.createElement("div", { style: { fontSize: 13 } }, preview));
     }));
