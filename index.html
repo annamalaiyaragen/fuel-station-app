@@ -443,6 +443,44 @@ function isDateLocked(dateStr, config) {
         return false;
     return dateStr < yesterdayStr();
 }
+function oilPktSalesForDate(msLog, date) {
+    let oil = 0, pktoil = 0;
+    msLog.filter((r) => r.date === date).forEach((r) => {
+        (r.lineItems || []).forEach((li) => {
+            if (li.productId === 'oil')
+                oil += (li.diff || 0) - (li.testing || 0);
+            if (li.productId === 'pktoil')
+                pktoil += (li.diff || 0) - (li.testing || 0);
+        });
+    });
+    return { oil: round2(oil), pktoil: round2(pktoil) };
+}
+// Fully derived: walks every day's actual entries (receipts, sales, barrel transfers, drift corrections)
+// from the start rather than trusting a frozen "closing balance" snapshot. This means correcting any
+// past day's inputs automatically flows through to every later day the next time it's viewed \u2014
+// no need to revisit and resubmit each day in between.
+function computeOilChainUpTo(config, msLog, dieselLog, dayClosing, targetDate) {
+    const oilLube = config.lubes.find((l) => l.id === 'l_oil');
+    const pktLube = config.lubes.find((l) => l.id === 'l_pktoil');
+    let displayOil = Number(oilLube === null || oilLube === void 0 ? void 0 : oilLube.openingBalance) || 0;
+    let displayPkt = Number(pktLube === null || pktLube === void 0 ? void 0 : pktLube.openingBalance) || 0;
+    let godownOil = 0;
+    const dates = [...new Set([...Object.keys(dayClosing), ...msLog.map((r) => r.date), ...dieselLog.map((r) => r.date)])].filter((d) => d < targetDate).sort();
+    dates.forEach((d) => {
+        var _a, _b, _c, _d, _e;
+        const dc = dayClosing[d] || {};
+        const sales = oilPktSalesForDate(msLog, d);
+        const oilReceipt = Number((_a = dc.msLubeReceipts) === null || _a === void 0 ? void 0 : _a.oil) || 0;
+        const pktReceipt = Number((_b = dc.msLubeReceipts) === null || _b === void 0 ? void 0 : _b.pktoil) || 0;
+        const dlog = dieselLog.find((r) => r.date === d);
+        const barrelTransfer = ((_c = dlog === null || dlog === void 0 ? void 0 : dlog.msGodownTransfers) === null || _c === void 0 ? void 0 : _c.l_oil) || 0;
+        const godownAdj = Number((_e = (_d = dc.msLubeGodownAdjustment) === null || _d === void 0 ? void 0 : _d.oil) === null || _e === void 0 ? void 0 : _e.amount) || 0;
+        displayOil += oilReceipt - sales.oil;
+        displayPkt += pktReceipt - sales.pktoil;
+        godownOil += barrelTransfer - oilReceipt + godownAdj;
+    });
+    return { displayOil: round2(displayOil), displayPkt: round2(displayPkt), godownOil: round2(godownOil) };
+}
 /* ---------- storage keys ---------- */
 const K = {
     CONFIG: 'fs_config', MS_READINGS: 'fs_ms_readings', MS_DRAFTS: 'fs_ms_drafts', MS_LOG: 'fs_ms_log',
@@ -1289,7 +1327,7 @@ function computeDieselFinance(config, dieselData, dateStr, rec, msLog) {
         totalDieselVolume, dieselTesting, dieselRate, dieselShiftCount, dieselPointSegments, msCashDepositedTotal, creditRecovery,
         finalCash: round2(finalCash), expensesTotal, creditSales, dieselCashTotal: round2(finalCash), dieselDenomVal };
 }
-function DieselDaily({ config, persistConfig, dieselData, persistDieselData, dieselLog, persistDieselLog, msLog, showToast }) {
+function DieselDaily({ config, persistConfig, dieselData, persistDieselData, dieselLog, persistDieselLog, msLog, dayClosing, showToast }) {
     var _a, _b, _c, _d;
     const [entryDate, setEntryDate] = useState(yesterdayStr());
     const [suggestFor, setSuggestFor] = useState(null);
@@ -1297,6 +1335,15 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
     const [barrelModal, setBarrelModal] = useState(null);
     const rec = dieselData[entryDate] || emptyDieselRecord();
     const fin = useMemo(() => computeDieselFinance(config, dieselData, entryDate, rec, msLog), [config, dieselData, entryDate, rec, msLog]);
+    const currentGodownBalance = useMemo(() => {
+        var _a, _b, _c, _d;
+        const chain = computeOilChainUpTo(config, msLog, dieselLog, dayClosing || {}, entryDate);
+        const todaysTransfer = ((_a = rec.msGodownTransfers) === null || _a === void 0 ? void 0 : _a.l_oil) || 0;
+        const dc = (dayClosing || {})[entryDate] || {};
+        const todaysReceipt = Number((_b = dc.msLubeReceipts) === null || _b === void 0 ? void 0 : _b.oil) || 0;
+        const todaysAdjustment = Number((_d = (_c = dc.msLubeGodownAdjustment) === null || _c === void 0 ? void 0 : _c.oil) === null || _d === void 0 ? void 0 : _d.amount) || 0;
+        return round2(chain.godownOil + todaysTransfer - todaysReceipt + todaysAdjustment);
+    }, [config, msLog, dieselLog, dayClosing, entryDate, rec.msGodownTransfers]);
     const updateRec = (patch) => persistDieselData(Object.assign(Object.assign({}, dieselData), { [entryDate]: Object.assign(Object.assign({}, rec), patch) }));
     const setPointClosing = (pointId, value, idx) => {
         var _a;
@@ -1407,20 +1454,35 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         return React.createElement("tr", { key: l.id }, React.createElement("td", null, l.name, receiptToday && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(entry.receipt)} received @ ${fmt((_b = entry.batchInvoicePrice) !== null && _b !== void 0 ? _b : l.invoicePrice)}`), line.replenished > 0 && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(line.replenished)} restocked from godown`), l.feedsMsLubeId && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 }, onClick: () => setBarrelModal({ lubeId: l.id }) }, "Barrel used"))), React.createElement("td", { className: "mono" }, fmtNum(line.closingGodown)), React.createElement("td", { className: "mono" }, fmtNum(line.opening), " ", React.createElement("span", { style: { color: 'var(--text-muted)', fontSize: 11 } }, `(base @ ${fmt(l.mrp || l.invoicePrice)})`)), React.createElement("td", { style: { fontSize: 12, color: 'var(--text-secondary)' } }, batchSummary), React.createElement("td", null, React.createElement(NumInput, { value: (_c = entry.saleQty) !== null && _c !== void 0 ? _c : '', onChange: (v) => setLubeEntry(l.id, 'saleQty', v) })), React.createElement("td", { className: "mono" }, fmtNum(line.closingBalance), needsRestock && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 },
             onClick: () => setLubeEntry(l.id, 'manualReplenishCount', (Number(entry.manualReplenishCount) || 0) + 1) }, `Restock +${fmtNum(l.replenishQty)}`))), React.createElement("td", { className: "mono" }, fmt(line.priceTotal)));
     })))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Lubes grand total"), React.createElement("span", null, fmt(fin.lubeAmt)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "denom-total-row", style: { marginBottom: 10 } }, React.createElement("span", null, "Combined grand total (diesel + lubes)"), React.createElement("span", null, fmt(fin.combinedTotal))), React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cash reconciliation & shift details"), React.createElement(Pill, { tone: rec.saved ? 'green' : 'muted' }, rec.saved ? 'Saved' : 'Not saved')), React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier name", value: rec.cashier, onChange: (v) => updateRec({ cashier: v }), employees: config.employees, fieldKey: 'diesel_cashier', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy name", value: rec.pumpBoy, onChange: (v) => updateRec({ pumpBoy: v }), employees: config.employees, fieldKey: 'diesel_pumpboy', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Credit sales" }, React.createElement(NumInput, { value: rec.creditSales, onChange: (v) => updateRec({ creditSales: v }) })), React.createElement(Field, { label: "Credit recovery" }, React.createElement(NumInput, { value: rec.creditRecovery, onChange: (v) => updateRec({ creditRecovery: v }) })), React.createElement(Field, { label: "PhonePe" }, React.createElement(PhonepeButton, { detail: rec.phonepeDetail, onSave: (d) => updateRec({ phonepeDetail: d }), type: "phonepe", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "Paytm" }, React.createElement(PhonepeButton, { detail: rec.paytmDetail, onSave: (d) => updateRec({ paytmDetail: d }), type: "paytm", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "HP Pay / DTPlus" }, React.createElement(NumInput, { value: rec.hpPay, onChange: (v) => updateRec({ hpPay: v }) }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.personShiftChangeOn, onChange: (e) => updateRec({ personShiftChangeOn: e.target.checked }) }), " Shift change (person changed mid-day) \u2014 splits day pay between two people"), rec.personShiftChangeOn && React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier 2 (2nd half)", value: rec.cashier2, onChange: (v) => updateRec({ cashier2: v }), employees: config.employees, fieldKey: 'diesel_cashier2', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy 2 (2nd half)", value: rec.pumpBoy2, onChange: (v) => updateRec({ pumpBoy2: v }), employees: config.employees, fieldKey: 'diesel_pumpboy2', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Split (% to 1st person)", hint: "Default 50/50 \u2014 adjust for a half-shift vs. a different split" }, React.createElement(NumInput, { value: (_d = rec.shiftSplitPercent) !== null && _d !== void 0 ? _d : '', onChange: (v) => updateRec({ shiftSplitPercent: v }), placeholder: "50" }))), React.createElement("div", { className: "card-head" }, React.createElement("h4", null, "Expenses"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addExpense }, React.createElement(IconPlus, { size: 14 }), " Add expense")), (rec.expenses || []).map((e, idx) => React.createElement("div", { key: idx, className: "form-grid" }, React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: e.desc, onChange: (ev) => updExpense(idx, { desc: ev.target.value }) })), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: e.amount, onChange: (v) => updExpense(idx, { amount: v }) })), React.createElement("button", { className: "icon-btn", onClick: () => removeExpense(idx) }, React.createElement(IconTrash, { size: 14 })))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Expenses total"), React.createElement("span", null, fmt(fin.expensesTotal))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Credit recovery"), React.createElement("span", null, fmt(fin.creditRecovery))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Cash deposited total (from MS Daily)"), React.createElement("span", null, fmt(fin.msCashDepositedTotal))), React.createElement(DieselDenomBlock, { denom: rec.dieselDenom, onSave: (d) => updateRec({ dieselDenom: d }) }), React.createElement("div", { className: "denom-total-row", style: { background: dieselMatches === null ? 'transparent' : dieselMatches ? 'var(--green-bg)' : 'var(--red-bg)', fontWeight: 600 } }, React.createElement("span", null, "Final cash (diesel + lube + credit recovery + MS cash deposited \u2212 credit sales \u2212 expenses \u2212 PhonePe/Paytm/HP Pay)" + (dieselMatches === null ? '' : dieselMatches ? ' \u2013 matches denomination' : ` \u2013 off by ${fmt(dieselOff)}`)), React.createElement("span", null, fmt(fin.finalCash))), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: doSave }, React.createElement(IconSave, { size: 15 }), " Save"))), receiptModalOpen && React.createElement(LubeReceiptModal, { shopLubes: fin.shopLubes, onSave: applyReceipt, onClose: () => setReceiptModalOpen(false) }), barrelModal && React.createElement(BarrelUsedModal, {
-        lube: fin.shopLubes.find((l) => l.id === barrelModal.lubeId), config,
+        lube: fin.shopLubes.find((l) => l.id === barrelModal.lubeId), config, currentGodownBalance,
         onSave: (litres) => { applyBarrelUsed(barrelModal.lubeId, fin.shopLubes.find((l) => l.id === barrelModal.lubeId).feedsMsLubeId, litres); setBarrelModal(null); },
         onClose: () => setBarrelModal(null)
     })));
 }
-function BarrelUsedModal({ lube, config, onSave, onClose }) {
+function BarrelUsedModal({ lube, config, currentGodownBalance, onSave, onClose }) {
     var _a;
     const [litres, setLitres] = useState((_a = lube === null || lube === void 0 ? void 0 : lube.avgBarrelVolume) !== null && _a !== void 0 ? _a : '');
     const [submitting, setSubmitting] = useState(false);
+    const [confirmOverride, setConfirmOverride] = useState(false);
     const msLube = config.lubes.find((l) => l.id === (lube === null || lube === void 0 ? void 0 : lube.feedsMsLubeId));
-    const save = () => { if (submitting)
-        return; const v = Number(litres) || 0; if (v <= 0)
-        return; setSubmitting(true); onSave(v); };
-    return React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `Barrel used \u2013 ${(lube === null || lube === void 0 ? void 0 : lube.name) || ''}`), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `This deducts 1 unit from ${(lube === null || lube === void 0 ? void 0 : lube.name) || 'this item'}'s stock and adds the litres below to ${(msLube === null || msLube === void 0 ? void 0 : msLube.name) || 'the linked MS item'}'s godown stock. Pre-filled with your set average \u2014 adjust if you know better, or leave as an estimate and true it up later from the Godown card in Day Closing.`), React.createElement(Field, { label: "Litres in this barrel (estimate)" }, React.createElement(NumInput, { value: litres, onChange: setLitres, placeholder: "e.g. 213", disabled: submitting })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: onClose, disabled: submitting }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save, disabled: submitting }, submitting ? "Adding\u2026" : "Confirm"))));
+    const stockFull = (currentGodownBalance || 0) > 100;
+    const needsOverride = stockFull && !confirmOverride;
+    const save = () => {
+        if (submitting)
+            return;
+        const v = Number(litres) || 0;
+        if (v <= 0)
+            return;
+        if (needsOverride) {
+            setConfirmOverride(true);
+            return;
+        }
+        setSubmitting(true);
+        onSave(v);
+    };
+    return React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `Barrel used \u2013 ${(lube === null || lube === void 0 ? void 0 : lube.name) || ''}`), needsOverride
+        ? React.createElement("div", { className: "confirm-bar", style: { background: 'var(--amber-dim)', color: 'var(--amber)' } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, `2T Oil godown still shows ${fmtNum(currentGodownBalance)}L \u2014 are you sure you want to open a new barrel?`))
+        : React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `This deducts 1 unit from ${(lube === null || lube === void 0 ? void 0 : lube.name) || 'this item'}'s stock and adds the litres below to ${(msLube === null || msLube === void 0 ? void 0 : msLube.name) || 'the linked MS item'}'s godown stock. Pre-filled with your set average \u2014 adjust if you know better, or leave as an estimate and true it up later from the Godown card in Day Closing.`), React.createElement(Field, { label: "Litres in this barrel (estimate)" }, React.createElement(NumInput, { value: litres, onChange: setLitres, placeholder: "e.g. 213", disabled: submitting })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: onClose, disabled: submitting }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save, disabled: submitting }, submitting ? "Adding\u2026" : needsOverride ? "Yes, open new barrel" : "Confirm"))));
 }
 function LubeReceiptModal({ shopLubes, onSave, onClose }) {
     var _a;
@@ -1526,44 +1588,6 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
         var _a, _b;
         return React.createElement(Field, { key: p.id, label: p.label }, React.createElement(NumInput, { value: (_b = (_a = local.dieselPointOpeningReadings) === null || _a === void 0 ? void 0 : _a[p.id]) !== null && _b !== void 0 ? _b : '', onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { dieselPointOpeningReadings: Object.assign(Object.assign({}, c.dieselPointOpeningReadings), { [p.id]: v }) }))) }));
     }))));
-}
-function oilPktSalesForDate(msLog, date) {
-    let oil = 0, pktoil = 0;
-    msLog.filter((r) => r.date === date).forEach((r) => {
-        (r.lineItems || []).forEach((li) => {
-            if (li.productId === 'oil')
-                oil += (li.diff || 0) - (li.testing || 0);
-            if (li.productId === 'pktoil')
-                pktoil += (li.diff || 0) - (li.testing || 0);
-        });
-    });
-    return { oil: round2(oil), pktoil: round2(pktoil) };
-}
-// Fully derived: walks every day's actual entries (receipts, sales, barrel transfers, drift corrections)
-// from the start rather than trusting a frozen "closing balance" snapshot. This means correcting any
-// past day's inputs automatically flows through to every later day the next time it's viewed \u2014
-// no need to revisit and resubmit each day in between.
-function computeOilChainUpTo(config, msLog, dieselLog, dayClosing, targetDate) {
-    const oilLube = config.lubes.find((l) => l.id === 'l_oil');
-    const pktLube = config.lubes.find((l) => l.id === 'l_pktoil');
-    let displayOil = Number(oilLube === null || oilLube === void 0 ? void 0 : oilLube.openingBalance) || 0;
-    let displayPkt = Number(pktLube === null || pktLube === void 0 ? void 0 : pktLube.openingBalance) || 0;
-    let godownOil = 0;
-    const dates = [...new Set([...Object.keys(dayClosing), ...msLog.map((r) => r.date), ...dieselLog.map((r) => r.date)])].filter((d) => d < targetDate).sort();
-    dates.forEach((d) => {
-        var _a, _b, _c, _d, _e;
-        const dc = dayClosing[d] || {};
-        const sales = oilPktSalesForDate(msLog, d);
-        const oilReceipt = Number((_a = dc.msLubeReceipts) === null || _a === void 0 ? void 0 : _a.oil) || 0;
-        const pktReceipt = Number((_b = dc.msLubeReceipts) === null || _b === void 0 ? void 0 : _b.pktoil) || 0;
-        const dlog = dieselLog.find((r) => r.date === d);
-        const barrelTransfer = ((_c = dlog === null || dlog === void 0 ? void 0 : dlog.msGodownTransfers) === null || _c === void 0 ? void 0 : _c.l_oil) || 0;
-        const godownAdj = Number((_e = (_d = dc.msLubeGodownAdjustment) === null || _d === void 0 ? void 0 : _d.oil) === null || _e === void 0 ? void 0 : _e.amount) || 0;
-        displayOil += oilReceipt - sales.oil;
-        displayPkt += pktReceipt - sales.pktoil;
-        godownOil += barrelTransfer - oilReceipt + godownAdj;
-    });
-    return { displayOil: round2(displayOil), displayPkt: round2(displayPkt), godownOil: round2(godownOil) };
 }
 function aggregateMsForDate(config, msReadings, msLog, date) {
     const dayRecords = msLog.filter((r) => r.date === date);
