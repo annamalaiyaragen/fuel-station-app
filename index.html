@@ -2019,13 +2019,13 @@ function SalaryWorkingReport({ config, msLog, dieselLog, salaryRuns }) {
     const runData = salaryRuns[month] || { overrides: {} };
     const names = [...new Set([...Object.keys(credits), ...config.employees.filter((e) => e.airOn).map((e) => e.name)])];
     const rows = names.map((n) => {
-        var _a, _b;
+        var _a, _b, _c, _d, _e, _f;
         const emp = config.employees.find((e) => e.name === n);
         const c = credits[n] || { attd: 0, dieselDays: 0, pumpBoyDays: 0, msVolume: 0, powerVolume: 0, msPowerComm: 0, dieselDayPay: 0, dieselSplitShare: 0 };
         const totalMS = round2((c.msVolume || 0) + (c.powerVolume || 0));
         const isAir = !!(emp && emp.airOn);
-        const airDays = isAir ? (Number((_b = (_a = runData.overrides) === null || _a === void 0 ? void 0 : _a[n]) === null || _b === void 0 ? void 0 : _b.airAttendance) || 0) : 0;
-        const totalSalary = isAir ? round2(airDays * (Number(emp.airRate) || 0)) : round2((c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
+        const airDays = isAir ? (Number(((_b = (_a = runData.overrides) === null || _a === void 0 ? void 0 : _a[n]) === null || _b === void 0 ? void 0 : _b.attendance) !== undefined ? (_d = (_c = runData.overrides) === null || _c === void 0 ? void 0 : _c[n]) === null || _d === void 0 ? void 0 : _d.attendance : (_f = (_e = runData.overrides) === null || _e === void 0 ? void 0 : _e[n]) === null || _f === void 0 ? void 0 : _f.airAttendance) || 0) : 0;
+        const totalSalary = isAir ? round2(airDays * (Number(emp.airRate) || 0) + (c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0)) : round2((c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
         return { name: n, attd: c.attd || 0, dieselDays: c.dieselDays || 0, pumpBoyDays: c.pumpBoyDays || 0, msVolume: c.msVolume || 0, powerVolume: c.powerVolume || 0, totalMS, isAir, airDays, totalSalary };
     });
     const grand = rows.reduce((acc, r) => { acc.attd += r.attd; acc.dieselDays += r.dieselDays; acc.pumpBoyDays += r.pumpBoyDays; acc.msVolume += r.msVolume; acc.powerVolume += r.powerVolume; acc.totalMS += r.totalMS; acc.airDays += r.airDays; acc.totalSalary += r.totalSalary; return acc; }, { attd: 0, dieselDays: 0, pumpBoyDays: 0, msVolume: 0, powerVolume: 0, totalMS: 0, airDays: 0, totalSalary: 0 });
@@ -2036,16 +2036,32 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
     const credits = useMemo(() => computeSalaryWorking(config, msLog, dieselLog, month), [config, msLog, dieselLog, month]);
     const runData = salaryRuns[month] || { overrides: {} };
     const updOverride = (name, field, value) => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { overrides: Object.assign(Object.assign({}, runData.overrides), { [name]: Object.assign(Object.assign({}, (runData.overrides[name] || {})), { [field]: value }) }) }) }));
+    const [y, m] = month.split('-');
+    const daysInMonth = new Date(Number(y), Number(m), 0).getDate();
     const names = [...new Set([...Object.keys(credits), ...config.employees.map((e) => e.name)])];
     const rows = names.map((name) => {
         var _a;
         const emp = config.employees.find((e) => e.name === name);
-        const c = credits[name] || { msPowerComm: 0, volume: 0, dieselDayPay: 0, dieselSplitShare: 0 };
+        const c = credits[name] || { msPowerComm: 0, volume: 0, dieselDayPay: 0, dieselSplitShare: 0, attd: 0 };
         const ov = runData.overrides[name] || {};
-        const airAttendance = (_a = ov.airAttendance) !== null && _a !== void 0 ? _a : '';
-        const salary = emp && emp.isAdmin ? (Number(emp.salary) || 0)
-            : emp && emp.airOn ? round2((Number(airAttendance) || 0) * (Number(emp.airRate) || 0))
-                : round2(c.msPowerComm + c.dieselDayPay + c.dieselSplitShare);
+        // "attendance" replaces the old air-only field \u2014 legacy airAttendance still read for backward compatibility
+        let attendance, attendanceEditable, salary;
+        if (emp && emp.airOn) {
+            attendance = ov.attendance !== undefined ? ov.attendance : ((_a = ov.airAttendance) !== null && _a !== void 0 ? _a : '');
+            attendanceEditable = true;
+            const airPay = (Number(attendance) || 0) * (Number(emp.airRate) || 0);
+            salary = round2(airPay + (c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
+        }
+        else if (emp && emp.isAdmin) {
+            attendance = ov.attendance !== undefined ? ov.attendance : daysInMonth;
+            attendanceEditable = true;
+            salary = round2(((Number(attendance) || 0) / daysInMonth) * (Number(emp.salary) || 0));
+        }
+        else {
+            attendance = c.attd || 0;
+            attendanceEditable = false;
+            salary = round2(c.msPowerComm + c.dieselDayPay + c.dieselSplitShare);
+        }
         const defaultPf = emp && emp.pfOn ? (Number(emp.pf) || 0) : 0;
         const defaultBonus = (emp && emp.bonusOn ? (Number(emp.bonus) || 0) : 0) + (c.volume > BONUS_VOLUME_THRESHOLD ? BONUS_VOLUME_AMOUNT : 0);
         const defaultAdvance = advanceTier(advance.balances[name] || 0);
@@ -2055,7 +2071,7 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         const adv = quit ? fullBalance : (ov.advance !== undefined ? ov.advance : defaultAdvance);
         const bonus = ov.bonus !== undefined ? ov.bonus : defaultBonus;
         const net = salary - (Number(pf) || 0) - (Number(adv) || 0) + (Number(bonus) || 0);
-        return { name, salary, pf, adv, bonus, net, defaultPf, defaultAdvance, defaultBonus, quit, fullBalance, isAir: !!(emp && emp.airOn), airAttendance };
+        return { name, salary, pf, adv, bonus, net, defaultPf, defaultAdvance, defaultBonus, quit, fullBalance, attendance, attendanceEditable };
     });
     const grandNet = rows.reduce((s, r) => s + r.net, 0);
     const submitted = runData.submitted;
@@ -2085,7 +2101,9 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { submitted: null, confirmReRun: false }) }));
         setTimeout(doSubmit, 0);
     };
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-primary", onClick: submit }, submitted ? 'Submitted \u2013 re-run' : 'Submit salary statement'), React.createElement(Pill, { tone: submitted ? 'green' : 'muted' }, submitted ? 'Submitted' : 'Not submitted'), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), runData.confirmReRun && React.createElement(ConfirmBar, { message: `A salary statement for ${monthLabel(month)} was already submitted. Re-running will reverse those advance recoveries first, then reapply with the new figures.`, confirmLabel: "Reverse and re-run", onConfirm: reverseAndReRun, onCancel: () => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: false }) })) }), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Air attendance (days)", "Salary", "PF", "Advance", "Quit (deduct all)", "Bonus", "Net"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", null, r.isAir ? React.createElement(NumInput, { value: r.airAttendance, onChange: (v) => updOverride(r.name, 'airAttendance', v) }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", { className: "mono" }, fmt(r.salary)), React.createElement("td", null, React.createElement(NumInput, { value: r.pf, onChange: (v) => updOverride(r.name, 'pf', v) })), React.createElement("td", null, React.createElement(NumInput, { value: r.adv, onChange: (v) => updOverride(r.name, 'advance', v), disabled: r.quit })), React.createElement("td", { className: "print-hide" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: r.quit,
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-primary", onClick: submit }, submitted ? 'Submitted \u2013 re-run' : 'Submit salary statement'), React.createElement(Pill, { tone: submitted ? 'green' : 'muted' }, submitted ? 'Submitted' : 'Not submitted'), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), runData.confirmReRun && React.createElement(ConfirmBar, { message: `A salary statement for ${monthLabel(month)} was already submitted. Re-running will reverse those advance recoveries first, then reapply with the new figures.`, confirmLabel: "Reverse and re-run", onConfirm: reverseAndReRun, onCancel: () => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: false }) })) }), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attendance (days)", "Salary", "PF", "Advance", "Quit (deduct all)", "Bonus", "Net"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: r.attendanceEditable ? '' : 'mono' }, r.attendanceEditable
+        ? React.createElement(NumInput, { value: r.attendance, onChange: (v) => updOverride(r.name, 'attendance', v) })
+        : fmtNum(r.attendance)), React.createElement("td", { className: "mono" }, fmt(r.salary)), React.createElement("td", null, React.createElement(NumInput, { value: r.pf, onChange: (v) => updOverride(r.name, 'pf', v) })), React.createElement("td", null, React.createElement(NumInput, { value: r.adv, onChange: (v) => updOverride(r.name, 'advance', v), disabled: r.quit })), React.createElement("td", { className: "print-hide" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: r.quit,
         onChange: (e) => updOverride(r.name, 'quit', e.target.checked) }), ` ${fmt(r.fullBalance)} owed`)), React.createElement("td", null, React.createElement(NumInput, { value: r.bonus, onChange: (v) => updOverride(r.name, 'bonus', v) })), React.createElement("td", { className: "mono" }, fmt(r.net))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 7 }, React.createElement("b", null, "Grand total net")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grandNet)))))));
 }
 function fmtLogDate(d) {
