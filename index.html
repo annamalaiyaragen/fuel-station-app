@@ -1397,7 +1397,7 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         const record = { id: recordId, date: entryDate, cashier: rec.cashier.trim(), pumpBoy: rec.pumpBoy || '',
             personShiftChangeOn: !!rec.personShiftChangeOn, cashier2: rec.cashier2 || '', pumpBoy2: rec.pumpBoy2 || '', shiftSplitPercent: rec.shiftSplitPercent,
             dieselShiftBreakOn: !!rec.dieselShiftBreakOn,
-            dieselAmt: fin.dieselAmt, lubeAmt: fin.lubeAmt, combinedTotal: fin.combinedTotal, dieselTesting: fin.dieselTesting,
+            dieselAmt: fin.dieselAmt, lubeAmt: fin.lubeAmt, combinedTotal: fin.combinedTotal, dieselTesting: fin.dieselTesting, totalDieselVolume: fin.totalDieselVolume,
             phonepe: fin.phonepe, paytm: fin.paytm, hpPay: fin.hpPay, finalCash: fin.finalCash, msCashDepositedTotal: fin.msCashDepositedTotal,
             creditSales: fin.creditSales, creditRecovery: fin.creditRecovery, expenses: rec.expenses || [], expensesTotal: fin.expensesTotal,
             dieselDenom: rec.dieselDenom, dieselDenomVal: fin.dieselDenomVal, dieselCashTotal: fin.dieselCashTotal,
@@ -2226,32 +2226,72 @@ function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     };
     return React.createElement("div", { className: "card" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Current advance total", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, names.map((n) => React.createElement("tr", { key: n }, React.createElement("td", null, n), React.createElement("td", { className: "mono" }, fmt(advance.balances[n])), React.createElement("td", null, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => openModal(n, 'Advance') }, "Advance"), React.createElement("button", { className: "btn btn-secondary btn-sm", style: { marginLeft: 6 }, onClick: () => openModal(n, 'Recovery') }, "Recovery")))))), React.createElement("div", { className: "card-head", style: { marginTop: 16 } }, React.createElement("h3", null, "Transaction log")), React.createElement("div", null, (advance.log || []).slice(0, 30).map((e, i) => React.createElement("div", { key: i, className: "denom-total-row" }, React.createElement("span", null, `${fmtLogDate(e.date)} \u2014 ${e.name} \u2013 ${e.type}${e.monthKey || e.dayClosingCashDiffFor ? ' (auto)' : ''}: ${e.desc || ''}`), React.createElement("span", null, fmt(e.amount))))), modal && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `${modal.type} \u2013 ${modal.name}`), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: modal.amount, onChange: (v) => setModal(Object.assign(Object.assign({}, modal), { amount: v })) })), React.createElement(Field, { label: "Date" }, React.createElement("input", { type: "date", className: "date-input", value: modal.date, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { date: e.target.value })) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: modal.desc, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { desc: e.target.value })) })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save }, "Save")))));
 }
-function computeSalesDataForMonth(config, msLog, dieselLog, monthKey) {
+function computeDieselVolumeForDate(config, dieselData, date) {
+    const rec = dieselData[date];
+    if (!rec)
+        return null;
+    const shiftCount = rec.dieselShiftBreakOn ? 2 : 1;
+    let total = 0;
+    let anyReading = false;
+    config.dieselPoints.forEach((p) => {
+        var _a;
+        const prev = getPrevDieselPoint(config, dieselData, date, p.id);
+        let running = prev ? prev.value : null;
+        const rawCp = (_a = rec.pointsClosing) === null || _a === void 0 ? void 0 : _a[p.id];
+        const checkpoints = shiftCount > 1 ? (Array.isArray(rawCp) ? rawCp : []) : [rawCp];
+        for (let i = 0; i < shiftCount; i++) {
+            const cp = checkpoints[i];
+            if (cp === undefined || cp === '' || running === null)
+                continue;
+            total += round2(Number(cp) - running);
+            running = Number(cp);
+            anyReading = true;
+        }
+    });
+    if (!anyReading)
+        return null;
+    const testing = rec.dieselTesting !== undefined ? (Number(rec.dieselTesting) || 0) : ((config.dieselPoints.length || 0) * 5);
+    return round2(total - testing);
+}
+function computeSalesDataForMonth(config, msLog, dieselLog, dieselData, monthKey) {
     const dates = [...new Set([...msLog.map((r) => r.date), ...dieselLog.map((r) => r.date)])].filter((d) => monthKeyOf(d) === monthKey).sort();
     return dates.map((date) => {
         const msRecs = msLog.filter((r) => r.date === date);
         const dieselRec = dieselLog.find((r) => r.date === date);
-        let ms = 0, pwr = 0, msOil = 0;
+        let msLtr = 0, ms = 0, pwrLtr = 0, pwr = 0, oilQty = 0, pktQty = 0, msOil = 0;
         msRecs.forEach((r) => (r.lineItems || []).forEach((li) => {
-            if (li.productId === 'p_ms')
+            if (li.productId === 'p_ms') {
+                msLtr += (li.diff || 0) - (li.testing || 0);
                 ms += li.amount || 0;
-            else if (li.productId === 'p_power')
+            }
+            else if (li.productId === 'p_power') {
+                pwrLtr += (li.diff || 0) - (li.testing || 0);
                 pwr += li.amount || 0;
-            else if (li.productId === 'pktoil')
+            }
+            else if (li.productId === 'oil') {
+                oilQty += li.diff || 0;
                 msOil += li.amount || 0;
+            }
+            else if (li.productId === 'pktoil') {
+                pktQty += li.diff || 0;
+                msOil += li.amount || 0;
+            }
         }));
         const hsd = dieselRec ? dieselRec.dieselAmt : 0;
         const hsdOil = dieselRec ? dieselRec.lubeAmt : 0;
+        const hsdLtr = computeDieselVolumeForDate(config, dieselData, date);
         const total = ms + pwr + hsd + msOil + hsdOil;
-        return { date, ms, pwr, hsd, msOil, hsdOil, total };
+        return { date, oilQty: round2(oilQty), pktQty: round2(pktQty), msOil: round2(msOil), msLtr: round2(msLtr), ms: round2(ms), pwrLtr: round2(pwrLtr), pwr: round2(pwr), hsdOil: round2(hsdOil), hsdLtr, hsd: round2(hsd), total: round2(total) };
     });
 }
 function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
     const monthDates = Object.keys(dieselData).filter((d) => monthKeyOf(d) === monthKey).sort();
     return config.lubes.filter((l) => !l.msOnly).map((l) => {
-        var _a, _b, _c, _d, _e;
+        var _a, _b, _c, _d, _e, _f, _g, _h;
         const firstDate = monthDates[0];
-        const opening = firstDate ? getPrevLubeBalance(dieselData, firstDate, l.id, l.openingBalance || 0) : (l.openingBalance || 0);
+        const openingDisplay = firstDate ? getPrevLubeBalance(dieselData, firstDate, l.id, l.openingBalance || 0) : (l.openingBalance || 0);
+        const openingGodown = firstDate ? getPrevGodownBalance(dieselData, firstDate, l.id, l.godownStock || 0) : (l.godownStock || 0);
+        const opening = round2(openingDisplay + openingGodown);
         let purchases = 0, recordedSales = 0;
         let baseSalesQty = 0, baseSalesRevenue = 0;
         const batchSalesMap = {};
@@ -2277,8 +2317,10 @@ function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
             }
         });
         const lastDate = monthDates[monthDates.length - 1];
-        const closing = lastDate ? ((_c = (_b = (_a = dieselData[lastDate]) === null || _a === void 0 ? void 0 : _a.lubeClosingBalances) === null || _b === void 0 ? void 0 : _b[l.id]) !== null && _c !== void 0 ? _c : (opening + purchases - recordedSales)) : opening;
-        const closingBatches = lastDate ? (((_e = (_d = dieselData[lastDate]) === null || _d === void 0 ? void 0 : _d.lubeBatchesClosing) === null || _e === void 0 ? void 0 : _e[l.id]) || []) : [];
+        const closingDisplay = lastDate ? ((_c = (_b = (_a = dieselData[lastDate]) === null || _a === void 0 ? void 0 : _a.lubeClosingBalances) === null || _b === void 0 ? void 0 : _b[l.id]) !== null && _c !== void 0 ? _c : (openingDisplay + purchases - recordedSales)) : openingDisplay;
+        const closingGodown = lastDate ? ((_f = (_e = (_d = dieselData[lastDate]) === null || _d === void 0 ? void 0 : _d.godownClosingBalances) === null || _e === void 0 ? void 0 : _e[l.id]) !== null && _f !== void 0 ? _f : openingGodown) : openingGodown;
+        const closing = round2(closingDisplay + closingGodown);
+        const closingBatches = lastDate ? (((_h = (_g = dieselData[lastDate]) === null || _g === void 0 ? void 0 : _g.lubeBatchesClosing) === null || _h === void 0 ? void 0 : _h[l.id]) || []) : [];
         const expectedClosing = opening + purchases - recordedSales;
         const variance = closing - expectedClosing;
         const closingValueBase = closing * (l.invoicePrice || 0);
@@ -2301,10 +2343,10 @@ function AuditTab({ config, msLog, dieselLog, dieselData }) {
     const [sub, setSub] = useState(null);
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
     const [showVariance, setShowVariance] = useState(false);
-    const salesRows = useMemo(() => computeSalesDataForMonth(config, msLog, dieselLog, month), [config, msLog, dieselLog, month]);
+    const salesRows = useMemo(() => computeSalesDataForMonth(config, msLog, dieselLog, dieselData, month), [config, msLog, dieselLog, dieselData, month]);
     const invRows = useMemo(() => computeInventoryForMonth(config, dieselLog, dieselData, month), [config, dieselLog, dieselData, month]);
     const flaggedCount = invRows.filter((r) => r.variance !== 0).length;
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Audit", action: React.createElement("div", { className: "btn-group" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('sales'); setShowVariance(false); } }, "Run sales report"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('inventory'); setShowVariance(true); } }, "Run inventory report")) }), sub === 'sales' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Sales Data \u2014 " + monthLabel(month))), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "MS", "PWR", "HSD", "MS Oil", "HSD Oil", "Total"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, salesRows.map((r) => React.createElement("tr", { key: r.date }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmt(r.ms)), React.createElement("td", { className: "mono" }, fmt(r.pwr)), React.createElement("td", { className: "mono" }, fmt(r.hsd)), React.createElement("td", { className: "mono" }, fmt(r.msOil)), React.createElement("td", { className: "mono" }, fmt(r.hsdOil)), React.createElement("td", { className: "mono" }, fmt(r.total))))))), sub === 'inventory' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Stock variance check \u2014 " + monthLabel(month))), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Item", "Opening", "Purchases", "Recorded sales", "Expected closing", "Actual closing", "Variance", "Variance value", "Closing stock value"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, invRows.map((r) => React.createElement("tr", { key: r.name, style: r.variance !== 0 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", { className: "mono" }, fmtNum(r.purchases)), React.createElement("td", { className: "mono" }, fmtNum(r.recordedSales)), React.createElement("td", { className: "mono" }, fmtNum(r.expectedClosing)), React.createElement("td", { className: "mono" }, fmtNum(r.closing)), React.createElement("td", { className: "mono" }, (r.variance > 0 ? '+' : '') + fmtNum(r.variance)), React.createElement("td", { className: "mono" }, (r.varianceValue > 0 ? '+' : '') + fmt(r.varianceValue)), React.createElement("td", { className: "mono" }, fmt(r.closingValueTotal)))))), React.createElement("div", { className: "empty-hint" }, flaggedCount === 0 ? 'All items reconcile \u2014 no variance found.' : `${flaggedCount} item(s) flagged with a stock variance \u2014 review before downloading, or proceed if already investigated.`), invRows.some((r) => r.tiers.length > 1) && React.createElement("div", { style: { marginTop: 18 } }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Batch-wise pricing breakdown (items with more than one active price tier this month)"), invRows.filter((r) => r.tiers.length > 1).map((r) => React.createElement("div", { key: r.name, style: { marginBottom: 14 } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 500, marginBottom: 4 } }, r.name), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tier", "Qty sold", "MRP", "Sales revenue", "Invoice price", "Closing qty", "Closing value"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, r.tiers.map((t, i) => React.createElement("tr", { key: i }, React.createElement("td", null, t.label), React.createElement("td", { className: "mono" }, fmtNum(t.qty)), React.createElement("td", { className: "mono" }, fmt(t.mrp)), React.createElement("td", { className: "mono" }, fmt(t.revenue)), React.createElement("td", { className: "mono" }, fmt(t.invoicePrice)), React.createElement("td", { className: "mono" }, fmtNum(t.closingQty)), React.createElement("td", { className: "mono" }, fmt(t.closingValue))))))))), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary" }, "Download inventory report (PDF)"))));
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Audit", action: React.createElement("div", { className: "btn-group" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('sales'); setShowVariance(false); } }, "Run sales report"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('inventory'); setShowVariance(true); } }, "Run inventory report")) }), sub === 'sales' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Sales Data \u2014 " + monthLabel(month))), React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "2T oil", "60 ml", "MS Oil", "MS LTR", "MS", "PWR LTR", "PWR", "HSD Oil", "HSD LTR", "HSD", "Total"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, salesRows.map((r) => React.createElement("tr", { key: r.date }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.oilQty)), React.createElement("td", { className: "mono" }, fmtNum(r.pktQty)), React.createElement("td", { className: "mono" }, fmt(r.msOil)), React.createElement("td", { className: "mono" }, fmtNum(r.msLtr)), React.createElement("td", { className: "mono" }, fmt(r.ms)), React.createElement("td", { className: "mono" }, fmtNum(r.pwrLtr)), React.createElement("td", { className: "mono" }, fmt(r.pwr)), React.createElement("td", { className: "mono" }, fmt(r.hsdOil)), React.createElement("td", { className: "mono" }, r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.hsd)), React.createElement("td", { className: "mono" }, fmt(r.total))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.oilQty, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pktQty, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.msOil, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.ms, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.pwr, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsdOil, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsd, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.total, 0)))))))), salesRows.some((r) => r.hsdLtr === null) && React.createElement("div", { className: "empty-hint", style: { marginTop: 8 } }, "HSD LTR shows \u2014 for any date with no diesel point readings saved at all.")), sub === 'inventory' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Stock variance check \u2014 " + monthLabel(month))), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Opening and Closing are total stock on hand \u2014 Display + Godown combined."), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Item", "Opening", "Purchases", "Recorded sales", "Expected closing", "Actual closing", "Variance", "Variance value", "Closing stock value"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, invRows.map((r) => React.createElement("tr", { key: r.name, style: r.variance !== 0 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", { className: "mono" }, fmtNum(r.purchases)), React.createElement("td", { className: "mono" }, fmtNum(r.recordedSales)), React.createElement("td", { className: "mono" }, fmtNum(r.expectedClosing)), React.createElement("td", { className: "mono" }, fmtNum(r.closing)), React.createElement("td", { className: "mono" }, (r.variance > 0 ? '+' : '') + fmtNum(r.variance)), React.createElement("td", { className: "mono" }, (r.varianceValue > 0 ? '+' : '') + fmt(r.varianceValue)), React.createElement("td", { className: "mono" }, fmt(r.closingValueTotal)))))), React.createElement("div", { className: "empty-hint" }, flaggedCount === 0 ? 'All items reconcile \u2014 no variance found.' : `${flaggedCount} item(s) flagged with a stock variance \u2014 review before downloading, or proceed if already investigated.`), invRows.some((r) => r.tiers.length > 1) && React.createElement("div", { style: { marginTop: 18 } }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Batch-wise pricing breakdown (items with more than one active price tier this month)"), invRows.filter((r) => r.tiers.length > 1).map((r) => React.createElement("div", { key: r.name, style: { marginBottom: 14 } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 500, marginBottom: 4 } }, r.name), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tier", "Qty sold", "MRP", "Sales revenue", "Invoice price", "Closing qty", "Closing value"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, r.tiers.map((t, i) => React.createElement("tr", { key: i }, React.createElement("td", null, t.label), React.createElement("td", { className: "mono" }, fmtNum(t.qty)), React.createElement("td", { className: "mono" }, fmt(t.mrp)), React.createElement("td", { className: "mono" }, fmt(t.revenue)), React.createElement("td", { className: "mono" }, fmt(t.invoicePrice)), React.createElement("td", { className: "mono" }, fmtNum(t.closingQty)), React.createElement("td", { className: "mono" }, fmt(t.closingValue))))))))), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary" }, "Download inventory report (PDF)"))));
 }
 function splitLine(line, delimiter) {
     if (delimiter === 'tab')
