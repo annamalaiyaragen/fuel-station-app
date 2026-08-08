@@ -1128,14 +1128,9 @@ function MsShiftCard({ shiftIndex, shiftCount, pump, config, msLog, dieselLog, e
     }), pump.includeOil && React.createElement(Field, { label: "2T Oil (qty)" }, React.createElement(NumInput, { value: draft.oil, onChange: (v) => updateDraft({ oil: v }) })), pump.includePacketOil && React.createElement(Field, { label: "Packet Oil (qty)" }, React.createElement(NumInput, { value: draft.packetOil, onChange: (v) => updateDraft({ packetOil: v }) })), React.createElement(Field, { label: "Cash Deposited" }, React.createElement(NumInput, { value: draft.cashDeposited, onChange: (v) => updateDraft({ cashDeposited: v }) })), React.createElement(Field, { label: "PhonePe" }, React.createElement(PhonepeButton, { detail: draft.phonepeDetail, onSave: (d) => updateDraft({ phonepeDetail: d }), type: "phonepe", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "Paytm" }, React.createElement(PhonepeButton, { detail: draft.paytmDetail, onSave: (d) => updateDraft({ paytmDetail: d }), type: "paytm", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate }))), React.createElement("div", { className: "gauge-row" }, React.createElement(Gauge, { label: "Total Amount", value: fin.total, tone: "amber", size: "sm" }), React.createElement(Gauge, { label: "Final Cash", value: fin.finalCash, tone: dEntered ? (dMatches ? 'green' : 'red') : 'amber', size: "sm" })), React.createElement(DenomBlock, { denom: draft.denom, onSave: (d) => updateDraft({ denom: d }), finalCash: fin.finalCash }), confirming && React.createElement(ConfirmBar, { message: "Denomination doesn't match Final Cash. Save anyway as a mismatch?", confirmLabel: "Save as Mismatch", onConfirm: () => doSave(true), onCancel: () => setConfirming(false) }), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: () => doSave(false) }, React.createElement(IconSave, { size: 15 }), " Save")));
 }
 /* ---------- shared: name autocomplete, phonepe modal button, denomination block ---------- */
-function NameAutocomplete({ label, value, onChange, employees, fieldKey, suggestFor, setSuggestFor }) {
+function NameAutocomplete({ label, value, onChange, employees }) {
     const names = (employees || []).map((e) => e.name).filter(Boolean);
-    const isOpen = suggestFor === fieldKey;
-    const q = (value || '').trim().toLowerCase();
-    const matches = isOpen ? (q ? names.filter((n) => n.toLowerCase().includes(q)) : names) : [];
-    return React.createElement("div", { className: "field", style: { position: 'relative' } }, React.createElement("span", { className: "field-label" }, label), React.createElement("input", { className: "text-input", type: "text", autoComplete: "off", value: value || '',
-        onFocus: () => setSuggestFor(fieldKey), onBlur: () => setTimeout(() => setSuggestFor(null), 150),
-        onChange: (e) => onChange(e.target.value) }), isOpen && matches.length > 0 && React.createElement("div", { className: "suggest-box" }, matches.map((n) => React.createElement("div", { key: n, className: "suggest-row", onMouseDown: (e) => { e.preventDefault(); onChange(n); setSuggestFor(null); } }, n))));
+    return React.createElement("div", { className: "field" }, React.createElement("span", { className: "field-label" }, label), React.createElement("select", { className: "select-input", value: value || '', onChange: (e) => onChange(e.target.value) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), names.map((n) => React.createElement("option", { key: n, value: n }, n))));
 }
 function PhonepeButton({ detail, onSave, type, terminals, msLog, dieselLog, currentDate }) {
     const [open, setOpen] = useState(false);
@@ -1517,17 +1512,59 @@ function CloudBackupPanel({ configuredClientId, driveReady, driveConnected, sync
         ? React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, "Connect Google Drive to back up automatically and sync across devices."), React.createElement("button", { className: "btn btn-primary", disabled: !driveReady, onClick: connectDrive }, "Connect Google Drive"))
         : React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, lastSyncedAt ? `Last backed up ${lastSyncedAt.toLocaleString('en-IN')}.` : 'Not backed up yet.'), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-secondary", onClick: pushNow }, React.createElement(IconSave, { size: 14 }), " Backup Now"), React.createElement("button", { className: "btn btn-ghost", onClick: disconnectDrive }, "Disconnect"))));
 }
-function MasterDataGate({ config, persistConfig, showToast, dieselData, persistDieselData }) {
+function MasterDataGate(props) {
     const [unlocked, setUnlocked] = useState(false);
     if (!unlocked)
         return React.createElement("div", { className: "page" }, React.createElement("div", { style: { margin: 'auto', maxWidth: 380 } }, React.createElement(PasswordGate, { onUnlock: () => setUnlocked(true) })));
-    return React.createElement(MasterData, { config, persistConfig, showToast, dieselData, persistDieselData });
+    return React.createElement(MasterData, props);
 }
-function MasterData({ config, persistConfig, showToast, dieselData, persistDieselData }) {
+function MasterData({ config, persistConfig, showToast, dieselData, persistDieselData, advance, persistAdvance, msLog, persistMsLog, dieselLog, persistDieselLog, salaryRuns, persistSalaryRuns }) {
     const [local, setLocal] = useState(config);
     useEffect(() => { setLocal(config); }, [config]);
     const dirty = JSON.stringify(local) !== JSON.stringify(config);
-    const save = async () => { await persistConfig(local); showToast('Master data saved'); };
+    const migrateEmployeeRename = (oldName, newName) => {
+        if (!oldName || !newName || oldName === newName)
+            return;
+        if (advance.balances[oldName] !== undefined || advance.log.some((e) => e.name === oldName)) {
+            const balances = Object.assign({}, advance.balances);
+            if (balances[oldName] !== undefined) {
+                balances[newName] = round2((balances[newName] || 0) + balances[oldName]);
+                delete balances[oldName];
+            }
+            const log = advance.log.map((e) => e.name === oldName ? Object.assign(Object.assign({}, e), { name: newName }) : e);
+            persistAdvance({ balances, log });
+        }
+        if (msLog.some((r) => r.cashier === oldName)) {
+            persistMsLog(msLog.map((r) => r.cashier === oldName ? Object.assign(Object.assign({}, r), { cashier: newName }) : r));
+        }
+        if (dieselLog.some((r) => r.cashier === oldName || r.pumpBoy === oldName || r.cashier2 === oldName || r.pumpBoy2 === oldName)) {
+            persistDieselLog(dieselLog.map((r) => (Object.assign(Object.assign({}, r), { cashier: r.cashier === oldName ? newName : r.cashier, pumpBoy: r.pumpBoy === oldName ? newName : r.pumpBoy, cashier2: r.cashier2 === oldName ? newName : r.cashier2, pumpBoy2: r.pumpBoy2 === oldName ? newName : r.pumpBoy2 }))));
+        }
+        let salaryChanged = false;
+        const newSalaryRuns = {};
+        Object.keys(salaryRuns).forEach((month) => {
+            const run = salaryRuns[month];
+            if ((run === null || run === void 0 ? void 0 : run.overrides) && run.overrides[oldName]) {
+                salaryChanged = true;
+                const overrides = Object.assign(Object.assign({}, run.overrides), { [newName]: run.overrides[oldName] });
+                delete overrides[oldName];
+                newSalaryRuns[month] = Object.assign(Object.assign({}, run), { overrides });
+            }
+            else
+                newSalaryRuns[month] = run;
+        });
+        if (salaryChanged)
+            persistSalaryRuns(newSalaryRuns);
+    };
+    const save = async () => {
+        local.employees.forEach((emp) => {
+            const orig = config.employees.find((e) => e.id === emp.id);
+            if (orig && orig.name && orig.name !== emp.name)
+                migrateEmployeeRename(orig.name, emp.name);
+        });
+        await persistConfig(local);
+        showToast('Master data saved');
+    };
     const [sub, setSub] = useState('station');
     const upd = (path, value) => setLocal((c) => { const next = Object.assign({}, c); let o = next; for (let i = 0; i < path.length - 1; i++)
         o = o[path[i]]; o[path[path.length - 1]] = value; return Object.assign({}, next); });
