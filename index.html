@@ -300,6 +300,7 @@ async function driveUpdate(token, fileId, content) {
 const uid = (p = 'id') => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const yesterdayStr = () => { const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10); };
+function shiftDateStr(dateStr, days) { const d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); }
 const fmtDate = (d) => { if (!d)
     return ''; const dt = new Date(d + 'T00:00:00'); return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); };
 const fmt = (n) => { const v = Number(n) || 0; return '\u20B9' + v.toLocaleString('en-IN', { maximumFractionDigits: 2 }); };
@@ -2407,8 +2408,23 @@ function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
         const totals = {};
         msLog.forEach((r) => { totals[r.date] = (totals[r.date] || 0) + (r[field] || 0); });
         dieselLog.forEach((r) => { totals[r.date] = (totals[r.date] || 0) + (r[field] || 0); });
-        Object.entries(totals).forEach(([date, amount]) => { if (amount > 0)
-            out.push({ id: type + '_' + date, date, amount: round2(amount) }); });
+        if (type === 'paytm') {
+            // Paytm-only, bank reconciliation-only: settlement for a date reflects that date's Night
+            // Closing plus the previous date's Morning Closing combined \u2014 not the previous date's Night Closing.
+            const morningTotals = {};
+            msLog.forEach((r) => { morningTotals[r.date] = (morningTotals[r.date] || 0) + (r.paytmMorningClosing || 0); });
+            dieselLog.forEach((r) => { morningTotals[r.date] = (morningTotals[r.date] || 0) + (r.paytmMorningClosing || 0); });
+            const dates = new Set([...Object.keys(totals), ...Object.keys(morningTotals).map((d) => shiftDateStr(d, 1))]);
+            dates.forEach((date) => {
+                const combined = round2((totals[date] || 0) + (morningTotals[shiftDateStr(date, -1)] || 0));
+                if (combined > 0)
+                    out.push({ id: type + '_' + date, date, amount: combined });
+            });
+        }
+        else {
+            Object.entries(totals).forEach(([date, amount]) => { if (amount > 0)
+                out.push({ id: type + '_' + date, date, amount: round2(amount) }); });
+        }
     }
     else if (type === 'hppay') {
         dieselLog.forEach((r) => { if (r.hpPay)
@@ -2433,7 +2449,7 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
         const cfg = config.bankSettings[bank][type];
         const lines = pasteText.split('\n').map((l) => l.trim()).filter(Boolean);
         let added = 0, skipped = 0;
-        const entries = [...st.entries];
+        const entries = [];
         lines.forEach((line) => {
             const result = parseTransactionLine(line, cfg);
             if (!result.ok) {
@@ -2443,7 +2459,7 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
             entries.push({ id: uid('k'), date: result.date, amount: result.amount, consumed: false });
             added += 1;
         });
-        setParseMsg(`Parsed ${added} entr${added === 1 ? 'y' : 'ies'}` + (skipped ? `, ${skipped} line(s) skipped` : '.'));
+        setParseMsg(`Parsed ${added} entr${added === 1 ? 'y' : 'ies'}` + (skipped ? `, ${skipped} line(s) skipped` : '.') + ' (replaced previous paste)');
         updSt({ entries });
     };
     const runReconciliation = () => {
@@ -2480,9 +2496,30 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
                 group = [];
             }
         });
-        candidates.forEach((b) => { if (!statuses[b.id])
-            statuses[b.id] = 'flagged'; });
+        candidates.forEach((b) => {
+            if (statuses[b.id])
+                return; // already matched or grouped above
+            const closest = entries.filter((k) => !k.consumed).sort((a, c) => Math.abs(a.amount - b.amount) - Math.abs(c.amount - b.amount))[0];
+            if (closest && Math.abs(closest.amount - b.amount) <= 1000) {
+                closest.consumed = true;
+                statuses[b.id] = 'approx';
+                const diff = round2(closest.amount - b.amount);
+                proposals.push({ bookIds: [b.id], bankDate: closest.date, total: closest.amount, bookDate: b.date, bookTotal: b.amount, confirmed: false, approx: true,
+                    desc: `Closest available bank entry \u2014 ${diff >= 0 ? 'bank is higher by' : 'bank is lower by'} \u20b9${fmtNum(Math.abs(diff))}` });
+            }
+            else
+                statuses[b.id] = 'flagged';
+        });
         updSt({ entries, statuses, proposals: [...st.proposals.filter((p) => p.confirmed), ...proposals] });
+    };
+    const rejectProposal = (idx) => {
+        const pending = st.proposals.filter((p) => !p.confirmed);
+        const p = pending[idx];
+        const entries = st.entries.map((e) => (p.bankDate === e.date && p.total === e.amount) ? Object.assign(Object.assign({}, e), { consumed: false }) : e);
+        const statuses = Object.assign({}, st.statuses);
+        p.bookIds.forEach((id) => (statuses[id] = 'flagged'));
+        const proposals = st.proposals.filter((pp) => pp !== p);
+        updSt({ entries, statuses, proposals });
     };
     const confirmProposal = (idx) => {
         const pending = st.proposals.filter((p) => !p.confirmed);
@@ -2494,7 +2531,7 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
         const lastSucceeded = !st.lastSucceeded || maxDate > st.lastSucceeded ? maxDate : st.lastSucceeded;
         updSt({ proposals, statuses, lastSucceeded });
     };
-    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Bank" }, React.createElement("select", { className: "select-input", value: bank, onChange: (e) => setBank(e.target.value) }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("option", { key: b, value: b }, b)))), React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: type, onChange: (e) => setType(e.target.value) }, BANK_TXN_TYPES.map((t) => React.createElement("option", { key: t.key, value: t.key }, t.label))))), React.createElement("textarea", { className: "text-input", rows: 5, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste statement text here, one transaction per line" }), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: parse }, "Parse pasted text")), parseMsg && React.createElement("div", { className: "empty-hint" }, parseMsg), React.createElement("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 } }, React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Book entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, bookAll.map((b) => React.createElement("tr", { key: b.id }, React.createElement("td", null, fmtDate(b.date)), React.createElement("td", { className: "mono" }, fmt(b.amount)), React.createElement("td", null, React.createElement(Pill, { tone: st.statuses[b.id] === 'confirmed' ? 'green' : st.statuses[b.id] === 'matched' ? 'amber' : st.statuses[b.id] === 'flagged' ? 'red' : 'muted' }, st.statuses[b.id] || 'pending'))))))), React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Parsed bank entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, st.entries.map((e) => React.createElement("tr", { key: e.id, style: e.consumed ? { opacity: 0.5 } : {} }, React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { className: "mono" }, fmt(e.amount) + (e.consumed ? ' \u2713' : '')))))))), React.createElement("div", { className: "slot-actions", style: { marginTop: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: runReconciliation }, "Run reconciliation"), React.createElement("span", { style: { marginLeft: 12, fontSize: 13, color: 'var(--text-muted)' } }, "Last succeeded date: ", React.createElement("b", null, st.lastSucceeded ? fmtDate(st.lastSucceeded) : 'None yet'))), st.proposals.filter((p) => !p.confirmed).map((p, idx) => React.createElement("div", { key: idx, className: "confirm-bar", style: { background: 'var(--surface-2)', color: 'var(--text-primary)', border: '1px solid var(--border)' } }, React.createElement("span", null, `${p.bookIds.length > 1 ? 'Cumulative match' : 'Match'}: book ${fmt(p.bookTotal)} on ${fmtDate(p.bookDate)} \u2194 bank ${fmt(p.total)} on ${fmtDate(p.bankDate)}` + (p.bookTotal !== p.total ? ` (off by ${fmt(Math.abs(p.bookTotal - p.total))})` : '')), React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => confirmProposal(idx) }, "OK, confirm match"))));
+    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Bank" }, React.createElement("select", { className: "select-input", value: bank, onChange: (e) => setBank(e.target.value) }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("option", { key: b, value: b }, b)))), React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: type, onChange: (e) => setType(e.target.value) }, BANK_TXN_TYPES.map((t) => React.createElement("option", { key: t.key, value: t.key }, t.label))))), React.createElement("textarea", { className: "text-input", rows: 5, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste statement text here, one transaction per line" }), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: parse }, "Parse pasted text")), parseMsg && React.createElement("div", { className: "empty-hint" }, parseMsg), React.createElement("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 } }, React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Book entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, bookAll.map((b) => React.createElement("tr", { key: b.id }, React.createElement("td", null, fmtDate(b.date)), React.createElement("td", { className: "mono" }, fmt(b.amount)), React.createElement("td", null, React.createElement(Pill, { tone: st.statuses[b.id] === 'confirmed' ? 'green' : st.statuses[b.id] === 'matched' ? 'amber' : st.statuses[b.id] === 'approx' ? 'amber' : st.statuses[b.id] === 'flagged' ? 'red' : 'muted' }, st.statuses[b.id] || 'pending'))))))), React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Parsed bank entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, st.entries.map((e) => React.createElement("tr", { key: e.id, style: e.consumed ? { opacity: 0.5 } : {} }, React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { className: "mono" }, fmt(e.amount) + (e.consumed ? ' \u2713' : '')))))))), React.createElement("div", { className: "slot-actions", style: { marginTop: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: runReconciliation }, "Run reconciliation"), React.createElement("span", { style: { marginLeft: 12, fontSize: 13, color: 'var(--text-muted)' } }, "Last succeeded date: ", React.createElement("b", null, st.lastSucceeded ? fmtDate(st.lastSucceeded) : 'None yet'))), st.proposals.filter((p) => !p.confirmed).map((p, idx) => React.createElement("div", { key: idx, className: "confirm-bar", style: { background: p.approx ? 'var(--amber-dim)' : 'var(--surface-2)', color: p.approx ? 'var(--amber)' : 'var(--text-primary)', border: '1px solid var(--border)', flexDirection: 'column', alignItems: 'stretch', gap: 6 } }, React.createElement("span", null, `${p.approx ? 'Approximate match' : p.bookIds.length > 1 ? 'Cumulative match' : 'Match'}: book ${fmt(p.bookTotal)} on ${fmtDate(p.bookDate)} \u2194 bank ${fmt(p.total)} on ${fmtDate(p.bankDate)}` + (p.bookTotal !== p.total ? ` (off by ${fmt(Math.abs(p.bookTotal - p.total))})` : '')), p.desc && React.createElement("span", { style: { fontSize: 12.5 } }, p.desc), React.createElement("div", { style: { display: 'flex', gap: 8 } }, React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => confirmProposal(idx) }, "OK, confirm match"), p.approx && React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => rejectProposal(idx) }, "Reject \u2014 leave flagged")))));
 }
 function BankSettingsPane({ config, persistConfig }) {
     const [bankTab, setBankTab] = useState('SBI');
