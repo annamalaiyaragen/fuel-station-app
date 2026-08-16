@@ -2825,16 +2825,16 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
       draft[r.name].base += amount;
     });
     setSalaryDraft(draft);
-    setSub('salary');
+    showToast('Salary calculated \u2014 review below, then Settle when ready.');
   };
 
   const updateSalaryField = (name, field, value) => setSalaryDraft((d) => ({ ...d, [name]: { ...d[name], [field]: value } }));
 
-  const saveSalary = () => {
+  const settle = () => {
     if (!salaryDraft) return;
     const names = Object.keys(salaryDraft);
     const missingDesc = names.some((n) => (Number(salaryDraft[n].bonus) || 0) > 0 && !salaryDraft[n].bonusDesc.trim());
-    if (missingDesc) { showToast('Add a description for every bonus entered before saving.', 'red'); return; }
+    if (missingDesc) { showToast('Add a description for every bonus entered before settling.', 'red'); return; }
     let balances = { ...advance.balances }; let log = [...advance.log];
     const batch = { id: ttUid(), savedAt: new Date().toISOString(), dateFrom, dateTo, entries: [] };
     names.forEach((name) => {
@@ -2853,7 +2853,7 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
     setSalaryDraft(null);
     setTripRows([emptyTTRow()]);
     setDateFrom(''); setDateTo('');
-    showToast('Saved \u2014 advances recorded, entries added to History.');
+    showToast('Settled \u2014 advances recorded, entries added to History.');
     if (pushNow) pushNow();
     setSub('history');
   };
@@ -2863,7 +2863,8 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
     React.createElement("div", { className: "tab-switch" }, ['trips', 'salary', 'history'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'trips' ? 'Trips' : s === 'salary' ? 'Salary' : 'History'))),
 
     sub === 'trips' && React.createElement("div", { className: "card" },
-      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Trip entries"), React.createElement("button", { className: "btn btn-primary", onClick: generate }, "Generate \u2192 Salary")),
+      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Trip entries")),
+      React.createElement("div", { className: "empty-hint" }, "Keep adding or editing rows here as needed \u2014 go to the Salary tab and click Generate whenever you're ready to calculate, and come back here to make changes any time before Settling."),
       ttStaffNames.length === 0 && React.createElement("div", { className: "empty-hint" }, "No employees marked \"TT staff\" yet \u2014 add that flag in Master Data \u2192 Employees."),
       React.createElement("div", { className: "form-grid", style: { maxWidth: 420, marginBottom: 16 } },
         React.createElement(Field, { label: "Trip date from" }, React.createElement(CalendarDatePicker, { value: dateFrom, onChange: setDateFrom, maxDate: todayStr() })),
@@ -2883,23 +2884,28 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
     ),
 
     sub === 'salary' && React.createElement("div", { className: "card" },
-      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Salary"), salaryDraft && React.createElement("button", { className: "btn btn-primary", onClick: saveSalary }, "Save \u2014 deduct advances & record")),
-      !salaryDraft ? React.createElement("div", { className: "empty-hint" }, "Nothing generated yet \u2014 go to Trips, fill in entries, and click \"Generate \u2192 Salary\".") :
-      React.createElement("table", { className: "data-table editable" },
-        React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trip days (by rate)", "Base salary", "Bonus", "Bonus description", "Advance", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
-        React.createElement("tbody", null, Object.keys(salaryDraft).map((name) => {
-          const d = salaryDraft[name];
-          const bonus = Number(d.bonus) || 0, adv = Number(d.advance) || 0;
-          const net = round2(d.base + bonus - adv);
-          return React.createElement("tr", { key: name },
-            React.createElement("td", null, name),
-            React.createElement("td", { style: { fontSize: 12 } }, d.rows.map((r, i) => React.createElement("div", { key: i }, `${r.kl}KL ${r.role}: ${r.trips} trip(s) \u00d7 ${fmt(r.rate)} = ${fmt(r.amount)}`))),
-            React.createElement("td", { className: "mono" }, fmt(d.base)),
-            React.createElement("td", null, React.createElement(NumInput, { value: d.bonus, onChange: (v) => updateSalaryField(name, 'bonus', v) })),
-            React.createElement("td", null, bonus > 0 ? React.createElement("input", { className: "text-input", value: d.bonusDesc, onChange: (ev) => updateSalaryField(name, 'bonusDesc', ev.target.value), placeholder: "Why?" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")),
-            React.createElement("td", null, React.createElement(NumInput, { value: d.advance, onChange: (v) => updateSalaryField(name, 'advance', v) })),
-            React.createElement("td", { className: "mono" }, fmt(net)));
-        })))
+      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Salary"), React.createElement("button", { className: "btn btn-primary", onClick: generate }, "Generate")),
+      !salaryDraft ? React.createElement("div", { className: "empty-hint" }, "Nothing calculated yet \u2014 fill in entries on the Trips tab, then click \"Generate\" above.") :
+      React.createElement(React.Fragment, null,
+        React.createElement("table", { className: "data-table editable" },
+          React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trip days (by rate)", "Base salary", "Current advance owed", "Bonus", "Bonus description", "New advance", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
+          React.createElement("tbody", null, Object.keys(salaryDraft).map((name) => {
+            const d = salaryDraft[name];
+            const bonus = Number(d.bonus) || 0, adv = Number(d.advance) || 0;
+            const net = round2(d.base + bonus - adv);
+            const owed = round2(advance.balances[name] || 0);
+            return React.createElement("tr", { key: name },
+              React.createElement("td", null, name),
+              React.createElement("td", { style: { fontSize: 12 } }, d.rows.map((r, i) => React.createElement("div", { key: i }, `${r.kl}KL ${r.role}: ${r.trips} trip(s) \u00d7 ${fmt(r.rate)} = ${fmt(r.amount)}`))),
+              React.createElement("td", { className: "mono" }, fmt(d.base)),
+              React.createElement("td", { className: "mono" }, owed > 0 ? fmt(owed) : '\u2014'),
+              React.createElement("td", null, React.createElement(NumInput, { value: d.bonus, onChange: (v) => updateSalaryField(name, 'bonus', v) })),
+              React.createElement("td", null, bonus > 0 ? React.createElement("input", { className: "text-input", value: d.bonusDesc, onChange: (ev) => updateSalaryField(name, 'bonusDesc', ev.target.value), placeholder: "Why?" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")),
+              React.createElement("td", null, React.createElement(NumInput, { value: d.advance, onChange: (v) => updateSalaryField(name, 'advance', v) })),
+              React.createElement("td", { className: "mono" }, fmt(net)));
+          }))),
+        React.createElement("div", { className: "slot-actions", style: { marginTop: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: settle }, "Settle \u2014 deduct advances, record & clear"))
+      )
     ),
 
     sub === 'history' && React.createElement("div", { className: "card" },
