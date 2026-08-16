@@ -489,6 +489,7 @@ const K = {
     DAY_CLOSING: 'fs_day_closing', ADVANCE: 'fs_advance', SALARY_RUNS: 'fs_salary_runs',
     BANK_RECON: 'fs_bank_recon',
     DSR_DATA: 'fs_dsr_data',
+    TT_DATA: 'fs_tt_data',
 };
 const BANK_TXN_TYPES = [{ key: 'deposit', label: 'Bank deposit' }, { key: 'phonepe', label: 'PhonePe settlement' }, { key: 'paytm', label: 'Paytm settlement' }, { key: 'hppay', label: 'HP Pay / DTPlus' }];
 function defaultBankTypeSetting() { return { delimiter: 'tab', dateCol: 1, amountCol: 3, keyword: '' }; }
@@ -562,6 +563,7 @@ function App() {
     const [salaryRuns, setSalaryRuns] = useState({});
     const [bankRecon, setBankRecon] = useState({ book: [], entries: [], proposals: [], lastSucceeded: {} });
     const [dsrData, setDsrData] = useState({});
+    const [ttData, setTtData] = useState({ history: [] });
     const [tab, setTab] = useState('dashboard');
     const [theme, setTheme] = useState(() => { try {
         return window.localStorage.getItem('fuelapp_theme') || 'dark';
@@ -608,11 +610,11 @@ function App() {
     const configuredClientId = GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('PASTE_');
     useEffect(() => {
         (async () => {
-            const [c, mr, md, ml, dd, dl, dc, av, sr, br, dsr] = await Promise.all([
+            const [c, mr, md, ml, dd, dl, dc, av, sr, br, dsr, tt] = await Promise.all([
                 storageGet(K.CONFIG, defaultConfig), storageGet(K.MS_READINGS, {}), storageGet(K.MS_DRAFTS, {}), storageGet(K.MS_LOG, []),
                 storageGet(K.DIESEL_DATA, {}), storageGet(K.DIESEL_LOG, []), storageGet(K.DAY_CLOSING, {}),
                 storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, { book: [], entries: [], proposals: [], lastSucceeded: {} }),
-                storageGet(K.DSR_DATA, {}),
+                storageGet(K.DSR_DATA, {}), storageGet(K.TT_DATA, { history: [] }),
             ]);
             setConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (c.bankSettings || {})) }));
             setMsReadings(mr);
@@ -625,6 +627,7 @@ function App() {
             setSalaryRuns(sr);
             setBankRecon(br);
             setDsrData(dsr);
+            setTtData(tt);
             setReady(true);
         })();
     }, []);
@@ -640,6 +643,7 @@ function App() {
     const persistSalaryRuns = useCallback(async (next) => { setSalaryRuns(next); await storageSet(K.SALARY_RUNS, next); }, []);
     const persistBankRecon = useCallback(async (next) => { setBankRecon(next); await storageSet(K.BANK_RECON, next); }, []);
     const persistDsrData = useCallback(async (next) => { setDsrData(next); await storageSet(K.DSR_DATA, next); }, []);
+    const persistTtData = useCallback(async (next) => { setTtData(next); await storageSet(K.TT_DATA, next); }, []);
     /* ---------- Google Drive sync (backs up everything as one payload) ---------- */
     useEffect(() => {
         if (!configuredClientId)
@@ -671,7 +675,7 @@ function App() {
         });
     }
     function buildPayload() {
-        return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData };
+        return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData };
     }
     function applyCloudData(data, push = true) {
         suppressPushRef.current = !push;
@@ -697,6 +701,8 @@ function App() {
             persistBankRecon(data.bankRecon);
         if (data.dsrData)
             persistDsrData(data.dsrData);
+        if (data.ttData)
+            persistTtData(data.ttData);
     }
     async function handleConnected(token) {
         setDriveConnected(true);
@@ -825,7 +831,7 @@ function App() {
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, new Date().toISOString());
         }
         catch (e) { }
-    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData]);
+    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData]);
     useEffect(() => {
         if (!driveConnected)
             return;
@@ -838,7 +844,7 @@ function App() {
         pushTimerRef.current = setTimeout(() => { pushNow(); }, 3000);
         return () => clearTimeout(pushTimerRef.current);
         // eslint-disable-next-line
-    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, driveConnected]);
+    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData, driveConnected]);
     useEffect(() => {
         const onOnline = () => { if (driveConnected)
             pushNow(); };
@@ -852,12 +858,12 @@ function App() {
     }
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
-        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, dsrData, persistDsrData, pushNow, showToast };
+        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, dsrData, persistDsrData, ttData, persistTtData, pushNow, showToast };
     const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline;
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
     }
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
 }
 function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt }) {
     const items = [
@@ -867,6 +873,7 @@ function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyn
         { id: 'dayclosing', label: 'Day Closing', Icon: IconReceipt },
         { id: 'salary', label: 'Salary', Icon: IconUsers },
         { id: 'audit', label: 'Audit', Icon: IconChart },
+        { id: 'tt', label: 'TT', Icon: IconWallet },
         { id: 'reports', label: 'Reports', Icon: IconPrint },
         { id: 'bank', label: 'Bank Reconciliation', Icon: IconBank },
         { id: 'master', label: 'Master Data', Icon: IconWallet },
@@ -1570,7 +1577,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     const upd = (path, value) => setLocal((c) => { const next = Object.assign({}, c); let o = next; for (let i = 0; i < path.length - 1; i++)
         o = o[path[i]]; o[path[path.length - 1]] = value; return Object.assign({}, next); });
     // employees
-    const addEmployee = () => setLocal((c) => (Object.assign(Object.assign({}, c), { employees: [...c.employees, { id: uid('e'), name: 'New employee', isAdmin: false, salary: '', pfOn: false, pf: '', bonusOn: false, bonus: '', airOn: false, airRate: '', hideFromSalary: false }] })));
+    const addEmployee = () => setLocal((c) => (Object.assign(Object.assign({}, c), { employees: [...c.employees, { id: uid('e'), name: 'New employee', isAdmin: false, salary: '', pfOn: false, pf: '', bonusOn: false, bonus: '', airOn: false, airRate: '', hideFromSalary: false, ttStaff: false }] })));
     const addTerminal = (type) => setLocal((c) => (Object.assign(Object.assign({}, c), { terminals: [...(c.terminals || []), { id: uid('t'), label: 'New terminal', terminalNumber: '', type }] })));
     const addTank = () => setLocal((c) => { var _a; return (Object.assign(Object.assign({}, c), { tanks: [...(c.tanks || []), { id: uid('tank'), name: 'New Tank', productId: ((_a = c.products[0]) === null || _a === void 0 ? void 0 : _a.id) || 'p_ms', nozzleIds: [] }] })); });
     const updTank = (idx, patch) => setLocal((c) => (Object.assign(Object.assign({}, c), { tanks: c.tanks.map((t, i) => i === idx ? Object.assign(Object.assign({}, t), patch) : t) })));
@@ -1610,7 +1617,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     };
     const tabs = [['station', 'Station & Pumps'], ['employees', 'Employees'], ['terminals', 'Terminals'], ['tanks', 'Tanks'], ['products', 'Products & Lubes'], ['opening', 'Opening Readings']];
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Master Data", subtitle: "Configure your station, employees, rates, lubes, and terminals.",
-        action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, React.createElement(IconSave, { size: 15 }), " Save") }), React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))), sub === 'station' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station")), React.createElement(Field, { label: "Station Name" }, React.createElement("input", { className: "text-input", value: local.stationName, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { stationName: e.target.value }))) }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pumps")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Turn on 2T Oil / Packet Oil for whichever pumps sell them \u2014 these show up as extra fields on that pump's shift card in MS Daily."), local.slots.map((s, idx) => React.createElement("div", { key: s.id, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, s.label), React.createElement("div", { className: "toggle-row" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includeOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includeOil: e.target.checked }) : x) }))) }), " 2T Oil"), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includePacketOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includePacketOil: e.target.checked }) : x) }))) }), " Packet Oil")))))), sub === 'employees' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Employees"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addEmployee }, React.createElement(IconPlus, { size: 14 }), " Add Employee")), local.employees.map((emp, idx) => React.createElement("div", { key: emp.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: emp.name, onChange: (e) => updEmployee(idx, { name: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeEmployee(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { className: "toggle-row", style: { flexWrap: 'wrap', gap: 16 } }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.isAdmin, onChange: (e) => updEmployee(idx, { isAdmin: e.target.checked }) }), " Admin staff"), emp.isAdmin && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Salary", React.createElement("input", { className: "text-input", style: { width: 100 }, value: emp.salary, onChange: (e) => updEmployee(idx, { salary: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.pfOn, onChange: (e) => updEmployee(idx, { pfOn: e.target.checked }) }), " PF"), emp.pfOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.pf, onChange: (e) => updEmployee(idx, { pf: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.bonusOn, onChange: (e) => updEmployee(idx, { bonusOn: e.target.checked }) }), " Bonus"), emp.bonusOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.bonus, onChange: (e) => updEmployee(idx, { bonus: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.airOn, onChange: (e) => updEmployee(idx, { airOn: e.target.checked }) }), " Air man"), emp.airOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Per day rate", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.airRate, onChange: (e) => updEmployee(idx, { airRate: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.hideFromSalary, onChange: (e) => updEmployee(idx, { hideFromSalary: e.target.checked }) }), " Hide from salary (e.g. \"Diesel\" tag entry, or advance-only staff)")))), React.createElement("div", { className: "empty-hint" }, "Advance is tracked on its own page (Salary \u2192 Advance) and isn't part of this master data.")), sub === 'terminals' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "PhonePe / Paytm Terminals")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set up each terminal once. In MS Daily and Diesel Daily, picking a terminal auto-fills the Opening value from that terminal's Morning closing the previous day \u2014 you only enter it manually the very first time."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 6 } }, "PhonePe"), (local.terminals || []).filter((t) => t.type === 'phonepe').map((t) => {
+        action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, React.createElement(IconSave, { size: 15 }), " Save") }), React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))), sub === 'station' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station")), React.createElement(Field, { label: "Station Name" }, React.createElement("input", { className: "text-input", value: local.stationName, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { stationName: e.target.value }))) }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pumps")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Turn on 2T Oil / Packet Oil for whichever pumps sell them \u2014 these show up as extra fields on that pump's shift card in MS Daily."), local.slots.map((s, idx) => React.createElement("div", { key: s.id, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, s.label), React.createElement("div", { className: "toggle-row" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includeOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includeOil: e.target.checked }) : x) }))) }), " 2T Oil"), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includePacketOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includePacketOil: e.target.checked }) : x) }))) }), " Packet Oil")))))), sub === 'employees' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Employees"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addEmployee }, React.createElement(IconPlus, { size: 14 }), " Add Employee")), local.employees.map((emp, idx) => React.createElement("div", { key: emp.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: emp.name, onChange: (e) => updEmployee(idx, { name: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeEmployee(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { className: "toggle-row", style: { flexWrap: 'wrap', gap: 16 } }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.isAdmin, onChange: (e) => updEmployee(idx, { isAdmin: e.target.checked }) }), " Admin staff"), emp.isAdmin && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Salary", React.createElement("input", { className: "text-input", style: { width: 100 }, value: emp.salary, onChange: (e) => updEmployee(idx, { salary: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.pfOn, onChange: (e) => updEmployee(idx, { pfOn: e.target.checked }) }), " PF"), emp.pfOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.pf, onChange: (e) => updEmployee(idx, { pf: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.bonusOn, onChange: (e) => updEmployee(idx, { bonusOn: e.target.checked }) }), " Bonus"), emp.bonusOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.bonus, onChange: (e) => updEmployee(idx, { bonus: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.airOn, onChange: (e) => updEmployee(idx, { airOn: e.target.checked }) }), " Air man"), emp.airOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Per day rate", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.airRate, onChange: (e) => updEmployee(idx, { airRate: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.hideFromSalary, onChange: (e) => updEmployee(idx, { hideFromSalary: e.target.checked }) }), " Hide from salary (e.g. \"Diesel\" tag entry, or advance-only staff)"), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.ttStaff, onChange: (e) => updEmployee(idx, { ttStaff: e.target.checked }) }), " TT staff (Tanker Transport \u2014 paid via the TT tab, not regular salary)")))), React.createElement("div", { className: "empty-hint" }, "Advance is tracked on its own page (Salary \u2192 Advance) and isn't part of this master data.")), sub === 'terminals' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "PhonePe / Paytm Terminals")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set up each terminal once. In MS Daily and Diesel Daily, picking a terminal auto-fills the Opening value from that terminal's Morning closing the previous day \u2014 you only enter it manually the very first time."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 6 } }, "PhonePe"), (local.terminals || []).filter((t) => t.type === 'phonepe').map((t) => {
         const idx = local.terminals.findIndex((x) => x.id === t.id);
         return React.createElement("div", { key: t.id, style: { display: 'flex', gap: 10, marginBottom: 8, alignItems: 'center' } }, React.createElement("input", { className: "text-input", style: { width: 180 }, value: t.label, onChange: (e) => updTerminal(idx, { label: e.target.value }) }), React.createElement("input", { className: "text-input", style: { width: 160 }, placeholder: "Terminal number", value: t.terminalNumber, onChange: (e) => updTerminal(idx, { terminalNumber: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeTerminal(idx) }, React.createElement(IconTrash, { size: 14 })));
     }), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => addTerminal('phonepe') }, React.createElement(IconPlus, { size: 14 }), " Add PhonePe terminal"), React.createElement("div", { style: { fontWeight: 500, margin: '14px 0 6px' } }, "Paytm"), (local.terminals || []).filter((t) => t.type === 'paytm').map((t) => {
@@ -2056,7 +2063,7 @@ function SalaryWorkingReport({ config, msLog, dieselLog, salaryRuns }) {
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
     const credits = useMemo(() => computeSalaryWorking(config, msLog, dieselLog, month), [config, msLog, dieselLog, month]);
     const runData = salaryRuns[month] || { overrides: {} };
-    const hiddenNames = new Set(config.employees.filter((e) => e.hideFromSalary).map((e) => e.name));
+    const hiddenNames = new Set(config.employees.filter((e) => e.hideFromSalary || e.ttStaff).map((e) => e.name));
     const names = [...new Set([...Object.keys(credits), ...config.employees.filter((e) => e.airOn).map((e) => e.name)])].filter((n) => !hiddenNames.has(n));
     const rows = names.map((n) => {
         var _a, _b, _c, _d, _e, _f;
@@ -2080,7 +2087,7 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
     const updOverride = (name, field, value) => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { overrides: Object.assign(Object.assign({}, runData.overrides), { [name]: Object.assign(Object.assign({}, (runData.overrides[name] || {})), { [field]: value }) }) }) }));
     const [y, m] = month.split('-');
     const daysInMonth = new Date(Number(y), Number(m), 0).getDate();
-    const hiddenNames = new Set(config.employees.filter((e) => e.hideFromSalary).map((e) => e.name));
+    const hiddenNames = new Set(config.employees.filter((e) => e.hideFromSalary || e.ttStaff).map((e) => e.name));
     const names = [...new Set([...Object.keys(credits), ...config.employees.map((e) => e.name)])].filter((n) => !hiddenNames.has(n));
     const rows = names.map((name) => {
         var _a;
@@ -2780,6 +2787,136 @@ function DSRReport({ config, msLog, dieselLog, dsrData, persistDsrData }) {
         return React.createElement("tr", { key: r.date, style: r.variation !== null && Math.abs(r.variation) > 25 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", null, React.createElement(NumInput, { value: (_c = (_b = (_a = dsrData[r.date]) === null || _a === void 0 ? void 0 : _a[tankId]) === null || _b === void 0 ? void 0 : _b.receipt) !== null && _c !== void 0 ? _c : '', onChange: (v) => setField(r.date, 'receipt', v) })), React.createElement("td", { className: "mono" }, fmtNum(r.totalStock)), React.createElement("td", { className: "mono" }, fmtNum(r.salesByMeter)), React.createElement("td", { className: "mono" }, fmtNum(r.pumpTest)), React.createElement("td", { className: "mono" }, fmtNum(r.netSales)), React.createElement("td", { className: "mono" }, fmtNum(r.cumSales)), React.createElement("td", { className: "mono" }, fmtNum(r.closingStock)), React.createElement("td", null, React.createElement(NumInput, { value: (_f = (_e = (_d = dsrData[r.date]) === null || _d === void 0 ? void 0 : _d[tankId]) === null || _e === void 0 ? void 0 : _e.dipStock) !== null && _f !== void 0 ? _f : '', onChange: (v) => setField(r.date, 'dipStock', v) })), React.createElement("td", { className: "mono" }, r.variation !== null ? ((r.variation > 0 ? '+' : '') + fmtNum(r.variation)) : '\u2014'), React.createElement("td", { className: "mono" }, r.cumVariation !== null ? ((r.cumVariation > 0 ? '+' : '') + fmtNum(r.cumVariation)) : '\u2014'));
     })))), React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Opening Stock carries from the previous day's physical Dip reading (not the computed Closing Stock) \u2014 exactly matching a statutory stock register. Rows with a variation beyond \u00b125 are highlighted."));
 }
+const RATES_TT = { '12_Driver': 1200, '20_Driver': 1500, '12_Cleaner': 900, '20_Cleaner': 1000 };
+function ttUid() { return 'tt_' + Math.random().toString(36).slice(2, 10); }
+function ttDaysBetween(from, to) { if (!from || !to) return 0; const a = new Date(from + 'T00:00:00'), b = new Date(to + 'T00:00:00'); const diff = Math.round((b - a) / 86400000) + 1; return diff > 0 ? diff : 0; }
+function emptyTTRow() { return { id: ttUid(), name: '', kl: '12', role: 'Driver', trips: '' }; }
+
+function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow, showToast }) {
+  const [sub, setSub] = useState('trips');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [tripRows, setTripRows] = useState([emptyTTRow()]);
+  const [salaryDraft, setSalaryDraft] = useState(null);
+  const ttStaffNames = config.employees.filter((e) => e.ttStaff).map((e) => e.name);
+
+  const updateRow = (id, patch) => setTripRows((rows) => rows.map((r) => r.id === id ? { ...r, ...patch } : r));
+  const addRow = () => setTripRows((rows) => [...rows, emptyTTRow()]);
+  const removeRow = (id) => setTripRows((rows) => rows.filter((r) => r.id !== id));
+
+  const generate = () => {
+    if (!dateFrom || !dateTo) { showToast('Set the trip date range at the top first.', 'red'); return; }
+    if (tripRows.some((r) => r.name && !(Number(r.trips) > 0))) { showToast('Enter a number of trips for every named row.', 'red'); return; }
+    const valid = tripRows.filter((r) => r.name && Number(r.trips) > 0);
+    if (valid.length === 0) { showToast('Add at least one employee row first.', 'red'); return; }
+    const days = ttDaysBetween(dateFrom, dateTo);
+    const draft = {};
+    valid.forEach((r) => {
+      const trips = Number(r.trips) || 0;
+      const rate = RATES_TT[r.kl + '_' + r.role] || 0;
+      const amount = trips * rate;
+      if (!draft[r.name]) draft[r.name] = { rows: [], base: 0, bonus: '', bonusDesc: '', advance: '' };
+      draft[r.name].rows.push({ ...r, dateFrom, dateTo, days, trips, rate, amount });
+      draft[r.name].base += amount;
+    });
+    setSalaryDraft(draft);
+    setSub('salary');
+  };
+
+  const updateSalaryField = (name, field, value) => setSalaryDraft((d) => ({ ...d, [name]: { ...d[name], [field]: value } }));
+
+  const saveSalary = () => {
+    if (!salaryDraft) return;
+    const names = Object.keys(salaryDraft);
+    const missingDesc = names.some((n) => (Number(salaryDraft[n].bonus) || 0) > 0 && !salaryDraft[n].bonusDesc.trim());
+    if (missingDesc) { showToast('Add a description for every bonus entered before saving.', 'red'); return; }
+    let balances = { ...advance.balances }; let log = [...advance.log];
+    const batch = { id: ttUid(), savedAt: new Date().toISOString(), dateFrom, dateTo, entries: [] };
+    names.forEach((name) => {
+      const d = salaryDraft[name];
+      const bonus = Number(d.bonus) || 0;
+      const adv = Number(d.advance) || 0;
+      const net = round2(d.base + bonus - adv);
+      if (adv > 0) {
+        balances[name] = round2((balances[name] || 0) + adv);
+        log = [{ name, type: 'Advance', amount: adv, date: new Date().toISOString(), desc: `TT trip pay advance (${dateFrom} to ${dateTo})`, balanceAfter: balances[name] }, ...log];
+      }
+      batch.entries.push({ name, rows: d.rows, base: round2(d.base), bonus, bonusDesc: d.bonusDesc, advance: adv, net });
+    });
+    persistAdvance({ balances, log });
+    persistTtData({ history: [batch, ...(ttData.history || [])] });
+    setSalaryDraft(null);
+    setTripRows([emptyTTRow()]);
+    setDateFrom(''); setDateTo('');
+    showToast('Saved \u2014 advances recorded, entries added to History.');
+    if (pushNow) pushNow();
+    setSub('history');
+  };
+
+  return React.createElement("div", { className: "page" },
+    React.createElement(PageHeader, { title: "TT \u2014 Tanker Transport" }),
+    React.createElement("div", { className: "tab-switch" }, ['trips', 'salary', 'history'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'trips' ? 'Trips' : s === 'salary' ? 'Salary' : 'History'))),
+
+    sub === 'trips' && React.createElement("div", { className: "card" },
+      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Trip entries"), React.createElement("button", { className: "btn btn-primary", onClick: generate }, "Generate \u2192 Salary")),
+      ttStaffNames.length === 0 && React.createElement("div", { className: "empty-hint" }, "No employees marked \"TT staff\" yet \u2014 add that flag in Master Data \u2192 Employees."),
+      React.createElement("div", { className: "form-grid", style: { maxWidth: 420, marginBottom: 16 } },
+        React.createElement(Field, { label: "Trip date from" }, React.createElement(CalendarDatePicker, { value: dateFrom, onChange: setDateFrom, maxDate: todayStr() })),
+        React.createElement(Field, { label: "Trip date to" }, React.createElement(CalendarDatePicker, { value: dateTo, onChange: setDateTo, maxDate: todayStr() }))),
+      dateFrom && dateTo && React.createElement("div", { className: "empty-hint" }, `Applies to every row below \u2014 ${ttDaysBetween(dateFrom, dateTo)} day(s) range.`),
+      tripRows.map((r) => React.createElement("div", { key: r.id, className: "form-grid", style: { alignItems: 'flex-end', marginBottom: 8 } },
+        React.createElement(Field, { label: "Employee" }, React.createElement("select", { className: "select-input", value: r.name, onChange: (ev) => updateRow(r.id, { name: ev.target.value }) },
+          React.createElement("option", { value: "" }, "\u2014 select \u2014"), ttStaffNames.map((n) => React.createElement("option", { key: n, value: n }, n)))),
+        React.createElement(Field, { label: "No. of trips" }, React.createElement(NumInput, { value: r.trips, onChange: (v) => updateRow(r.id, { trips: v }) })),
+        React.createElement(Field, { label: "Capacity" }, React.createElement("select", { className: "select-input", value: r.kl, onChange: (ev) => updateRow(r.id, { kl: ev.target.value }) },
+          React.createElement("option", { value: "12" }, "12 KL"), React.createElement("option", { value: "20" }, "20 KL"))),
+        React.createElement(Field, { label: "Role" }, React.createElement("select", { className: "select-input", value: r.role, onChange: (ev) => updateRow(r.id, { role: ev.target.value }) },
+          React.createElement("option", { value: "Driver" }, "Driver"), React.createElement("option", { value: "Cleaner" }, "Cleaner"))),
+        React.createElement("div", { style: { display: 'flex', gap: 6 } },
+          React.createElement("button", { className: "btn btn-secondary btn-xs", title: "Add another trip row", onClick: addRow }, "+"),
+          tripRows.length > 1 && React.createElement("button", { className: "icon-btn", title: "Remove this row", onClick: () => removeRow(r.id) }, React.createElement(IconTrash, { size: 14 })))))
+    ),
+
+    sub === 'salary' && React.createElement("div", { className: "card" },
+      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Salary"), salaryDraft && React.createElement("button", { className: "btn btn-primary", onClick: saveSalary }, "Save \u2014 deduct advances & record")),
+      !salaryDraft ? React.createElement("div", { className: "empty-hint" }, "Nothing generated yet \u2014 go to Trips, fill in entries, and click \"Generate \u2192 Salary\".") :
+      React.createElement("table", { className: "data-table editable" },
+        React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trip days (by rate)", "Base salary", "Bonus", "Bonus description", "Advance", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
+        React.createElement("tbody", null, Object.keys(salaryDraft).map((name) => {
+          const d = salaryDraft[name];
+          const bonus = Number(d.bonus) || 0, adv = Number(d.advance) || 0;
+          const net = round2(d.base + bonus - adv);
+          return React.createElement("tr", { key: name },
+            React.createElement("td", null, name),
+            React.createElement("td", { style: { fontSize: 12 } }, d.rows.map((r, i) => React.createElement("div", { key: i }, `${r.kl}KL ${r.role}: ${r.trips} trip(s) \u00d7 ${fmt(r.rate)} = ${fmt(r.amount)}`))),
+            React.createElement("td", { className: "mono" }, fmt(d.base)),
+            React.createElement("td", null, React.createElement(NumInput, { value: d.bonus, onChange: (v) => updateSalaryField(name, 'bonus', v) })),
+            React.createElement("td", null, bonus > 0 ? React.createElement("input", { className: "text-input", value: d.bonusDesc, onChange: (ev) => updateSalaryField(name, 'bonusDesc', ev.target.value), placeholder: "Why?" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")),
+            React.createElement("td", null, React.createElement(NumInput, { value: d.advance, onChange: (v) => updateSalaryField(name, 'advance', v) })),
+            React.createElement("td", { className: "mono" }, fmt(net)));
+        })))
+    ),
+
+    sub === 'history' && React.createElement("div", { className: "card" },
+      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Saved history")),
+      (!ttData.history || ttData.history.length === 0) ? React.createElement("div", { className: "empty-hint" }, "Nothing saved yet.") :
+      ttData.history.map((batch) => React.createElement("div", { key: batch.id, style: { marginBottom: 18, paddingBottom: 14, borderBottom: '1px solid var(--border)' } },
+        React.createElement("div", { style: { marginBottom: 8 } },
+          React.createElement(Pill, { tone: "amber" }, `Trips: ${batch.dateFrom} \u2192 ${batch.dateTo}`),
+          React.createElement("span", { style: { fontSize: 12, color: 'var(--text-muted)', marginLeft: 10 } }, `Saved ${new Date(batch.savedAt).toLocaleString('en-IN')}`)),
+        React.createElement("table", { className: "data-table" },
+          React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trips", "Base", "Bonus", "Advance", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
+          React.createElement("tbody", null, batch.entries.map((en, i) => React.createElement("tr", { key: i },
+            React.createElement("td", null, en.name),
+            React.createElement("td", { style: { fontSize: 12 } }, en.rows.map((r, j) => React.createElement("div", { key: j }, `${r.kl}KL ${r.role}: ${r.trips} trip(s)`))),
+            React.createElement("td", { className: "mono" }, fmt(en.base)),
+            React.createElement("td", { className: "mono" }, en.bonus > 0 ? `${fmt(en.bonus)} (${en.bonusDesc})` : '\u2014'),
+            React.createElement("td", { className: "mono" }, fmt(en.advance)),
+            React.createElement("td", { className: "mono" }, fmt(en.net))))))))
+    )
+  );
+}
+
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
 
 }
