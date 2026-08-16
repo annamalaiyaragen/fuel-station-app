@@ -565,6 +565,7 @@ function App() {
     const [dsrData, setDsrData] = useState({});
     const [ttData, setTtData] = useState({ history: [] });
     const [tab, setTab] = useState('dashboard');
+    const [workingDate, setWorkingDate] = useState(yesterdayStr());
     const [theme, setTheme] = useState(() => { try {
         return window.localStorage.getItem('fuelapp_theme') || 'dark';
     }
@@ -858,7 +859,7 @@ function App() {
     }
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
-        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, dsrData, persistDsrData, ttData, persistTtData, pushNow, showToast };
+        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, dsrData, persistDsrData, ttData, persistTtData, workingDate, setWorkingDate, pushNow, showToast };
     const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline;
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
@@ -1012,9 +1013,9 @@ function emptyMsDraft() {
         phonepeDetail: emptyPhonepeDetail(), paytmDetail: emptyPhonepeDetail(), denom: Object.assign({}, emptyDenom) };
 }
 function recordKeyMs(date, pumpId) { return date + '::' + pumpId; }
-function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog, dieselLog, showToast }) {
+function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog, dieselLog, workingDate, setWorkingDate, showToast }) {
     var _a;
-    const [entryDate, setEntryDate] = useState(yesterdayStr());
+    const entryDate = workingDate, setEntryDate = setWorkingDate;
     const [pumpId, setPumpId] = useState(((_a = config.slots[0]) === null || _a === void 0 ? void 0 : _a.id) || '');
     const [suggestFor, setSuggestFor] = useState(null);
     const pump = config.slots.find((s) => s.id === pumpId);
@@ -1330,9 +1331,9 @@ function computeDieselFinance(config, dieselData, dateStr, rec, msLog) {
         totalDieselVolume, dieselTesting, dieselRate, dieselShiftCount, dieselPointSegments, msCashDepositedTotal, creditRecovery,
         finalCash: round2(finalCash), expensesTotal, creditSales, dieselCashTotal: round2(finalCash), dieselDenomVal };
 }
-function DieselDaily({ config, persistConfig, dieselData, persistDieselData, dieselLog, persistDieselLog, msLog, dayClosing, showToast }) {
+function DieselDaily({ config, persistConfig, dieselData, persistDieselData, dieselLog, persistDieselLog, msLog, dayClosing, workingDate, setWorkingDate, showToast }) {
     var _a, _b, _c, _d;
-    const [entryDate, setEntryDate] = useState(yesterdayStr());
+    const entryDate = workingDate, setEntryDate = setWorkingDate;
     const [suggestFor, setSuggestFor] = useState(null);
     const [receiptModalOpen, setReceiptModalOpen] = useState(false);
     const [barrelModal, setBarrelModal] = useState(null);
@@ -1697,9 +1698,9 @@ function getCarriedForwardAmount(dayClosing, dateStr) {
         return Number(prevDc.newTotal) || 0;
     return 0;
 }
-function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistDayClosing, advance, persistAdvance, pushNow, showToast }) {
+function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistDayClosing, advance, persistAdvance, workingDate, setWorkingDate, pushNow, showToast }) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0;
-    const [date, setDate] = useState(yesterdayStr());
+    const date = workingDate, setDate = setWorkingDate;
     const ms = useMemo(() => aggregateMsForDate(config, msReadings, msLog, date), [config, msReadings, msLog, date]);
     const dieselRec = dieselLog.find((r) => r.date === date);
     const dc = dayClosing[date] || { otherDedOn: false, otherDedDesc: '', otherDedAmt: '', depositBank: '', submitted: false, msLubeReceipts: {} };
