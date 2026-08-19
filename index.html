@@ -631,6 +631,7 @@ function App() {
     const [syncStatus, setSyncStatus] = useState('idle');
     const [lastSyncedAt, setLastSyncedAt] = useState(null);
     const tokenClientRef = useRef(null);
+    const cachedTokenRef = useRef({ token: null, expiresAt: 0 });
     const driveFileIdRef = useRef(null);
     const suppressPushRef = useRef(false);
     const pushTimerRef = useRef(null);
@@ -699,9 +700,21 @@ function App() {
             tokenClientRef.current.callback = (resp) => { if (resp && resp.error)
                 reject(resp);
             else
-                resolve(resp.access_token); };
+                resolve(resp); };
             tokenClientRef.current.requestAccessToken({ prompt: promptType });
         });
+    }
+    // Reuses a still-valid cached token instead of asking Google for a new one every time \u2014
+    // avoids the brief popup/flash that a fresh silent token request can sometimes cause,
+    // now that background saves push to Drive more often.
+    async function getCachedOrFreshToken() {
+        const now = Date.now();
+        if (cachedTokenRef.current.token && now < cachedTokenRef.current.expiresAt - 60000) {
+            return cachedTokenRef.current.token;
+        }
+        const resp = await requestToken('');
+        cachedTokenRef.current = { token: resp.access_token, expiresAt: now + ((Number(resp.expires_in) || 3300) * 1000) };
+        return resp.access_token;
     }
     function buildPayload() {
         return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData };
@@ -801,8 +814,9 @@ function App() {
             return;
         driveSyncInFlightRef.current = true;
         try {
-            const token = await requestToken('consent');
-            await handleConnected(token);
+            const resp = await requestToken('consent');
+            cachedTokenRef.current = { token: resp.access_token, expiresAt: Date.now() + ((Number(resp.expires_in) || 3300) * 1000) };
+            await handleConnected(resp.access_token);
         }
         catch (e) {
             showToast('Could not connect to Google Drive.', 'red');
@@ -845,9 +859,9 @@ function App() {
         driveSyncInFlightRef.current = true;
         setSyncStatus('syncing');
         try {
-            // silent only here \u2014 this can run from a background timer with no user gesture behind it,
-            // so we never risk popping (or having blocked) a real consent screen; reconnecting is always an explicit click
-            const token = await requestToken('');
+            // reuses a cached token when still valid \u2014 only asks Google for a fresh one when it's
+            // actually expired, avoiding a popup/flash on every background save
+            const token = await getCachedOrFreshToken();
             const payload = buildPayload();
             if (driveFileIdRef.current)
                 await driveUpdate(token, driveFileIdRef.current, payload);
@@ -1063,7 +1077,7 @@ function emptyMsDraft() {
         phonepeDetail: emptyPhonepeDetail(), paytmDetail: emptyPhonepeDetail(), denom: Object.assign({}, emptyDenom) };
 }
 function recordKeyMs(date, pumpId) { return date + '::' + pumpId; }
-function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog, dieselLog, workingDate, setWorkingDate, showToast }) {
+function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog, dieselLog, workingDate, setWorkingDate, pushNow, showToast }) {
     var _a;
     const entryDate = workingDate, setEntryDate = setWorkingDate;
     const [pumpId, setPumpId] = useState(((_a = config.slots[0]) === null || _a === void 0 ? void 0 : _a.id) || '');
@@ -1084,8 +1098,7 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
             persistMsReadings(Object.assign(Object.assign({}, msReadings), { [entryDate]: Object.assign(Object.assign({}, dayReadings), { [meterId]: lastDefined }) }));
     };
     const shiftCount = rec.shiftCount || 1;
-    const meterCalc = useMemo(() => pump ? computeMeterCheckpoints(config, msReadings, entryDate, pump, shiftCount, rec.checkpoints) : {}, [pump, msReadings, entryDate, shiftCount, rec.checkpoints]);
-    const saveShift = (i, force) => {
+    const meterCalc = useMemo(() => pump ? computeMeterCheckpoints(config, msReadings, entryDate, pump, shiftCount, rec.checkpoints) : {}, [pump, msReadings, entryDate, shiftCount, rec.checkpoints]);    const saveShift = (i, force) => {
         var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
         if (!pump)
             return;
@@ -1119,8 +1132,24 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
         persistMsLog([...msLog.filter((r) => r.id !== recordId), record]);
         updateRec({ saved: Object.assign(Object.assign({}, rec.saved), { [i]: true }) });
         showToast(`Saved ${record.slotLabel} \u2014 ${record.status}`, record.status === 'OK' ? 'ok' : 'red');
+        if (pushNow) pushNow();
         return true;
     };
+    const autoSaveRef = useRef(null);
+    autoSaveRef.current = () => {
+        if (isDateLocked(entryDate, config)) return;
+        Object.keys(rec.shiftDrafts || {}).forEach((i) => {
+            const draft = rec.shiftDrafts[i];
+            if (draft && draft.cashier && draft.cashier.trim()) saveShift(Number(i), true);
+        });
+    };
+    useEffect(() => {
+        return () => { if (autoSaveRef.current) autoSaveRef.current(); };
+    }, []);
+    useEffect(() => {
+        const t = setInterval(() => { if (autoSaveRef.current) autoSaveRef.current(); }, 90000);
+        return () => clearInterval(t);
+    }, []);
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "MS Daily", action: React.createElement(CalendarDatePicker, { value: entryDate, onChange: setEntryDate, maxDate: todayStr() }) }), isDateLocked(entryDate, config) && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)' } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "This date is locked (older than yesterday) \u2014 turn on \"Allow pre-dated changes\" in Settings to edit it.")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "All pumps \u2014 " + fmtDate(entryDate))), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Pump", "Cashier", "Total", "Final Cash", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, config.slots.map((s) => {
         const savedRecs = msLog.filter((r) => r.date === entryDate && r.slotId === s.id);
         const rec0 = savedRecs[0];
@@ -1381,7 +1410,7 @@ function computeDieselFinance(config, dieselData, dateStr, rec, msLog) {
         totalDieselVolume, dieselTesting, dieselRate, dieselShiftCount, dieselPointSegments, msCashDepositedTotal, creditRecovery,
         finalCash: round2(finalCash), expensesTotal, creditSales, dieselCashTotal: round2(finalCash), dieselDenomVal };
 }
-function DieselDaily({ config, persistConfig, dieselData, persistDieselData, dieselLog, persistDieselLog, msLog, dayClosing, advance, persistAdvance, workingDate, setWorkingDate, showToast }) {
+function DieselDaily({ config, persistConfig, dieselData, persistDieselData, dieselLog, persistDieselLog, msLog, dayClosing, advance, persistAdvance, workingDate, setWorkingDate, pushNow, showToast }) {
     var _a, _b, _c, _d;
     const entryDate = workingDate, setEntryDate = setWorkingDate;
     const [suggestFor, setSuggestFor] = useState(null);
@@ -1464,6 +1493,7 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         fin.shopLubes.forEach((l) => { const line = fin.lubeLines[l.id]; lubeBatchDetail[l.id] = { baseSaleQty: line.baseSaleQty, baseMrp: (l.mrp || l.invoicePrice || 0), batchBreakdown: line.batchBreakdown }; });
         const record = { id: recordId, date: entryDate, cashier: rec.cashier.trim(), pumpBoy: rec.pumpBoy || '',
             personShiftChangeOn: !!rec.personShiftChangeOn, cashier2: rec.cashier2 || '', pumpBoy2: rec.pumpBoy2 || '', shiftSplitPercent: rec.shiftSplitPercent,
+            airman: rec.airman || '', airmanShiftChangeOn: !!rec.airmanShiftChangeOn, airman2: rec.airman2 || '', airmanShiftSplitPercent: rec.airmanShiftSplitPercent,
             dieselShiftBreakOn: !!rec.dieselShiftBreakOn,
             dieselAmt: fin.dieselAmt, lubeAmt: fin.lubeAmt, combinedTotal: fin.combinedTotal, dieselTesting: fin.dieselTesting, totalDieselVolume: fin.totalDieselVolume,
             phonepe: fin.phonepe, paytm: fin.paytm, hpPay: fin.hpPay, finalCash: fin.finalCash, msCashDepositedTotal: fin.msCashDepositedTotal,
@@ -1510,7 +1540,20 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         });
         updateRec({ saved: true, lubeClosingBalances, godownClosingBalances, lubeBatchesClosing });
         showToast('Diesel Daily saved for ' + fmtDate(entryDate));
+        if (pushNow) pushNow();
     };
+    const autoSaveRef = useRef(null);
+    autoSaveRef.current = () => {
+        if (isDateLocked(entryDate, config)) return;
+        if (rec.cashier && rec.cashier.trim()) doSave();
+    };
+    useEffect(() => {
+        return () => { if (autoSaveRef.current) autoSaveRef.current(); };
+    }, []);
+    useEffect(() => {
+        const t = setInterval(() => { if (autoSaveRef.current) autoSaveRef.current(); }, 90000);
+        return () => clearInterval(t);
+    }, []);
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Diesel Daily", action: React.createElement(CalendarDatePicker, { value: entryDate, onChange: setEntryDate, maxDate: todayStr() }) }), isDateLocked(entryDate, config) && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)' } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "This date is locked (older than yesterday) \u2014 turn on \"Allow pre-dated changes\" in Settings to edit it.")), React.createElement("div", { className: isDateLocked(entryDate, config) ? "locked-content" : "" }, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Diesel readings")), React.createElement("label", { className: "toggle", style: { marginBottom: 10 } }, React.createElement("input", { type: "checkbox", checked: !!rec.dieselShiftBreakOn, onChange: (e) => updateRec({ dieselShiftBreakOn: e.target.checked }) }), " Shift break (rate changed mid-day)"), !rec.dieselShiftBreakOn
         ? React.createElement(Field, { label: "Diesel price" }, React.createElement(NumInput, { value: (_c = rec.dieselPrice) !== null && _c !== void 0 ? _c : dieselRate, onChange: (v) => updateRec({ dieselPrice: v }) }))
         : React.createElement("div", { className: "form-grid" }, [0, 1].map((i) => {
@@ -1539,7 +1582,7 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         const needsRestock = line.closingBalance <= 0 && line.closingGodown > 0;
         return React.createElement("tr", { key: l.id }, React.createElement("td", null, l.name, receiptToday && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(entry.receipt)} received @ ${fmt((_b = entry.batchInvoicePrice) !== null && _b !== void 0 ? _b : l.invoicePrice)}`, React.createElement("button", { className: "icon-btn", title: "Undo this receipt", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => updateRec({ lubeEntries: Object.assign(Object.assign({}, rec.lubeEntries), { [l.id]: Object.assign(Object.assign({}, rec.lubeEntries[l.id]), { receiptOn: false, receipt: '', batchInvoicePrice: undefined, batchMrp: undefined }) }) }) }, "\u2715")), line.replenished > 0 && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(line.replenished)} restocked from godown`, React.createElement("button", { className: "icon-btn", title: "Undo last restock", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => setLubeEntry(l.id, 'manualReplenishCount', Math.max(0, (Number(entry.manualReplenishCount) || 0) - 1)) }, "\u2715")), l.feedsMsLubeId && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 }, onClick: () => setBarrelModal({ lubeId: l.id }) }, "Barrel used"))), React.createElement("td", { className: "mono" }, fmtNum(line.closingGodown)), React.createElement("td", { className: "mono" }, fmtNum(line.opening), " ", React.createElement("span", { style: { color: 'var(--text-muted)', fontSize: 11 } }, `(base @ ${fmt(l.mrp || l.invoicePrice)})`)), React.createElement("td", { style: { fontSize: 12, color: 'var(--text-secondary)' } }, batchSummary), React.createElement("td", null, React.createElement(NumInput, { value: (_c = entry.saleQty) !== null && _c !== void 0 ? _c : '', onChange: (v) => setLubeEntry(l.id, 'saleQty', v) })), React.createElement("td", { className: "mono" }, fmtNum(line.closingBalance), needsRestock && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 },
             onClick: () => setLubeEntry(l.id, 'manualReplenishCount', (Number(entry.manualReplenishCount) || 0) + 1) }, `Restock +${fmtNum(l.replenishQty)}`))), React.createElement("td", { className: "mono" }, fmt(line.priceTotal)));
-    })))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Lubes grand total"), React.createElement("span", null, fmt(fin.lubeAmt)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "denom-total-row", style: { marginBottom: 10 } }, React.createElement("span", null, "Combined grand total (diesel + lubes)"), React.createElement("span", null, fmt(fin.combinedTotal))), React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cash reconciliation & shift details"), React.createElement(Pill, { tone: rec.saved ? 'green' : 'muted' }, rec.saved ? 'Saved' : 'Not saved')), React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier name", value: rec.cashier, onChange: (v) => updateRec({ cashier: v }), employees: config.employees, fieldKey: 'diesel_cashier', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy name", value: rec.pumpBoy, onChange: (v) => updateRec({ pumpBoy: v }), employees: config.employees, fieldKey: 'diesel_pumpboy', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Credit sales" }, React.createElement(NumInput, { value: rec.creditSales, onChange: (v) => updateRec({ creditSales: v }) })), React.createElement(Field, { label: "Credit recovery" }, React.createElement(NumInput, { value: rec.creditRecovery, onChange: (v) => updateRec({ creditRecovery: v }) })), React.createElement(Field, { label: "PhonePe" }, React.createElement(PhonepeButton, { detail: rec.phonepeDetail, onSave: (d) => updateRec({ phonepeDetail: d }), type: "phonepe", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "Paytm" }, React.createElement(PhonepeButton, { detail: rec.paytmDetail, onSave: (d) => updateRec({ paytmDetail: d }), type: "paytm", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "HP Pay / DTPlus" }, React.createElement(NumInput, { value: rec.hpPay, onChange: (v) => updateRec({ hpPay: v }) }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.personShiftChangeOn, onChange: (e) => updateRec({ personShiftChangeOn: e.target.checked }) }), " Shift change (person changed mid-day) \u2014 splits day pay between two people"), rec.personShiftChangeOn && React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier 2 (2nd half)", value: rec.cashier2, onChange: (v) => updateRec({ cashier2: v }), employees: config.employees, fieldKey: 'diesel_cashier2', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy 2 (2nd half)", value: rec.pumpBoy2, onChange: (v) => updateRec({ pumpBoy2: v }), employees: config.employees, fieldKey: 'diesel_pumpboy2', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Split (% to 1st person)", hint: "Default 50/50 \u2014 adjust for a half-shift vs. a different split" }, React.createElement(NumInput, { value: (_d = rec.shiftSplitPercent) !== null && _d !== void 0 ? _d : '', onChange: (v) => updateRec({ shiftSplitPercent: v }), placeholder: "50" }))), React.createElement("div", { className: "card-head" }, React.createElement("h4", null, "Expenses"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addExpense }, React.createElement(IconPlus, { size: 14 }), " Add expense")), (rec.expenses || []).map((e, idx) => { const expType = e.type || 'misc'; const filteredLubes = fin.shopLubes.filter((l) => /waste|dist/i.test(l.name)); const lubeOptions = filteredLubes.length > 0 ? filteredLubes : fin.shopLubes; return React.createElement("div", { key: idx, className: "form-grid", style: { alignItems: 'flex-end' } },
+    })))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Lubes grand total"), React.createElement("span", null, fmt(fin.lubeAmt)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "denom-total-row", style: { marginBottom: 10 } }, React.createElement("span", null, "Combined grand total (diesel + lubes)"), React.createElement("span", null, fmt(fin.combinedTotal))), React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cash reconciliation & shift details"), React.createElement(Pill, { tone: rec.saved ? 'green' : 'muted' }, rec.saved ? 'Saved' : 'Not saved')), React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier name", value: rec.cashier, onChange: (v) => updateRec({ cashier: v }), employees: config.employees, fieldKey: 'diesel_cashier', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy name", value: rec.pumpBoy, onChange: (v) => updateRec({ pumpBoy: v }), employees: config.employees, fieldKey: 'diesel_pumpboy', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Credit sales" }, React.createElement(NumInput, { value: rec.creditSales, onChange: (v) => updateRec({ creditSales: v }) })), React.createElement(Field, { label: "Credit recovery" }, React.createElement(NumInput, { value: rec.creditRecovery, onChange: (v) => updateRec({ creditRecovery: v }) })), React.createElement(Field, { label: "PhonePe" }, React.createElement(PhonepeButton, { detail: rec.phonepeDetail, onSave: (d) => updateRec({ phonepeDetail: d }), type: "phonepe", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "Paytm" }, React.createElement(PhonepeButton, { detail: rec.paytmDetail, onSave: (d) => updateRec({ paytmDetail: d }), type: "paytm", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "HP Pay / DTPlus" }, React.createElement(NumInput, { value: rec.hpPay, onChange: (v) => updateRec({ hpPay: v }) }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.personShiftChangeOn, onChange: (e) => updateRec({ personShiftChangeOn: e.target.checked }) }), " Shift change (person changed mid-day) \u2014 splits day pay between two people"), rec.personShiftChangeOn && React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier 2 (2nd half)", value: rec.cashier2, onChange: (v) => updateRec({ cashier2: v }), employees: config.employees, fieldKey: 'diesel_cashier2', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy 2 (2nd half)", value: rec.pumpBoy2, onChange: (v) => updateRec({ pumpBoy2: v }), employees: config.employees, fieldKey: 'diesel_pumpboy2', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Split (% to 1st person)", hint: "Default 50/50 \u2014 adjust for a half-shift vs. a different split" }, React.createElement(NumInput, { value: (_d = rec.shiftSplitPercent) !== null && _d !== void 0 ? _d : '', onChange: (v) => updateRec({ shiftSplitPercent: v }), placeholder: "50" }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.airmanShiftChangeOn, onChange: (e) => updateRec({ airmanShiftChangeOn: e.target.checked }) }), " Air duty shift change (multiple air-men today) \u2014 splits attendance between two people"), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Airman" }, React.createElement("select", { className: "select-input", value: rec.airman || '', onChange: (e) => updateRec({ airman: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), config.employees.filter((emp) => emp.airOn).map((emp) => React.createElement("option", { key: emp.id, value: emp.name }, emp.name)))), rec.airmanShiftChangeOn && React.createElement(Field, { label: "Airman 2" }, React.createElement("select", { className: "select-input", value: rec.airman2 || '', onChange: (e) => updateRec({ airman2: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), config.employees.filter((emp) => emp.airOn).map((emp) => React.createElement("option", { key: emp.id, value: emp.name }, emp.name)))), rec.airmanShiftChangeOn && React.createElement(Field, { label: "Split (% to 1st air-man)", hint: "Default 50/50" }, React.createElement(NumInput, { value: rec.airmanShiftSplitPercent !== undefined && rec.airmanShiftSplitPercent !== null ? rec.airmanShiftSplitPercent : '', onChange: (v) => updateRec({ airmanShiftSplitPercent: v }), placeholder: "50" }))), React.createElement("div", { className: "card-head" }, React.createElement("h4", null, "Expenses"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addExpense }, React.createElement(IconPlus, { size: 14 }), " Add expense")), (rec.expenses || []).map((e, idx) => { const expType = e.type || 'misc'; const filteredLubes = fin.shopLubes.filter((l) => /waste|dist/i.test(l.name)); const lubeOptions = filteredLubes.length > 0 ? filteredLubes : fin.shopLubes; return React.createElement("div", { key: idx, className: "form-grid", style: { alignItems: 'flex-end' } },
   React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: expType, onChange: (ev) => updExpense(idx, { type: ev.target.value, employeeName: '', lubeId: '' }) },
     React.createElement("option", { value: "misc" }, "Misc"), React.createElement("option", { value: "tt" }, "TT"), React.createElement("option", { value: "advance" }, "Advance"), React.createElement("option", { value: "lube" }, "Lube"))),
   expType === 'advance' ? React.createElement(Field, { label: "Employee" }, React.createElement("select", { className: "select-input", value: e.employeeName || '', onChange: (ev) => updExpense(idx, { employeeName: ev.target.value }) },
@@ -2061,7 +2104,7 @@ function computeSalaryWorking(config, msLog, dieselLog, monthKey) {
     const credits = {};
     function ensure(name) { if (!name)
         return null; if (!credits[name])
-        credits[name] = { msVolume: 0, powerVolume: 0, msPowerComm: 0, volume: 0, dieselDays: 0, pumpBoyDays: 0, dieselDayPay: 0, dieselSplitShare: 0, attdDates: new Set() }; return credits[name]; }
+        credits[name] = { msVolume: 0, powerVolume: 0, msPowerComm: 0, volume: 0, dieselDays: 0, pumpBoyDays: 0, dieselDayPay: 0, dieselSplitShare: 0, airDaysFromDaily: 0, attdDates: new Set() }; return credits[name]; }
     function credit(name, field, amt) { const c = ensure(name); if (c)
         c[field] += amt; }
     function markAttendance(name, date) { const c = ensure(name); if (c)
@@ -2129,6 +2172,12 @@ function computeSalaryWorking(config, msLog, dieselLog, monthKey) {
                 markAttendance(r.pumpBoy, r.date);
             }
         }
+        if (r.airmanShiftChangeOn) {
+            const apct = (Number(r.airmanShiftSplitPercent) || 50) / 100;
+            if (r.airman) { credit(r.airman, 'airDaysFromDaily', apct); markAttendance(r.airman, r.date); }
+            if (r.airman2) { credit(r.airman2, 'airDaysFromDaily', 1 - apct); markAttendance(r.airman2, r.date); }
+        }
+        else if (r.airman) { credit(r.airman, 'airDaysFromDaily', 1); markAttendance(r.airman, r.date); }
     });
     Object.values(credits).forEach((c) => { c.attd = c.attdDates.size; delete c.attdDates; });
     return credits;
@@ -2164,16 +2213,19 @@ function SalaryWorkingReport({ config, msLog, dieselLog, salaryRuns }) {
     const rows = names.map((n) => {
         var _a, _b, _c, _d, _e, _f;
         const emp = config.employees.find((e) => e.name === n);
-        const c = credits[n] || { attd: 0, dieselDays: 0, pumpBoyDays: 0, msVolume: 0, powerVolume: 0, msPowerComm: 0, dieselDayPay: 0, dieselSplitShare: 0 };
+        const c = credits[n] || { attd: 0, dieselDays: 0, pumpBoyDays: 0, msVolume: 0, powerVolume: 0, msPowerComm: 0, dieselDayPay: 0, dieselSplitShare: 0, airDaysFromDaily: 0 };
         const totalMS = round2((c.msVolume || 0) + (c.powerVolume || 0));
         const isAir = !!(emp && emp.airOn);
-        const airDays = isAir ? (Number(((_b = (_a = runData.overrides) === null || _a === void 0 ? void 0 : _a[n]) === null || _b === void 0 ? void 0 : _b.attendance) !== undefined ? (_d = (_c = runData.overrides) === null || _c === void 0 ? void 0 : _c[n]) === null || _d === void 0 ? void 0 : _d.attendance : (_f = (_e = runData.overrides) === null || _e === void 0 ? void 0 : _e[n]) === null || _f === void 0 ? void 0 : _f.airAttendance) || 0) : 0;
+        const overrideAttendance = (_b = (_a = runData.overrides) === null || _a === void 0 ? void 0 : _a[n]) === null || _b === void 0 ? void 0 : _b.attendance;
+        const legacyAirAttendance = (_d = (_c = runData.overrides) === null || _c === void 0 ? void 0 : _c[n]) === null || _d === void 0 ? void 0 : _d.airAttendance;
+        const derivedAirDays = round2(c.airDaysFromDaily || 0);
+        const airDays = isAir ? (Number(overrideAttendance !== undefined ? overrideAttendance : (derivedAirDays > 0 ? derivedAirDays : legacyAirAttendance)) || 0) : 0;
         const totalSalary = isAir ? round2(airDays * (Number(emp.airRate) || 0) + (c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0)) : round2((c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
         return { name: n, attd: c.attd || 0, dieselDays: c.dieselDays || 0, pumpBoyDays: c.pumpBoyDays || 0, msVolume: c.msVolume || 0, powerVolume: c.powerVolume || 0, totalMS, isAir, airDays, totalSalary, group: employeeGroupOrder(emp, c) };
     }).sort((a, b) => a.group - b.group || a.name.localeCompare(b.name));
     const grand = rows.reduce((acc, r) => { acc.attd += r.attd; acc.dieselDays += r.dieselDays; acc.pumpBoyDays += r.pumpBoyDays; acc.msVolume += r.msVolume; acc.powerVolume += r.powerVolume; acc.totalMS += r.totalMS; acc.airDays += r.airDays; acc.totalSalary += r.totalSalary; return acc; }, { attd: 0, dieselDays: 0, pumpBoyDays: 0, msVolume: 0, powerVolume: 0, totalMS: 0, airDays: 0, totalSalary: 0 });
     const [detailFor, setDetailFor] = useState(null);
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), React.createElement("div", { className: "empty-hint print-hide" }, "Air attendance is entered on the Net Salary Report tab \u2014 shown here read-only for reference. Click any Total Salary figure to see the day-by-day working."), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attd", "Sum of Diesel", "Pump boy", "Sum of MS", "Sum of Power", "Total MS", "Sum of Air", "Total Salary"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.attd)), React.createElement("td", { className: "mono" }, r.dieselDays ? fmtNum(r.dieselDays) : ''), React.createElement("td", { className: "mono" }, r.pumpBoyDays ? fmtNum(r.pumpBoyDays) : ''), React.createElement("td", { className: "mono" }, r.msVolume ? fmtNum(r.msVolume) : ''), React.createElement("td", { className: "mono" }, r.powerVolume ? fmtNum(r.powerVolume) : ''), React.createElement("td", { className: "mono" }, fmtNum(r.totalMS)), React.createElement("td", { className: "mono" }, r.isAir ? fmtNum(r.airDays) : '\u2014'), React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link print-hide", onClick: () => setDetailFor(r.name) }, fmt(r.totalSalary)), React.createElement("span", { className: "print-only" }, fmt(r.totalSalary)))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Grand Total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.attd))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.dieselDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.pumpBoyDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.msVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.powerVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.totalMS))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.airDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.totalSalary)))))), detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (_a = rows.find((r) => r.name === detailFor)) === null || _a === void 0 ? void 0 : _a.totalSalary, onClose: () => setDetailFor(null) }));
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), React.createElement("div", { className: "empty-hint print-hide" }, "Air attendance is now counted automatically from the \"Airman\" field in Diesel Daily each day \u2014 shown here read-only for reference. You can still override the total for a month on the Net Salary Report tab if needed. Click any Total Salary figure to see the day-by-day working."), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attd", "Sum of Diesel", "Pump boy", "Sum of MS", "Sum of Power", "Total MS", "Sum of Air", "Total Salary"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.attd)), React.createElement("td", { className: "mono" }, r.dieselDays ? fmtNum(r.dieselDays) : ''), React.createElement("td", { className: "mono" }, r.pumpBoyDays ? fmtNum(r.pumpBoyDays) : ''), React.createElement("td", { className: "mono" }, r.msVolume ? fmtNum(r.msVolume) : ''), React.createElement("td", { className: "mono" }, r.powerVolume ? fmtNum(r.powerVolume) : ''), React.createElement("td", { className: "mono" }, fmtNum(r.totalMS)), React.createElement("td", { className: "mono" }, r.isAir ? fmtNum(r.airDays) : '\u2014'), React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link print-hide", onClick: () => setDetailFor(r.name) }, fmt(r.totalSalary)), React.createElement("span", { className: "print-only" }, fmt(r.totalSalary)))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Grand Total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.attd))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.dieselDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.pumpBoyDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.msVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.powerVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.totalMS))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.airDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.totalSalary)))))), detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (_a = rows.find((r) => r.name === detailFor)) === null || _a === void 0 ? void 0 : _a.totalSalary, onClose: () => setDetailFor(null) }));
 }
 function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, salaryRuns, persistSalaryRuns, showToast }) {
     var _a;
@@ -2193,7 +2245,8 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         // "attendance" replaces the old air-only field \u2014 legacy airAttendance still read for backward compatibility
         let attendance, attendanceEditable, salary;
         if (emp && emp.airOn) {
-            attendance = ov.attendance !== undefined ? ov.attendance : ((_a = ov.airAttendance) !== null && _a !== void 0 ? _a : '');
+            const derivedAirDays = round2((c.airDaysFromDaily || 0));
+            attendance = ov.attendance !== undefined ? ov.attendance : (derivedAirDays > 0 ? derivedAirDays : ((_a = ov.airAttendance) !== null && _a !== void 0 ? _a : ''));
             attendanceEditable = true;
             const airPay = (Number(attendance) || 0) * (Number(emp.airRate) || 0);
             salary = round2(airPay + (c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
@@ -2888,35 +2941,80 @@ function ttUid() { return 'tt_' + Math.random().toString(36).slice(2, 10); }
 function ttDaysBetween(from, to) { if (!from || !to) return 0; const a = new Date(from + 'T00:00:00'), b = new Date(to + 'T00:00:00'); const diff = Math.round((b - a) / 86400000) + 1; return diff > 0 ? diff : 0; }
 function emptyTTRow() { return { id: ttUid(), name: '', kl: '12', role: 'Driver', trips: '' }; }
 
+const TT_OUTLETS = ['Annamalaiyar', 'Sesha', 'Swamiraj'];
+function ttMonthKeyOf(d) { return d.slice(0, 7); }
+function getLatestTripEntry(tripLogForKl) {
+  if (!tripLogForKl || tripLogForKl.length === 0) return null;
+  return [...tripLogForKl].sort((a, b) => a.date.localeCompare(b.date))[tripLogForKl.length - 1];
+}
+function emptyTripLogEntry() { return { id: ttUid(), date: todayStr(), openingKm: '', closingKm: '', diesel: '', waste: '', outlet: '', driver: '', cleaner: '', maintenance: '' }; }
+function countTripsForPayroll(tripLog, dateFrom, dateTo) {
+  const counts = {};
+  ['12', '20'].forEach((kl) => {
+    ((tripLog && tripLog[kl]) || []).filter((t) => t.date >= dateFrom && t.date <= dateTo).forEach((t) => {
+      if (t.driver) { const k = t.driver + '|' + kl + '|Driver'; counts[k] = (counts[k] || 0) + 1; }
+      if (t.cleaner) { const k = t.cleaner + '|' + kl + '|Cleaner'; counts[k] = (counts[k] || 0) + 1; }
+    });
+  });
+  return Object.keys(counts).map((k) => { const parts = k.split('|'); return { name: parts[0], kl: parts[1], role: parts[2], trips: counts[k] }; });
+}
+
 function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow, showToast }) {
   const [sub, setSub] = useState('trips');
+  const [tripKl, setTripKl] = useState('12');
+  const [tripMonth, setTripMonth] = useState(monthKeyOf(todayStr()));
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
-  const [tripRows, setTripRows] = useState([emptyTTRow()]);
   const [salaryDraft, setSalaryDraft] = useState(null);
+  const [newTrip, setNewTrip] = useState(emptyTripLogEntry());
   const ttStaffNames = config.employees.filter((e) => e.ttStaff).map((e) => e.name);
+  const tripLog = ttData.tripLog || { '12': [], '20': [] };
 
-  const updateRow = (id, patch) => setTripRows((rows) => rows.map((r) => r.id === id ? { ...r, ...patch } : r));
-  const addRow = () => setTripRows((rows) => [...rows, emptyTTRow()]);
-  const removeRow = (id) => setTripRows((rows) => rows.filter((r) => r.id !== id));
+  const latestEntry = getLatestTripEntry(tripLog[tripKl]);
+  const derivedOpeningKm = latestEntry ? latestEntry.closingKm : null;
+
+  const updateNewTrip = (patch) => setNewTrip((t) => ({ ...t, ...patch }));
+
+  const addTripEntry = () => {
+    const opening = derivedOpeningKm !== null ? Number(derivedOpeningKm) : Number(newTrip.openingKm);
+    const closing = Number(newTrip.closingKm);
+    if (!newTrip.date) { showToast('Pick a date for this trip.', 'red'); return; }
+    if (derivedOpeningKm === null && !(Number(newTrip.openingKm) > 0)) { showToast('Enter the starting Opening KM \u2014 this is the very first trip logged for this vehicle.', 'red'); return; }
+    if (!(closing > opening)) { showToast('Closing KM must be greater than Opening KM.', 'red'); return; }
+    if (!newTrip.driver) { showToast('Select a driver.', 'red'); return; }
+    const totalKm = round2(closing - opening);
+    const diesel = Number(newTrip.diesel) || 0;
+    const mileage = totalKm > 0 ? round2(diesel / totalKm) : 0;
+    const entry = { id: ttUid(), date: newTrip.date, openingKm: opening, closingKm: closing, totalKm, diesel, waste: Number(newTrip.waste) || 0, mileage, outlet: newTrip.outlet, driver: newTrip.driver, cleaner: newTrip.cleaner, maintenance: newTrip.maintenance, savedAt: new Date().toISOString() };
+    const nextLog = { ...tripLog, [tripKl]: [...(tripLog[tripKl] || []), entry] };
+    persistTtData({ ...ttData, tripLog: nextLog });
+    setNewTrip(emptyTripLogEntry());
+    if (pushNow) pushNow();
+    showToast('Trip logged.');
+  };
+
+  const removeTripEntry = (id) => {
+    const nextLog = { ...tripLog, [tripKl]: (tripLog[tripKl] || []).filter((t) => t.id !== id) };
+    persistTtData({ ...ttData, tripLog: nextLog });
+    if (pushNow) pushNow();
+  };
+
+  const monthRows = (tripLog[tripKl] || []).filter((t) => ttMonthKeyOf(t.date) === tripMonth).sort((a, b) => a.date.localeCompare(b.date));
 
   const generate = () => {
-    if (!dateFrom || !dateTo) { showToast('Set the trip date range at the top first.', 'red'); return; }
-    if (tripRows.some((r) => r.name && !(Number(r.trips) > 0))) { showToast('Enter a number of trips for every named row.', 'red'); return; }
-    const valid = tripRows.filter((r) => r.name && Number(r.trips) > 0);
-    if (valid.length === 0) { showToast('Add at least one employee row first.', 'red'); return; }
-    const days = ttDaysBetween(dateFrom, dateTo);
+    if (!dateFrom || !dateTo) { showToast('Set the payroll date range at the top first.', 'red'); return; }
+    const counted = countTripsForPayroll(tripLog, dateFrom, dateTo);
+    if (counted.length === 0) { showToast('No logged trips fall inside that date range.', 'red'); return; }
     const draft = {};
-    valid.forEach((r) => {
-      const trips = Number(r.trips) || 0;
-      const rate = RATES_TT[r.kl + '_' + r.role] || 0;
-      const amount = trips * rate;
-      if (!draft[r.name]) draft[r.name] = { rows: [], base: 0, bonus: '', bonusDesc: '', advance: '' };
-      draft[r.name].rows.push({ ...r, dateFrom, dateTo, days, trips, rate, amount });
-      draft[r.name].base += amount;
+    counted.forEach((c) => {
+      const rate = RATES_TT[c.kl + '_' + c.role] || 0;
+      const amount = c.trips * rate;
+      if (!draft[c.name]) draft[c.name] = { rows: [], base: 0, bonus: '', bonusDesc: '', advance: '' };
+      draft[c.name].rows.push({ kl: c.kl, role: c.role, trips: c.trips, rate, amount });
+      draft[c.name].base += amount;
     });
     setSalaryDraft(draft);
-    showToast('Salary calculated \u2014 review below, then Settle when ready.');
+    showToast('Salary calculated from logged trips \u2014 review below, then Settle when ready.');
   };
 
   const updateSalaryField = (name, field, value) => setSalaryDraft((d) => ({ ...d, [name]: { ...d[name], [field]: value } }));
@@ -2940,9 +3038,8 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
       batch.entries.push({ name, rows: d.rows, base: round2(d.base), bonus, bonusDesc: d.bonusDesc, advance: adv, net });
     });
     persistAdvance({ balances, log });
-    persistTtData({ history: [batch, ...(ttData.history || [])] });
+    persistTtData({ ...ttData, history: [batch, ...(ttData.history || [])] });
     setSalaryDraft(null);
-    setTripRows([emptyTTRow()]);
     setDateFrom(''); setDateTo('');
     showToast('Settled \u2014 advances recorded, entries added to History.');
     if (pushNow) pushNow();
@@ -2953,33 +3050,53 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
     React.createElement(PageHeader, { title: "TT \u2014 Tanker Transport" }),
     React.createElement("div", { className: "tab-switch" }, ['trips', 'salary', 'history'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'trips' ? 'Trips' : s === 'salary' ? 'Salary' : 'History'))),
 
-    sub === 'trips' && React.createElement("div", { className: "card" },
-      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Trip entries")),
-      React.createElement("div", { className: "empty-hint" }, "Keep adding or editing rows here as needed \u2014 go to the Salary tab and click Generate whenever you're ready to calculate, and come back here to make changes any time before Settling."),
-      ttStaffNames.length === 0 && React.createElement("div", { className: "empty-hint" }, "No employees marked \"TT staff\" yet \u2014 add that flag in Master Data \u2192 Employees."),
-      React.createElement("div", { className: "form-grid", style: { maxWidth: 420, marginBottom: 16 } },
-        React.createElement(Field, { label: "Trip date from" }, React.createElement(CalendarDatePicker, { value: dateFrom, onChange: setDateFrom, maxDate: todayStr() })),
-        React.createElement(Field, { label: "Trip date to" }, React.createElement(CalendarDatePicker, { value: dateTo, onChange: setDateTo, maxDate: todayStr() }))),
-      dateFrom && dateTo && React.createElement("div", { className: "empty-hint" }, `Applies to every row below \u2014 ${ttDaysBetween(dateFrom, dateTo)} day(s) range.`),
-      tripRows.map((r) => React.createElement("div", { key: r.id, className: "form-grid", style: { alignItems: 'flex-end', marginBottom: 8 } },
-        React.createElement(Field, { label: "Employee" }, React.createElement("select", { className: "select-input", value: r.name, onChange: (ev) => updateRow(r.id, { name: ev.target.value }) },
-          React.createElement("option", { value: "" }, "\u2014 select \u2014"), ttStaffNames.map((n) => React.createElement("option", { key: n, value: n }, n)))),
-        React.createElement(Field, { label: "No. of trips" }, React.createElement(NumInput, { value: r.trips, onChange: (v) => updateRow(r.id, { trips: v }) })),
-        React.createElement(Field, { label: "Capacity" }, React.createElement("select", { className: "select-input", value: r.kl, onChange: (ev) => updateRow(r.id, { kl: ev.target.value }) },
-          React.createElement("option", { value: "12" }, "12 KL"), React.createElement("option", { value: "20" }, "20 KL"))),
-        React.createElement(Field, { label: "Role" }, React.createElement("select", { className: "select-input", value: r.role, onChange: (ev) => updateRow(r.id, { role: ev.target.value }) },
-          React.createElement("option", { value: "Driver" }, "Driver"), React.createElement("option", { value: "Cleaner" }, "Cleaner"))),
-        React.createElement("div", { style: { display: 'flex', gap: 6 } },
-          React.createElement("button", { className: "btn btn-secondary btn-xs", title: "Add another trip row", onClick: addRow }, "+"),
-          tripRows.length > 1 && React.createElement("button", { className: "icon-btn", title: "Remove this row", onClick: () => removeRow(r.id) }, React.createElement(IconTrash, { size: 14 })))))
+    sub === 'trips' && React.createElement("div", null,
+      React.createElement("div", { className: "tab-switch" }, ['12', '20'].map((kl) => React.createElement("button", { key: kl, className: tripKl === kl ? 'active' : '', onClick: () => setTripKl(kl) }, kl + ' KL'))),
+      React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Log a trip \u2014 " + tripKl + " KL")),
+        ttStaffNames.length === 0 && React.createElement("div", { className: "empty-hint" }, "No employees marked \"TT staff\" yet \u2014 add that flag in Master Data \u2192 Employees."),
+        React.createElement("div", { className: "form-grid" },
+          React.createElement(Field, { label: "Date" }, React.createElement(CalendarDatePicker, { value: newTrip.date, onChange: (v) => updateNewTrip({ date: v }), maxDate: todayStr() })),
+          React.createElement(Field, { label: "Opening KM", hint: derivedOpeningKm !== null ? "Auto-filled from the last trip's Closing KM" : "First trip for this vehicle \u2014 enter its starting reading" },
+            derivedOpeningKm !== null ? React.createElement("span", { className: "readonly-value" }, fmtNum(derivedOpeningKm)) : React.createElement(NumInput, { value: newTrip.openingKm, onChange: (v) => updateNewTrip({ openingKm: v }) })),
+          React.createElement(Field, { label: "Closing KM" }, React.createElement(NumInput, { value: newTrip.closingKm, onChange: (v) => updateNewTrip({ closingKm: v }) })),
+          React.createElement(Field, { label: "Diesel used (L)" }, React.createElement(NumInput, { value: newTrip.diesel, onChange: (v) => updateNewTrip({ diesel: v }) })),
+          React.createElement(Field, { label: "Waste used" }, React.createElement(NumInput, { value: newTrip.waste, onChange: (v) => updateNewTrip({ waste: v }) })),
+          React.createElement(Field, { label: "Outlet" }, React.createElement("select", { className: "select-input", value: newTrip.outlet, onChange: (e) => updateNewTrip({ outlet: e.target.value }) },
+            React.createElement("option", { value: "" }, "\u2014 select \u2014"), TT_OUTLETS.map((o) => React.createElement("option", { key: o, value: o }, o)))),
+          React.createElement(Field, { label: "Driver" }, React.createElement("select", { className: "select-input", value: newTrip.driver, onChange: (e) => updateNewTrip({ driver: e.target.value }) },
+            React.createElement("option", { value: "" }, "\u2014 select \u2014"), ttStaffNames.map((n) => React.createElement("option", { key: n, value: n }, n)))),
+          React.createElement(Field, { label: "Cleaner" }, React.createElement("select", { className: "select-input", value: newTrip.cleaner, onChange: (e) => updateNewTrip({ cleaner: e.target.value }) },
+            React.createElement("option", { value: "" }, "\u2014 select \u2014"), ttStaffNames.map((n) => React.createElement("option", { key: n, value: n }, n))))),
+        React.createElement(Field, { label: "Maintenance (optional)" }, React.createElement("input", { className: "text-input", value: newTrip.maintenance, onChange: (e) => updateNewTrip({ maintenance: e.target.value }), placeholder: "e.g. tyre change, oil top-up" })),
+        React.createElement("div", { className: "slot-actions", style: { marginTop: 10 } }, React.createElement("button", { className: "btn btn-primary", onClick: addTripEntry }, React.createElement(IconPlus, { size: 14 }), " Log trip"))
+      ),
+      React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, tripKl + " KL trip log"), React.createElement(MonthSelect, { value: tripMonth, onChange: setTripMonth })),
+        monthRows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No trips logged for this vehicle in " + monthLabel(tripMonth) + ".") :
+        React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
+          React.createElement("thead", null, React.createElement("tr", null, ["Date", "Opening", "Closing", "Total KM", "Diesel", "Waste", "Mileage", "Outlet", "Driver", "Cleaner", "Maintenance", ""].map((h) => React.createElement("th", { key: h }, h)))),
+          React.createElement("tbody", null, monthRows.map((t) => React.createElement("tr", { key: t.id },
+            React.createElement("td", null, fmtDate(t.date)), React.createElement("td", { className: "mono" }, fmtNum(t.openingKm)), React.createElement("td", { className: "mono" }, fmtNum(t.closingKm)),
+            React.createElement("td", { className: "mono" }, fmtNum(t.totalKm)), React.createElement("td", { className: "mono" }, fmtNum(t.diesel)), React.createElement("td", { className: "mono" }, fmtNum(t.waste)),
+            React.createElement("td", { className: "mono" }, fmtNum(t.mileage)), React.createElement("td", null, t.outlet), React.createElement("td", null, t.driver), React.createElement("td", null, t.cleaner),
+            React.createElement("td", { style: { fontSize: 12 } }, t.maintenance || '\u2014'),
+            React.createElement("td", null, React.createElement("button", { className: "icon-btn", onClick: () => removeTripEntry(t.id) }, React.createElement(IconTrash, { size: 14 })))))))
+        )
+      )
     ),
 
     sub === 'salary' && React.createElement("div", { className: "card" },
-      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Salary"), React.createElement("button", { className: "btn btn-primary", onClick: generate }, "Generate")),
-      !salaryDraft ? React.createElement("div", { className: "empty-hint" }, "Nothing calculated yet \u2014 fill in entries on the Trips tab, then click \"Generate\" above.") :
+      React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Salary")),
+      React.createElement("div", { className: "empty-hint" }, "Trip counts are pulled automatically from the trip log for whichever date range you set below \u2014 log trips on the Trips tab first."),
+      React.createElement("div", { className: "form-grid", style: { maxWidth: 420, marginBottom: 10 } },
+        React.createElement(Field, { label: "Payroll date from" }, React.createElement(CalendarDatePicker, { value: dateFrom, onChange: setDateFrom, maxDate: todayStr() })),
+        React.createElement(Field, { label: "Payroll date to" }, React.createElement(CalendarDatePicker, { value: dateTo, onChange: setDateTo, maxDate: todayStr() }))),
+      React.createElement("div", { className: "slot-actions", style: { marginBottom: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: generate }, "Generate")),
+      !salaryDraft ? React.createElement("div", { className: "empty-hint" }, "Nothing calculated yet \u2014 set a date range above and click \"Generate\".") :
       React.createElement(React.Fragment, null,
         React.createElement("table", { className: "data-table editable" },
-          React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trip days (by rate)", "Base salary", "Current advance owed", "Bonus", "Bonus description", "New advance", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
+          React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trip counts (by rate)", "Base salary", "Current advance owed", "Bonus", "Bonus description", "New advance", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
           React.createElement("tbody", null, Object.keys(salaryDraft).map((name) => {
             const d = salaryDraft[name];
             const bonus = Number(d.bonus) || 0, adv = Number(d.advance) || 0;
