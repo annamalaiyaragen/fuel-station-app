@@ -328,7 +328,15 @@ async function driveUpdate(token, fileId, content) {
 const uid = (p = 'id') => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const yesterdayStr = () => { const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10); };
-function shiftDateStr(dateStr, days) { const d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10); }
+function shiftDateStr(dateStr, days) {
+    // Timezone-safe: works entirely in UTC date-math, so it can never drift a day
+    // depending on the browser's local timezone offset (this previously broke for IST).
+    const parts = dateStr.split('-').map(Number);
+    const utcMs = Date.UTC(parts[0], parts[1] - 1, parts[2]) + days * 86400000;
+    const dt = new Date(utcMs);
+    const pad = (n) => String(n).padStart(2, '0');
+    return dt.getUTCFullYear() + '-' + pad(dt.getUTCMonth() + 1) + '-' + pad(dt.getUTCDate());
+}
 const fmtDate = (d) => { if (!d)
     return ''; const dt = new Date(d + 'T00:00:00'); return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); };
 const fmt = (n) => { const v = Number(n) || 0; return '\u20B9' + v.toLocaleString('en-IN', { maximumFractionDigits: 2 }); };
@@ -1680,8 +1688,8 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
         if (msLog.some((r) => r.cashier === oldName)) {
             persistMsLog(msLog.map((r) => r.cashier === oldName ? Object.assign(Object.assign({}, r), { cashier: newName }) : r));
         }
-        if (dieselLog.some((r) => r.cashier === oldName || r.pumpBoy === oldName || r.cashier2 === oldName || r.pumpBoy2 === oldName)) {
-            persistDieselLog(dieselLog.map((r) => (Object.assign(Object.assign({}, r), { cashier: r.cashier === oldName ? newName : r.cashier, pumpBoy: r.pumpBoy === oldName ? newName : r.pumpBoy, cashier2: r.cashier2 === oldName ? newName : r.cashier2, pumpBoy2: r.pumpBoy2 === oldName ? newName : r.pumpBoy2 }))));
+        if (dieselLog.some((r) => r.cashier === oldName || r.pumpBoy === oldName || r.cashier2 === oldName || r.pumpBoy2 === oldName || r.airman === oldName || r.airman2 === oldName)) {
+            persistDieselLog(dieselLog.map((r) => (Object.assign(Object.assign({}, r), { cashier: r.cashier === oldName ? newName : r.cashier, pumpBoy: r.pumpBoy === oldName ? newName : r.pumpBoy, cashier2: r.cashier2 === oldName ? newName : r.cashier2, pumpBoy2: r.pumpBoy2 === oldName ? newName : r.pumpBoy2, airman: r.airman === oldName ? newName : r.airman, airman2: r.airman2 === oldName ? newName : r.airman2 }))));
         }
         let salaryChanged = false;
         const newSalaryRuns = {};
@@ -2219,7 +2227,7 @@ function SalaryWorkingReport({ config, msLog, dieselLog, salaryRuns }) {
         const overrideAttendance = (_b = (_a = runData.overrides) === null || _a === void 0 ? void 0 : _a[n]) === null || _b === void 0 ? void 0 : _b.attendance;
         const legacyAirAttendance = (_d = (_c = runData.overrides) === null || _c === void 0 ? void 0 : _c[n]) === null || _d === void 0 ? void 0 : _d.airAttendance;
         const derivedAirDays = round2(c.airDaysFromDaily || 0);
-        const airDays = isAir ? (Number(overrideAttendance !== undefined ? overrideAttendance : (derivedAirDays > 0 ? derivedAirDays : legacyAirAttendance)) || 0) : 0;
+        const airDays = isAir ? (Number((overrideAttendance !== undefined && overrideAttendance !== '') ? overrideAttendance : (derivedAirDays > 0 ? derivedAirDays : legacyAirAttendance)) || 0) : 0;
         const totalSalary = isAir ? round2(airDays * (Number(emp.airRate) || 0) + (c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0)) : round2((c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
         return { name: n, attd: c.attd || 0, dieselDays: c.dieselDays || 0, pumpBoyDays: c.pumpBoyDays || 0, msVolume: c.msVolume || 0, powerVolume: c.powerVolume || 0, totalMS, isAir, airDays, totalSalary, group: employeeGroupOrder(emp, c) };
     }).sort((a, b) => a.group - b.group || a.name.localeCompare(b.name));
@@ -2246,13 +2254,13 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         let attendance, attendanceEditable, salary;
         if (emp && emp.airOn) {
             const derivedAirDays = round2((c.airDaysFromDaily || 0));
-            attendance = ov.attendance !== undefined ? ov.attendance : (derivedAirDays > 0 ? derivedAirDays : ((_a = ov.airAttendance) !== null && _a !== void 0 ? _a : ''));
+            attendance = (ov.attendance !== undefined && ov.attendance !== '') ? ov.attendance : (derivedAirDays > 0 ? derivedAirDays : ((_a = ov.airAttendance) !== null && _a !== void 0 ? _a : ''));
             attendanceEditable = true;
             const airPay = (Number(attendance) || 0) * (Number(emp.airRate) || 0);
             salary = round2(airPay + (c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
         }
         else if (emp && emp.isAdmin) {
-            attendance = ov.attendance !== undefined ? ov.attendance : daysInMonth;
+            attendance = (ov.attendance !== undefined && ov.attendance !== '') ? ov.attendance : daysInMonth;
             attendanceEditable = true;
             salary = round2(((Number(attendance) || 0) / daysInMonth) * (Number(emp.salary) || 0));
         }
