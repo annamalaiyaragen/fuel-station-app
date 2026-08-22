@@ -579,6 +579,7 @@ const defaultConfig = {
     terminals: [],
     tanks: [],
     allowPreDatedChanges: false,
+    ttMaintenance: { '12': [], '20': [] },
     bankSettings: defaultBankSettings(),
     oilPrice: 320, pktPrice: 23,
     meterOpeningReadings: {},
@@ -1758,7 +1759,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
         persistDieselData(next);
         showToast('Stock history cleared for this lube \u2014 it will restart from the Master Data values above.');
     };
-    const tabs = [['station', 'Station & Pumps'], ['employees', 'Employees'], ['terminals', 'Terminals'], ['tanks', 'Tanks'], ['products', 'Products & Lubes'], ['opening', 'Opening Readings']];
+    const tabs = [['station', 'Station & Pumps'], ['employees', 'Employees'], ['terminals', 'Terminals'], ['tanks', 'Tanks'], ['products', 'Products & Lubes'], ['opening', 'Opening Readings'], ['ttmaint', 'TT Maintenance']];
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Master Data", subtitle: "Configure your station, employees, rates, lubes, and terminals.",
         action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, React.createElement(IconSave, { size: 15 }), " Save") }), React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))), sub === 'station' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station")), React.createElement(Field, { label: "Station Name" }, React.createElement("input", { className: "text-input", value: local.stationName, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { stationName: e.target.value }))) }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pumps")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Turn on 2T Oil / Packet Oil for whichever pumps sell them \u2014 these show up as extra fields on that pump's shift card in MS Daily."), local.slots.map((s, idx) => React.createElement("div", { key: s.id, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, s.label), React.createElement("div", { className: "toggle-row" }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includeOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includeOil: e.target.checked }) : x) }))) }), " 2T Oil"), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: s.includePacketOil, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { slots: c.slots.map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { includePacketOil: e.target.checked }) : x) }))) }), " Packet Oil")))))), sub === 'employees' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Employees"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addEmployee }, React.createElement(IconPlus, { size: 14 }), " Add Employee")), local.employees.map((emp, idx) => React.createElement("div", { key: emp.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: emp.name, onChange: (e) => updEmployee(idx, { name: e.target.value }) }), React.createElement("button", { className: "icon-btn", onClick: () => removeEmployee(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { className: "toggle-row", style: { flexWrap: 'wrap', gap: 16 } }, React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.isAdmin, onChange: (e) => updEmployee(idx, { isAdmin: e.target.checked }) }), " Admin staff"), emp.isAdmin && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Salary", React.createElement("input", { className: "text-input", style: { width: 100 }, value: emp.salary, onChange: (e) => updEmployee(idx, { salary: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.pfOn, onChange: (e) => updEmployee(idx, { pfOn: e.target.checked }) }), " PF"), emp.pfOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.pf, onChange: (e) => updEmployee(idx, { pf: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.bonusOn, onChange: (e) => updEmployee(idx, { bonusOn: e.target.checked }) }), " Bonus"), emp.bonusOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Amount", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.bonus, onChange: (e) => updEmployee(idx, { bonus: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.airOn, onChange: (e) => updEmployee(idx, { airOn: e.target.checked }) }), " Air man"), emp.airOn && React.createElement("span", { style: { display: 'flex', gap: 6, alignItems: 'center' } }, "Per day rate", React.createElement("input", { className: "text-input", style: { width: 90 }, value: emp.airRate, onChange: (e) => updEmployee(idx, { airRate: e.target.value }) })), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.hideFromSalary, onChange: (e) => updEmployee(idx, { hideFromSalary: e.target.checked }) }), " Hide from salary (e.g. \"Diesel\" tag entry, or advance-only staff)"), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: emp.ttStaff, onChange: (e) => updEmployee(idx, { ttStaff: e.target.checked }) }), " TT staff (Tanker Transport \u2014 paid via the TT tab, not regular salary)")))), React.createElement("div", { className: "empty-hint" }, "Advance is tracked on its own page (Salary \u2192 Advance) and isn't part of this master data.")), sub === 'terminals' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "PhonePe / Paytm Terminals")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set up each terminal once. In MS Daily and Diesel Daily, picking a terminal auto-fills the Opening value from that terminal's Morning closing the previous day \u2014 you only enter it manually the very first time."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 6 } }, "PhonePe"), (local.terminals || []).filter((t) => t.type === 'phonepe').map((t) => {
         const idx = local.terminals.findIndex((x) => x.id === t.id);
@@ -1775,7 +1776,19 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     })), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Diesel points"), React.createElement("div", { className: "form-grid" }, local.dieselPoints.map((p) => {
         var _a, _b;
         return React.createElement(Field, { key: p.id, label: p.label }, React.createElement(NumInput, { value: (_b = (_a = local.dieselPointOpeningReadings) === null || _a === void 0 ? void 0 : _a[p.id]) !== null && _b !== void 0 ? _b : '', onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { dieselPointOpeningReadings: Object.assign(Object.assign({}, c.dieselPointOpeningReadings), { [p.id]: v }) }))) }));
-    }))));
+    }))), sub === 'ttmaint' && React.createElement(React.Fragment, null, ['12', '20'].map((kl) => React.createElement("div", { key: kl, className: "card" },
+  React.createElement("div", { className: "card-head" }, React.createElement("h3", null, kl + " KL \u2014 Maintenance services"),
+    React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: [...((c.ttMaintenance || {})[kl] || []), { id: uid('tm'), name: 'New service', lastServiceKm: '', intervalKm: '' }] }) }))) }, React.createElement(IconPlus, { size: 14 }), " Add service")),
+  React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Target KM = Last service KM + Interval. A reminder shows on the TT tab once the vehicle's current KM comes within 1,000 km of the target."),
+  React.createElement("table", { className: "data-table editable" },
+    React.createElement("thead", null, React.createElement("tr", null, ["Service", "Last service KM", "Interval (KM)", "Target KM", ""].map((h) => React.createElement("th", { key: h }, h)))),
+    React.createElement("tbody", null, ((local.ttMaintenance || {})[kl] || []).map((m, idx) => React.createElement("tr", { key: m.id },
+      React.createElement("td", null, React.createElement("input", { className: "text-input", value: m.name, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { name: e.target.value }) : x) }) }))) })),
+      React.createElement("td", null, React.createElement(NumInput, { value: m.lastServiceKm, onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { lastServiceKm: v }) : x) }) }))) })),
+      React.createElement("td", null, React.createElement(NumInput, { value: m.intervalKm, onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { intervalKm: v }) : x) }) }))) })),
+      React.createElement("td", { className: "mono" }, fmtNum((Number(m.lastServiceKm) || 0) + (Number(m.intervalKm) || 0))),
+      React.createElement("td", null, React.createElement("button", { className: "icon-btn", onClick: () => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].filter((x, i) => i !== idx) }) }))) }, React.createElement(IconTrash, { size: 14 }))))))
+  )))));
 }
 function aggregateMsForDate(config, msReadings, msLog, date) {
     const dayRecords = msLog.filter((r) => r.date === date);
@@ -3001,7 +3014,7 @@ function countTripsForPayroll(tripLog, dateFrom, dateTo) {
   return Object.keys(counts).map((k) => { const parts = k.split('|'); return { name: parts[0], kl: parts[1], role: parts[2], trips: counts[k] }; });
 }
 
-function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow, showToast }) {
+function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persistTtData, pushNow, showToast }) {
   const [sub, setSub] = useState('trips');
   const [tripKl, setTripKl] = useState('12');
   const [tripMonth, setTripMonth] = useState(monthKeyOf(todayStr()));
@@ -3014,6 +3027,18 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
 
   const latestEntry = getLatestTripEntry(tripLog[tripKl]);
   const derivedOpeningKm = latestEntry ? latestEntry.closingKm : null;
+  const currentKm = latestEntry ? latestEntry.closingKm : null;
+  const maintList = (config.ttMaintenance || {})[tripKl] || [];
+  const dueServices = currentKm === null ? [] : maintList.map((m) => {
+    const target = (Number(m.lastServiceKm) || 0) + (Number(m.intervalKm) || 0);
+    return Object.assign({}, m, { target, remaining: round2(target - currentKm) });
+  }).filter((m) => m.remaining <= 1000);
+  const markServiceDone = (serviceId) => {
+    if (currentKm === null) return;
+    const nextList = maintList.map((m) => m.id === serviceId ? Object.assign({}, m, { lastServiceKm: currentKm }) : m);
+    persistConfig(Object.assign(Object.assign({}, config), { ttMaintenance: Object.assign(Object.assign({}, config.ttMaintenance), { [tripKl]: nextList }) }));
+    showToast('Service marked done \u2014 next target rolled forward.');
+  };
 
   const updateNewTrip = (patch) => setNewTrip((t) => ({ ...t, ...patch }));
 
@@ -3094,6 +3119,10 @@ function TTTab({ config, advance, persistAdvance, ttData, persistTtData, pushNow
 
     sub === 'trips' && React.createElement("div", null,
       React.createElement("div", { className: "tab-switch" }, ['12', '20'].map((kl) => React.createElement("button", { key: kl, className: tripKl === kl ? 'active' : '', onClick: () => setTripKl(kl) }, kl + ' KL'))),
+      dueServices.length > 0 && dueServices.map((m) => React.createElement("div", { key: m.id, className: "confirm-bar", style: { background: 'var(--amber-dim)', color: 'var(--amber)' } },
+        React.createElement(IconAlert, { size: 16 }),
+        React.createElement("span", null, m.remaining <= 0 ? `${m.name} is overdue by ${fmtNum(Math.abs(m.remaining))} km (target was ${fmtNum(m.target)} km).` : `${m.name} is due in ${fmtNum(m.remaining)} km (target ${fmtNum(m.target)} km).`),
+        React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => markServiceDone(m.id) }, "Mark service done"))),
       React.createElement("div", { className: "card" },
         React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Log a trip \u2014 " + tripKl + " KL")),
         ttStaffNames.length === 0 && React.createElement("div", { className: "empty-hint" }, "No employees marked \"TT staff\" yet \u2014 add that flag in Master Data \u2192 Employees."),
