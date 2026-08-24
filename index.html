@@ -391,7 +391,7 @@ function Field({ label, children, hint }) {
     return React.createElement("label", { className: "field" }, React.createElement("span", { className: "field-label" }, label), children, hint ? React.createElement("span", { className: "field-hint" }, hint) : null);
 }
 function NumInput({ value, onChange, placeholder = '0', disabled = false }) {
-    return React.createElement("input", { type: "text", inputMode: "decimal", className: "num-input", value: disabled ? '' : value, placeholder: placeholder, disabled, onChange: (e) => onChange(e.target.value) });
+    return React.createElement("input", { type: "text", inputMode: "decimal", className: "num-input", value: disabled ? '' : value, placeholder: placeholder, disabled, onChange: (e) => onChange(e.target.value.replace(/,/g, '')) });
 }
 function Pill({ children, tone = 'muted', onClick, style }) { return React.createElement("span", { className: `pill pill-${tone}`, onClick, style }, children); }
 function PageHeader({ title, subtitle, action }) {
@@ -1786,7 +1786,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
       React.createElement("td", null, React.createElement("input", { className: "text-input", value: m.name, onChange: (e) => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { name: e.target.value }) : x) }) }))) })),
       React.createElement("td", null, React.createElement(NumInput, { value: m.lastServiceKm, onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { lastServiceKm: v }) : x) }) }))) })),
       React.createElement("td", null, React.createElement(NumInput, { value: m.intervalKm, onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].map((x, i) => i === idx ? Object.assign(Object.assign({}, x), { intervalKm: v }) : x) }) }))) })),
-      React.createElement("td", { className: "mono" }, fmtNum((Number(m.lastServiceKm) || 0) + (Number(m.intervalKm) || 0))),
+      React.createElement("td", { className: "mono" }, fmtNum((Number(String(m.lastServiceKm||0).replace(/,/g,"")) || 0) + (Number(String(m.intervalKm||0).replace(/,/g,"")) || 0))),
       React.createElement("td", null, React.createElement("button", { className: "icon-btn", onClick: () => setLocal((c) => (Object.assign(Object.assign({}, c), { ttMaintenance: Object.assign(Object.assign({}, c.ttMaintenance), { [kl]: c.ttMaintenance[kl].filter((x, i) => i !== idx) }) }))) }, React.createElement(IconTrash, { size: 14 }))))))
   )))));
 }
@@ -2586,7 +2586,7 @@ function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
         // reading is a cumulative running total, not an independent amount \u2014 summing all of them
         // double-counts. So per pump per date, only the LAST shift's reading is used; different
         // pumps (genuinely separate terminals) still add together normally.
-        const lastShiftPerPumpTotals = (fieldName) => {
+        const msLastShiftTotals = (fieldName) => {
             const byDatePump = {};
             msLog.forEach((r) => {
                 const key = r.date + '::' + (r.slotId || '');
@@ -2595,22 +2595,31 @@ function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
             });
             const t = {};
             Object.values(byDatePump).forEach((r) => { t[r.date] = (t[r.date] || 0) + (r[fieldName] || 0); });
+            return t;
+        };
+        const dieselTotals = (fieldName) => {
+            const t = {};
             dieselLog.forEach((r) => { t[r.date] = (t[r.date] || 0) + (r[fieldName] || 0); });
             return t;
         };
-        const totals = lastShiftPerPumpTotals(field);
+        const msNight = msLastShiftTotals(field);
+        const dieselNight = dieselTotals(field);
         if (type === 'paytm') {
-            // Paytm-only, bank reconciliation-only: settlement for a date reflects that date's Night
-            // Closing plus the previous date's Morning Closing combined \u2014 not the previous date's Night Closing.
-            const morningTotals = lastShiftPerPumpTotals('paytmMorningClosing');
-            const dates = new Set([...Object.keys(totals), ...Object.keys(morningTotals).map((d) => shiftDateStr(d, 1))]);
+            // Petrol (MS) side follows the SAME same-day-only pattern as PhonePe.
+            // Diesel side keeps its own pattern: that date's Night Closing plus the
+            // PREVIOUS date's Morning Closing \u2014 these are genuinely different settlement timings.
+            const dieselMorning = dieselTotals('paytmMorningClosing');
+            const dates = new Set([...Object.keys(msNight), ...Object.keys(dieselNight), ...Object.keys(dieselMorning).map((d) => shiftDateStr(d, 1))]);
             dates.forEach((date) => {
-                const combined = round2((totals[date] || 0) + (morningTotals[shiftDateStr(date, -1)] || 0));
+                const combined = round2((msNight[date] || 0) + (dieselNight[date] || 0) + (dieselMorning[shiftDateStr(date, -1)] || 0));
                 if (combined > 0)
                     out.push({ id: type + '_' + date, date, amount: combined });
             });
         }
         else {
+            const totals = {};
+            Object.keys(msNight).forEach((d) => { totals[d] = (totals[d] || 0) + msNight[d]; });
+            Object.keys(dieselNight).forEach((d) => { totals[d] = (totals[d] || 0) + dieselNight[d]; });
             Object.entries(totals).forEach(([date, amount]) => { if (amount > 0)
                 out.push({ id: type + '_' + date, date, amount: round2(amount) }); });
         }
@@ -3030,7 +3039,7 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
   const currentKm = latestEntry ? latestEntry.closingKm : null;
   const maintList = (config.ttMaintenance || {})[tripKl] || [];
   const dueServices = currentKm === null ? [] : maintList.map((m) => {
-    const target = (Number(m.lastServiceKm) || 0) + (Number(m.intervalKm) || 0);
+    const target = (Number(String(m.lastServiceKm||0).replace(/,/g,"")) || 0) + (Number(String(m.intervalKm||0).replace(/,/g,"")) || 0);
     return Object.assign({}, m, { target, remaining: round2(target - currentKm) });
   }).filter((m) => m.remaining <= 1000);
   const markServiceDone = (serviceId) => {
