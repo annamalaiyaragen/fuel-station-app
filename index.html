@@ -416,9 +416,30 @@ function MultiTerminalButton({ detailsMap, onSave, type, terminals, msLog, diese
     }, [open]);
     const totalEffective = relevantTerminals.reduce((s, t) => s + effectiveAmount(tmp[t.id]), 0);
     const updTerminalField = (terminalId, patch) => setTmp((prev) => (Object.assign(Object.assign({}, prev), { [terminalId]: Object.assign(Object.assign(Object.assign({}, emptyPhonepeDetail()), prev[terminalId]), patch) })));
-    return React.createElement(React.Fragment, null, React.createElement("button", { className: "btn btn-secondary btn-block", onClick: () => setOpen(true) }, fmt(totalEffective)), open && ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box", style: { maxWidth: 540 } }, React.createElement("h3", null, (type === 'paytm' ? 'Paytm' : 'PhonePe') + " \u2013 all terminals"), relevantTerminals.length === 0 && React.createElement("div", { className: "empty-hint" }, "No terminals configured yet \u2014 add them in Master Data \u2192 Terminals."), relevantTerminals.map((t) => React.createElement("div", { key: t.id, style: { marginBottom: 14, paddingBottom: 14, borderBottom: '1px solid var(--border)' } }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 6 } }, `${t.label} (${t.terminalNumber})`), React.createElement("div", { className: "form-grid" }, ['opening', 'nightClosing', 'morningClosing'].map((k) => React.createElement(Field, { key: k, label: k === 'opening' ? 'Opening' : k === 'nightClosing' ? 'Night closing' : 'Morning closing' }, React.createElement(NumInput, { value: (tmp[t.id] || {})[k], onChange: (v) => updTerminalField(t.id, { [k]: v }) })))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Effective amount"), React.createElement("span", null, fmt(effectiveAmount(tmp[t.id])))))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, React.createElement("b", null, "Total (all terminals)")), React.createElement("span", null, React.createElement("b", null, fmt(totalEffective)))), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setOpen(false) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: () => { onSave(tmp); setOpen(false); } }, "Save")))), document.body));
+    const triggerBtn = React.createElement("button", { className: "btn btn-secondary btn-block", onClick: () => setOpen(true) }, fmt(totalEffective));
+    if (!open) {
+        return React.createElement(React.Fragment, null, triggerBtn);
+    }
+    const terminalCards = relevantTerminals.map((t) => {
+        const fields = ['opening', 'nightClosing', 'morningClosing'].map((k) => {
+            const label = k === 'opening' ? 'Opening' : k === 'nightClosing' ? 'Night closing' : 'Morning closing';
+            const input = React.createElement(NumInput, { value: (tmp[t.id] || {})[k], onChange: (v) => updTerminalField(t.id, { [k]: v }) });
+            return React.createElement(Field, { key: k, label: label }, input);
+        });
+        const effectiveRow = React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Effective"), React.createElement("span", null, fmt(effectiveAmount(tmp[t.id]))));
+        const title = React.createElement("div", { style: { fontWeight: 500, marginBottom: 8, color: 'var(--text)' } }, `${t.label} (${t.terminalNumber})`);
+        return React.createElement("div", { key: t.id, style: { flex: '1 1 220px', minWidth: 200, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 } }, title, ...fields, effectiveRow);
+    });
+    const cardsRow = React.createElement("div", { style: { display: 'flex', flexDirection: 'row', gap: 14, flexWrap: 'wrap', marginBottom: 12 } }, ...terminalCards);
+    const emptyMsg = relevantTerminals.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No terminals configured yet \u2014 add them in Master Data \u2192 Terminals.") : null;
+    const totalRow = React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, React.createElement("b", null, "Total (all terminals)")), React.createElement("span", null, React.createElement("b", null, fmt(totalEffective))));
+    const actions = React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setOpen(false) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: () => { onSave(tmp); setOpen(false); } }, "Save"));
+    const heading = React.createElement("h3", { style: { color: 'var(--text)' } }, (type === 'paytm' ? 'Paytm' : 'PhonePe') + " \u2013 all terminals");
+    const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 860, background: 'var(--surface)', color: 'var(--text)' } }, heading, emptyMsg, cardsRow, totalRow, actions);
+    const overlay = React.createElement("div", { className: "modal-overlay" }, modalBox);
+    const portal = ReactDOM.createPortal(overlay, document.body);
+    return React.createElement(React.Fragment, null, triggerBtn, portal);
 }
-/* ---------- shared UI primitives ---------- */
 function Gauge({ label, value, tone = 'amber', size = 'md' }) {
     const toneClass = tone === 'green' ? 'gauge-green' : tone === 'red' ? 'gauge-red' : 'gauge-amber';
     return React.createElement("div", { className: `gauge ${toneClass} gauge-${size}` }, React.createElement("div", { className: "gauge-label" }, label), React.createElement("div", { className: "gauge-value" }, fmt(value)));
