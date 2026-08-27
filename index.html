@@ -2483,6 +2483,70 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
   });
   return results.filter((r) => r.opening !== 0 || r.advanceGiven !== 0 || r.recovery !== 0 || r.closing !== 0);
 }
+function previewAdvanceLogCleanup(advance) {
+  const log = advance.log || [];
+  function dedupeByKey(entries, keyFn) {
+    const seen = new Set();
+    const keep = [];
+    const removed = [];
+    entries.forEach((e) => {
+      const key = keyFn(e);
+      if (key === null) { keep.push(e); return; }
+      if (seen.has(key)) { removed.push(e); }
+      else { seen.add(key); keep.push(e); }
+    });
+    return { keep, removed };
+  }
+  const step1 = dedupeByKey(log, (e) => e.dayClosingCashDiffFor ? (e.name + '|dc|' + e.dayClosingCashDiffFor) : null);
+  const step2 = dedupeByKey(step1.keep, (e) => e.dieselExpenseAdvanceFor ? (e.name + '|dx|' + e.dieselExpenseAdvanceFor) : null);
+  const oldReversals = step2.keep.filter((e) => e.type === 'Reversal');
+  const withoutOldReversals = step2.keep.filter((e) => e.type !== 'Reversal');
+  const step3 = dedupeByKey(withoutOldReversals, (e) => (e.monthKey && e.type === 'Recovery') ? (e.name + '|sal|' + e.monthKey) : null);
+  const allRemoved = [...step1.removed, ...step2.removed, ...oldReversals, ...step3.removed];
+  const chronological = [...step3.keep].reverse();
+  const balances = {};
+  chronological.forEach((e) => {
+    let delta = 0;
+    if (e.type === 'Advance') delta = Number(e.amount) || 0;
+    else if (e.type === 'Recovery') delta = -(Number(e.amount) || 0);
+    else if (e.type === 'Reversal') delta = Number(e.amount) || 0;
+    balances[e.name] = round2((balances[e.name] || 0) + delta);
+  });
+  return { cleanedLog: step3.keep, newBalances: balances, removedEntries: allRemoved };
+}
+function AdvanceLogCleanup({ advance, persistAdvance, showToast }) {
+  const [preview, setPreview] = useState(null);
+  const runPreview = () => {
+    const result = previewAdvanceLogCleanup(advance);
+    setPreview(result);
+  };
+  const applyCleanup = () => {
+    if (!preview) return;
+    persistAdvance({ balances: preview.newBalances, log: preview.cleanedLog });
+    showToast(`Cleanup applied \u2014 removed ${preview.removedEntries.length} duplicate entr${preview.removedEntries.length === 1 ? 'y' : 'ies'}.`);
+    setPreview(null);
+  };
+  const removedByName = {};
+  if (preview) {
+    preview.removedEntries.forEach((e) => {
+      if (!removedByName[e.name]) removedByName[e.name] = [];
+      removedByName[e.name].push(e);
+    });
+  }
+  const nameRows = preview ? Object.keys(removedByName).map((name) => {
+    const entries = removedByName[name];
+    const detailLines = entries.map((e, i) => React.createElement("div", { key: i, style: { fontSize: 12 } }, `${e.type} \u20b9${e.amount} \u2014 ${e.desc || (e.dayClosingCashDiffFor ? 'Day Closing ' + e.dayClosingCashDiffFor : e.dieselExpenseAdvanceFor ? 'Diesel Daily ' + e.dieselExpenseAdvanceFor : e.monthKey ? 'Salary ' + e.monthKey : '')}`));
+    return React.createElement("tr", { key: name }, React.createElement("td", null, name), React.createElement("td", null, entries.length), React.createElement("td", null, ...detailLines));
+  }) : [];
+  const previewTable = preview && preview.removedEntries.length > 0 ? React.createElement("table", { className: "data-table", style: { marginTop: 10 } }, React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Duplicate entries found", "Details"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, ...nameRows)) : null;
+  const noneFoundMsg = preview && preview.removedEntries.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No duplicate entries found \u2014 your log is already clean.") : null;
+  const confirmActions = preview && preview.removedEntries.length > 0 ? React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 12 } }, React.createElement("button", { className: "btn btn-primary", onClick: applyCleanup }, "Confirm \u2014 remove these duplicates"), React.createElement("button", { className: "btn btn-ghost", onClick: () => setPreview(null) }, "Cancel")) : null;
+  return React.createElement("div", { className: "card" },
+    React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Clean up duplicate log entries")),
+    React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Finds entries created by old re-submissions (before this was fixed) that duplicated instead of replaced \u2014 keeps only the final correct entry per day/month, recomputes balances from the cleaned log, and never touches unrelated manual entries."),
+    !preview && React.createElement("button", { className: "btn btn-secondary", onClick: runPreview }, "Preview cleanup"),
+    noneFoundMsg, previewTable, confirmActions);
+}
 function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const [advSub, setAdvSub] = useState('balances');
     const [modal, setModal] = useState(null);
@@ -2535,7 +2599,8 @@ function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const logSection = React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "All transactions (unfiltered, most recent first)")), React.createElement("div", null, ...logEntries));
     const modalNode = modal && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `${modal.type} \u2013 ${modal.name}`), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: modal.amount, onChange: (v) => setModal(Object.assign(Object.assign({}, modal), { amount: v })) })), React.createElement(Field, { label: "Date" }, React.createElement("input", { type: "date", className: "date-input", value: modal.date, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { date: e.target.value })) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: modal.desc, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { desc: e.target.value })) })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save }, "Save"))));
     const subTabSwitch = React.createElement("div", { className: "tab-switch" }, ['balances', 'summary'].map((s) => React.createElement("button", { key: s, className: advSub === s ? 'active' : '', onClick: () => setAdvSub(s) }, s === 'balances' ? 'Balances' : 'Monthly Summary')));
-    return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, balanceSection, logSection), modalNode);
+    const cleanupSection = React.createElement(AdvanceLogCleanup, { advance, persistAdvance, showToast });
+    return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, balanceSection, logSection, cleanupSection), modalNode);
 }
 function computeDieselVolumeForDate(config, dieselData, date) {
     const rec = dieselData[date];
