@@ -1578,23 +1578,21 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
             phonepeMorningClosing: ((_g = rec.phonepeDetail) === null || _g === void 0 ? void 0 : _g.morningClosing) !== '' ? Number((_h = rec.phonepeDetail) === null || _h === void 0 ? void 0 : _h.morningClosing) || 0 : undefined,
             paytmMorningClosing: Object.values(rec.paytmDetails || {}).some((d) => d.morningClosing !== '' && d.morningClosing !== undefined) ? Object.values(rec.paytmDetails || {}).reduce((s, d) => s + (Number(d.morningClosing) || 0), 0) : undefined,
             lubeBatchDetail, msGodownTransfers: rec.msGodownTransfers || {}, dieselPointSegments: fin.dieselPointSegments, advanceExpensesApplied: [], savedAt: new Date().toISOString() };
-        // Advance-type expenses: reverse whatever this date previously pushed (safe to re-save), then apply fresh
-        const prevRecord = dieselLog.find((r) => r.id === recordId);
-        const prevApplied = (prevRecord && prevRecord.advanceExpensesApplied) || [];
+        // Advance-type expenses: remove any log entries THIS diesel record previously created (tagged
+        // dieselExpenseAdvanceFor), undoing their balance effect directly \u2014 instead of adding offsetting
+        // reversal lines on top. This means re-saving the same day never inflates the log or the
+        // monthly Advance/Recovery totals; there's always exactly one set of entries per day, per save.
         let advBalances = Object.assign({}, advance.balances);
-        let advLog = advance.log.slice();
-        let advChanged = false;
-        prevApplied.forEach((p) => {
-            advBalances[p.employeeName] = round2((advBalances[p.employeeName] || 0) - p.amount);
-            advLog = [{ name: p.employeeName, type: 'Recovery', amount: p.amount, date: new Date().toISOString(), desc: `Reversing expense-advance for ${fmtDate(entryDate)} (re-saved)`, balanceAfter: advBalances[p.employeeName] }, ...advLog];
-            advChanged = true;
-        });
+        const priorTaggedEntries = advance.log.filter((e) => e.dieselExpenseAdvanceFor === entryDate);
+        priorTaggedEntries.forEach((e) => { advBalances[e.name] = round2((advBalances[e.name] || 0) - e.amount); });
+        let advLog = advance.log.filter((e) => e.dieselExpenseAdvanceFor !== entryDate);
+        let advChanged = priorTaggedEntries.length > 0;
         const advanceExpensesApplied = [];
         (rec.expenses || []).forEach((e) => {
             if (e.type === 'advance' && e.employeeName && Number(e.amount) > 0) {
                 const amt = round2(Number(e.amount));
                 advBalances[e.employeeName] = round2((advBalances[e.employeeName] || 0) + amt);
-                advLog = [{ name: e.employeeName, type: 'Advance', amount: amt, date: new Date().toISOString(), desc: `Diesel Daily expense advance on ${fmtDate(entryDate)}` + (e.desc ? ' - ' + e.desc : ''), balanceAfter: advBalances[e.employeeName] }, ...advLog];
+                advLog = [{ name: e.employeeName, type: 'Advance', amount: amt, date: new Date().toISOString(), desc: `Diesel Daily expense advance on ${fmtDate(entryDate)}` + (e.desc ? ' - ' + e.desc : ''), balanceAfter: advBalances[e.employeeName], dieselExpenseAdvanceFor: entryDate }, ...advLog];
                 advanceExpensesApplied.push({ employeeName: e.employeeName, amount: amt });
                 advChanged = true;
             }
@@ -2001,17 +1999,16 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
             }
         }
         let balances = Object.assign({}, advance.balances);
-        let log = [...advance.log];
-        let advanceChanged = false;
-        const prevAppliedRaw = dc.cashDiffApplied;
-        const prevApplied = Array.isArray(prevAppliedRaw) ? prevAppliedRaw : (prevAppliedRaw ? [prevAppliedRaw] : []);
-        prevApplied.forEach((p) => {
-            balances[p.employee] = round2((balances[p.employee] || 0) + (p.type === 'Advance' ? -p.amount : p.amount));
-            log = [{ name: p.employee, type: p.type === 'Advance' ? 'Recovery' : 'Advance', amount: p.amount,
-                    date: new Date().toISOString(), desc: `Reversing cash ${p.type === 'Advance' ? 'shortage' : 'excess'} adjustment for ${fmtDate(date)}`,
-                    balanceAfter: balances[p.employee], dayClosingCashDiffFor: date }, ...log];
-            advanceChanged = true;
+        // Remove any log entries THIS exact day-closing submission previously created (identified by the
+        // dayClosingCashDiffFor tag), undoing their balance effect directly \u2014 instead of adding offsetting
+        // "reversal" lines on top. This means re-submitting the same day never inflates the log or the
+        // monthly Advance/Recovery totals; there's always exactly one set of entries per day, per submission.
+        const priorEntriesForThisDay = advance.log.filter((e) => e.dayClosingCashDiffFor === date);
+        priorEntriesForThisDay.forEach((e) => {
+            balances[e.name] = round2((balances[e.name] || 0) + (e.type === 'Advance' ? -e.amount : e.amount));
         });
+        let log = advance.log.filter((e) => e.dayClosingCashDiffFor !== date);
+        let advanceChanged = priorEntriesForThisDay.length > 0;
         let cashDiffApplied = [];
         if (cashDiffFlagged && cashDiffReconciled) {
             const type = cashDiff < 0 ? 'Advance' : 'Recovery'; // shortage \u2192 they owe it (Advance); excess \u2192 reduces what they owe (Recovery)
@@ -2379,8 +2376,12 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
     };
     const reverseAndReRun = () => {
         const balances = Object.assign({}, advance.balances);
-        const log = [...advance.log];
-        (submitted.entries || []).forEach((e) => { balances[e.name] = (balances[e.name] || 0) + e.amount; log.unshift({ name: e.name, type: 'Reversal', amount: e.amount, date: new Date().toISOString(), desc: 'Reversing salary for ' + monthLabel(month), balanceAfter: balances[e.name], monthKey: month, reversed: false }); });
+        // Remove this month's previously-submitted entries directly (tagged monthKey), undoing their
+        // balance effect \u2014 instead of adding an offsetting "Reversal" line that inflates the log
+        // and would otherwise keep growing every time the same month gets re-run.
+        const priorEntries = advance.log.filter((e) => e.monthKey === month && e.type === 'Recovery');
+        priorEntries.forEach((e) => { balances[e.name] = round2((balances[e.name] || 0) + e.amount); });
+        const log = advance.log.filter((e) => !(e.monthKey === month && e.type === 'Recovery'));
         persistAdvance({ balances, log });
         persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { submitted: null, confirmReRun: false }) }));
         setTimeout(doSubmit, 0);
@@ -2461,7 +2462,10 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
     let seenThisMonth = false;
     employeeLog.forEach((e) => {
       const entryMonth = e.date.slice(0, 7);
-      const delta = e.type === 'Advance' ? (Number(e.amount) || 0) : -(Number(e.amount) || 0);
+      let delta = 0;
+      if (e.type === 'Advance') delta = Number(e.amount) || 0;
+      else if (e.type === 'Recovery') delta = -(Number(e.amount) || 0);
+      else if (e.type === 'Reversal') delta = Number(e.amount) || 0; // legacy entries from before this was fixed; still affects balance accuracy
       if (entryMonth < monthKey) {
         runningBalance = round2(runningBalance + delta);
       }
@@ -2469,7 +2473,7 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
         if (!seenThisMonth) { opening = runningBalance; seenThisMonth = true; }
         runningBalance = round2(runningBalance + delta);
         if (e.type === 'Advance') advanceGiven = round2(advanceGiven + (Number(e.amount) || 0));
-        else recovery = round2(recovery + (Number(e.amount) || 0));
+        else if (e.type === 'Recovery') recovery = round2(recovery + (Number(e.amount) || 0));
         monthEntries.push(e);
       }
     });
@@ -2480,6 +2484,7 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
   return results.filter((r) => r.opening !== 0 || r.advanceGiven !== 0 || r.recovery !== 0 || r.closing !== 0);
 }
 function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
+    const [advSub, setAdvSub] = useState('balances');
     const [modal, setModal] = useState(null);
     const [summaryMonth, setSummaryMonth] = useState(monthKeyOf(todayStr()));
     const [expandedRow, setExpandedRow] = useState(null);
@@ -2529,7 +2534,8 @@ function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const logEntries = (advance.log || []).slice(0, 30).map((e, i) => React.createElement("div", { key: i, className: "denom-total-row" }, React.createElement("span", null, `${fmtLogDate(e.date)} \u2014 ${e.name} \u2013 ${e.type}${e.monthKey || e.dayClosingCashDiffFor ? ' (auto)' : ''}: ${e.desc || ''}`), React.createElement("span", null, fmt(e.amount))));
     const logSection = React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "All transactions (unfiltered, most recent first)")), React.createElement("div", null, ...logEntries));
     const modalNode = modal && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `${modal.type} \u2013 ${modal.name}`), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: modal.amount, onChange: (v) => setModal(Object.assign(Object.assign({}, modal), { amount: v })) })), React.createElement(Field, { label: "Date" }, React.createElement("input", { type: "date", className: "date-input", value: modal.date, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { date: e.target.value })) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: modal.desc, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { desc: e.target.value })) })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save }, "Save"))));
-    return React.createElement(React.Fragment, null, summarySection, balanceSection, logSection, modalNode);
+    const subTabSwitch = React.createElement("div", { className: "tab-switch" }, ['balances', 'summary'].map((s) => React.createElement("button", { key: s, className: advSub === s ? 'active' : '', onClick: () => setAdvSub(s) }, s === 'balances' ? 'Balances' : 'Monthly Summary')));
+    return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, balanceSection, logSection), modalNode);
 }
 function computeDieselVolumeForDate(config, dieselData, date) {
     const rec = dieselData[date];
