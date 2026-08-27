@@ -2450,10 +2450,34 @@ function SalaryDetailModal({ name, msLog, dieselLog, month, salary, onClose }) {
     return React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box", style: { maxWidth: 640 } }, React.createElement("h3", null, `${name} \u2013 ${monthLabel(month)} working`), anyPremium && React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Rows marked \u2605 had Power sales above ${POWER_THRESHOLD}L in that shift, so that shift's commission was calculated at the higher premium rate (\u20b9${POWER_PREMIUM_RATE.toFixed(2)}/L) instead of the standard rate (\u20b9${MS_COMMISSION_RATE.toFixed(2)}/L).`), rows.some((r) => r.type === 'dieselTag') && React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "On \"share of MS shift\" rows, MS/Power litres shown are the full shift's volume (only the commission amount is split between the two people, not the litres)."), rows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No MS or Diesel activity recorded for this person this month.") :
         React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Role", "MS (L)", "Power (L)", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r, i) => React.createElement("tr", { key: i }, React.createElement("td", null, fmtDate(r.date), r.premiumApplied && ' \u2605'), React.createElement("td", null, r.role), React.createElement("td", { className: "mono" }, r.msDiff !== null ? fmtNum(r.msDiff) : '\u2014'), React.createElement("td", { className: "mono" }, r.powerDiff !== null ? fmtNum(r.powerDiff) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.amount))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 4 }, React.createElement("b", null, "Total (MS + Diesel activity)")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(total)))))), salary !== undefined && Math.abs(total - salary) > 0.5 && React.createElement("div", { className: "empty-hint", style: { padding: '8px 0 0' } }, `Final salary (${fmt(salary)}) differs from this total \u2014 the gap is from Air-duty pay, an Admin flat/prorated salary, or a Bonus/PF/Advance adjustment applied afterward, not shown in this day list.`), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: onClose }, "Close"))));
 }
+// Groups entries created by the same automated re-submission (Day Closing, Diesel Daily, Salary re-run)
+// and keeps only the latest one \u2014 old duplicated reversal/reapply entries from before that was fixed
+// are collapsed down to their final, correct value for reporting purposes. This never touches the
+// actual stored log or balances (which are already correct) \u2014 it only affects what this report displays.
+function dedupeAdvanceLogForReporting(log) {
+  function dedupeByKey(entries, keyFn) {
+    const seen = new Set();
+    const keep = [];
+    entries.forEach((e) => {
+      const key = keyFn(e);
+      if (key === null) { keep.push(e); return; }
+      if (seen.has(key)) return;
+      seen.add(key);
+      keep.push(e);
+    });
+    return keep;
+  }
+  let result = dedupeByKey(log, (e) => e.dayClosingCashDiffFor ? (e.name + '|dc|' + e.dayClosingCashDiffFor) : null);
+  result = dedupeByKey(result, (e) => e.dieselExpenseAdvanceFor ? (e.name + '|dx|' + e.dieselExpenseAdvanceFor) : null);
+  result = result.filter((e) => e.type !== 'Reversal');
+  result = dedupeByKey(result, (e) => (e.monthKey && e.type === 'Recovery') ? (e.name + '|sal|' + e.monthKey) : null);
+  return result;
+}
 function computeMonthlyAdvanceSummary(advance, monthKey) {
-  const names = [...new Set((advance.log || []).map((e) => e.name))];
+  const cleanLog = dedupeAdvanceLogForReporting(advance.log || []);
+  const names = [...new Set(cleanLog.map((e) => e.name))];
   const results = names.map((name) => {
-    const employeeLog = (advance.log || []).filter((e) => e.name === name).slice().sort((a, b) => a.date.localeCompare(b.date));
+    const employeeLog = cleanLog.filter((e) => e.name === name).slice().sort((a, b) => a.date.localeCompare(b.date));
     let runningBalance = 0;
     let opening = 0;
     let advanceGiven = 0;
@@ -2462,10 +2486,7 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
     let seenThisMonth = false;
     employeeLog.forEach((e) => {
       const entryMonth = e.date.slice(0, 7);
-      let delta = 0;
-      if (e.type === 'Advance') delta = Number(e.amount) || 0;
-      else if (e.type === 'Recovery') delta = -(Number(e.amount) || 0);
-      else if (e.type === 'Reversal') delta = Number(e.amount) || 0; // legacy entries from before this was fixed; still affects balance accuracy
+      const delta = e.type === 'Advance' ? (Number(e.amount) || 0) : -(Number(e.amount) || 0);
       if (entryMonth < monthKey) {
         runningBalance = round2(runningBalance + delta);
       }
@@ -2473,7 +2494,7 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
         if (!seenThisMonth) { opening = runningBalance; seenThisMonth = true; }
         runningBalance = round2(runningBalance + delta);
         if (e.type === 'Advance') advanceGiven = round2(advanceGiven + (Number(e.amount) || 0));
-        else if (e.type === 'Recovery') recovery = round2(recovery + (Number(e.amount) || 0));
+        else recovery = round2(recovery + (Number(e.amount) || 0));
         monthEntries.push(e);
       }
     });
@@ -2482,70 +2503,6 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
     return { name, opening, advanceGiven, recovery, closing, entries: monthEntries };
   });
   return results.filter((r) => r.opening !== 0 || r.advanceGiven !== 0 || r.recovery !== 0 || r.closing !== 0);
-}
-function previewAdvanceLogCleanup(advance) {
-  const log = advance.log || [];
-  function dedupeByKey(entries, keyFn) {
-    const seen = new Set();
-    const keep = [];
-    const removed = [];
-    entries.forEach((e) => {
-      const key = keyFn(e);
-      if (key === null) { keep.push(e); return; }
-      if (seen.has(key)) { removed.push(e); }
-      else { seen.add(key); keep.push(e); }
-    });
-    return { keep, removed };
-  }
-  const step1 = dedupeByKey(log, (e) => e.dayClosingCashDiffFor ? (e.name + '|dc|' + e.dayClosingCashDiffFor) : null);
-  const step2 = dedupeByKey(step1.keep, (e) => e.dieselExpenseAdvanceFor ? (e.name + '|dx|' + e.dieselExpenseAdvanceFor) : null);
-  const oldReversals = step2.keep.filter((e) => e.type === 'Reversal');
-  const withoutOldReversals = step2.keep.filter((e) => e.type !== 'Reversal');
-  const step3 = dedupeByKey(withoutOldReversals, (e) => (e.monthKey && e.type === 'Recovery') ? (e.name + '|sal|' + e.monthKey) : null);
-  const allRemoved = [...step1.removed, ...step2.removed, ...oldReversals, ...step3.removed];
-  const chronological = [...step3.keep].reverse();
-  const balances = {};
-  chronological.forEach((e) => {
-    let delta = 0;
-    if (e.type === 'Advance') delta = Number(e.amount) || 0;
-    else if (e.type === 'Recovery') delta = -(Number(e.amount) || 0);
-    else if (e.type === 'Reversal') delta = Number(e.amount) || 0;
-    balances[e.name] = round2((balances[e.name] || 0) + delta);
-  });
-  return { cleanedLog: step3.keep, newBalances: balances, removedEntries: allRemoved };
-}
-function AdvanceLogCleanup({ advance, persistAdvance, showToast }) {
-  const [preview, setPreview] = useState(null);
-  const runPreview = () => {
-    const result = previewAdvanceLogCleanup(advance);
-    setPreview(result);
-  };
-  const applyCleanup = () => {
-    if (!preview) return;
-    persistAdvance({ balances: preview.newBalances, log: preview.cleanedLog });
-    showToast(`Cleanup applied \u2014 removed ${preview.removedEntries.length} duplicate entr${preview.removedEntries.length === 1 ? 'y' : 'ies'}.`);
-    setPreview(null);
-  };
-  const removedByName = {};
-  if (preview) {
-    preview.removedEntries.forEach((e) => {
-      if (!removedByName[e.name]) removedByName[e.name] = [];
-      removedByName[e.name].push(e);
-    });
-  }
-  const nameRows = preview ? Object.keys(removedByName).map((name) => {
-    const entries = removedByName[name];
-    const detailLines = entries.map((e, i) => React.createElement("div", { key: i, style: { fontSize: 12 } }, `${e.type} \u20b9${e.amount} \u2014 ${e.desc || (e.dayClosingCashDiffFor ? 'Day Closing ' + e.dayClosingCashDiffFor : e.dieselExpenseAdvanceFor ? 'Diesel Daily ' + e.dieselExpenseAdvanceFor : e.monthKey ? 'Salary ' + e.monthKey : '')}`));
-    return React.createElement("tr", { key: name }, React.createElement("td", null, name), React.createElement("td", null, entries.length), React.createElement("td", null, ...detailLines));
-  }) : [];
-  const previewTable = preview && preview.removedEntries.length > 0 ? React.createElement("table", { className: "data-table", style: { marginTop: 10 } }, React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Duplicate entries found", "Details"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, ...nameRows)) : null;
-  const noneFoundMsg = preview && preview.removedEntries.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No duplicate entries found \u2014 your log is already clean.") : null;
-  const confirmActions = preview && preview.removedEntries.length > 0 ? React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 12 } }, React.createElement("button", { className: "btn btn-primary", onClick: applyCleanup }, "Confirm \u2014 remove these duplicates"), React.createElement("button", { className: "btn btn-ghost", onClick: () => setPreview(null) }, "Cancel")) : null;
-  return React.createElement("div", { className: "card" },
-    React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Clean up duplicate log entries")),
-    React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Finds entries created by old re-submissions (before this was fixed) that duplicated instead of replaced \u2014 keeps only the final correct entry per day/month, recomputes balances from the cleaned log, and never touches unrelated manual entries."),
-    !preview && React.createElement("button", { className: "btn btn-secondary", onClick: runPreview }, "Preview cleanup"),
-    noneFoundMsg, previewTable, confirmActions);
 }
 function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const [advSub, setAdvSub] = useState('balances');
@@ -2599,8 +2556,7 @@ function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const logSection = React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "All transactions (unfiltered, most recent first)")), React.createElement("div", null, ...logEntries));
     const modalNode = modal && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `${modal.type} \u2013 ${modal.name}`), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: modal.amount, onChange: (v) => setModal(Object.assign(Object.assign({}, modal), { amount: v })) })), React.createElement(Field, { label: "Date" }, React.createElement("input", { type: "date", className: "date-input", value: modal.date, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { date: e.target.value })) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: modal.desc, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { desc: e.target.value })) })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save }, "Save"))));
     const subTabSwitch = React.createElement("div", { className: "tab-switch" }, ['balances', 'summary'].map((s) => React.createElement("button", { key: s, className: advSub === s ? 'active' : '', onClick: () => setAdvSub(s) }, s === 'balances' ? 'Balances' : 'Monthly Summary')));
-    const cleanupSection = React.createElement(AdvanceLogCleanup, { advance, persistAdvance, showToast });
-    return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, balanceSection, logSection, cleanupSection), modalNode);
+    return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, balanceSection, logSection), modalNode);
 }
 function computeDieselVolumeForDate(config, dieselData, date) {
     const rec = dieselData[date];
