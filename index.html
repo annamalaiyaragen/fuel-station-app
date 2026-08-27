@@ -420,22 +420,28 @@ function MultiTerminalButton({ detailsMap, onSave, type, terminals, msLog, diese
     if (!open) {
         return React.createElement(React.Fragment, null, triggerBtn);
     }
-    const terminalCards = relevantTerminals.map((t) => {
-        const fields = ['opening', 'nightClosing', 'morningClosing'].map((k) => {
-            const label = k === 'opening' ? 'Opening' : k === 'nightClosing' ? 'Night closing' : 'Morning closing';
-            const input = React.createElement(NumInput, { value: (tmp[t.id] || {})[k], onChange: (v) => updTerminalField(t.id, { [k]: v }) });
-            return React.createElement(Field, { key: k, label: label }, input);
+    const fieldRows = [['opening', 'Opening'], ['nightClosing', 'Night closing'], ['morningClosing', 'Morning closing']];
+    const headerCells = [React.createElement("th", { key: "_label" }, "")].concat(relevantTerminals.map((t) => React.createElement("th", { key: t.id }, `${t.label} (${t.terminalNumber})`)));
+    const headerRow = React.createElement("tr", null, ...headerCells);
+    const bodyRows = fieldRows.map(([key, label]) => {
+        const cells = [React.createElement("td", { key: "_label", style: { fontWeight: 500, color: 'var(--text)' } }, label)];
+        relevantTerminals.forEach((t) => {
+            const input = React.createElement(NumInput, { value: (tmp[t.id] || {})[key], onChange: (v) => updTerminalField(t.id, { [key]: v }) });
+            cells.push(React.createElement("td", { key: t.id }, input));
         });
-        const effectiveRow = React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Effective"), React.createElement("span", null, fmt(effectiveAmount(tmp[t.id]))));
-        const title = React.createElement("div", { style: { fontWeight: 500, marginBottom: 8, color: 'var(--text)' } }, `${t.label} (${t.terminalNumber})`);
-        return React.createElement("div", { key: t.id, style: { flex: '1 1 220px', minWidth: 200, background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 } }, title, ...fields, effectiveRow);
+        return React.createElement("tr", { key: key }, ...cells);
     });
-    const cardsRow = React.createElement("div", { style: { display: 'flex', flexDirection: 'row', gap: 14, flexWrap: 'wrap', marginBottom: 12 } }, ...terminalCards);
+    const effectiveCells = [React.createElement("td", { key: "_label", style: { fontWeight: 500, color: 'var(--text)' } }, "Effective amount")];
+    relevantTerminals.forEach((t) => {
+        effectiveCells.push(React.createElement("td", { key: t.id, className: "mono" }, fmt(effectiveAmount(tmp[t.id]))));
+    });
+    const effectiveRow = React.createElement("tr", null, ...effectiveCells);
+    const table = React.createElement("table", { className: "data-table", style: { marginBottom: 12 } }, React.createElement("thead", null, headerRow), React.createElement("tbody", null, ...bodyRows, effectiveRow));
     const emptyMsg = relevantTerminals.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No terminals configured yet \u2014 add them in Master Data \u2192 Terminals.") : null;
     const totalRow = React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, React.createElement("b", null, "Total (all terminals)")), React.createElement("span", null, React.createElement("b", null, fmt(totalEffective))));
     const actions = React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setOpen(false) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: () => { onSave(tmp); setOpen(false); } }, "Save"));
     const heading = React.createElement("h3", { style: { color: 'var(--text)' } }, (type === 'paytm' ? 'Paytm' : 'PhonePe') + " \u2013 all terminals");
-    const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 860, background: 'var(--surface)', color: 'var(--text)' } }, heading, emptyMsg, cardsRow, totalRow, actions);
+    const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 860, background: 'var(--surface)', color: 'var(--text)' } }, heading, emptyMsg, table, totalRow, actions);
     const overlay = React.createElement("div", { className: "modal-overlay" }, modalBox);
     const portal = ReactDOM.createPortal(overlay, document.body);
     return React.createElement(React.Fragment, null, triggerBtn, portal);
