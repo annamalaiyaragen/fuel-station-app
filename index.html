@@ -2449,8 +2449,40 @@ function SalaryDetailModal({ name, msLog, dieselLog, month, salary, onClose }) {
     return React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box", style: { maxWidth: 640 } }, React.createElement("h3", null, `${name} \u2013 ${monthLabel(month)} working`), anyPremium && React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Rows marked \u2605 had Power sales above ${POWER_THRESHOLD}L in that shift, so that shift's commission was calculated at the higher premium rate (\u20b9${POWER_PREMIUM_RATE.toFixed(2)}/L) instead of the standard rate (\u20b9${MS_COMMISSION_RATE.toFixed(2)}/L).`), rows.some((r) => r.type === 'dieselTag') && React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "On \"share of MS shift\" rows, MS/Power litres shown are the full shift's volume (only the commission amount is split between the two people, not the litres)."), rows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No MS or Diesel activity recorded for this person this month.") :
         React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Role", "MS (L)", "Power (L)", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r, i) => React.createElement("tr", { key: i }, React.createElement("td", null, fmtDate(r.date), r.premiumApplied && ' \u2605'), React.createElement("td", null, r.role), React.createElement("td", { className: "mono" }, r.msDiff !== null ? fmtNum(r.msDiff) : '\u2014'), React.createElement("td", { className: "mono" }, r.powerDiff !== null ? fmtNum(r.powerDiff) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.amount))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 4 }, React.createElement("b", null, "Total (MS + Diesel activity)")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(total)))))), salary !== undefined && Math.abs(total - salary) > 0.5 && React.createElement("div", { className: "empty-hint", style: { padding: '8px 0 0' } }, `Final salary (${fmt(salary)}) differs from this total \u2014 the gap is from Air-duty pay, an Admin flat/prorated salary, or a Bonus/PF/Advance adjustment applied afterward, not shown in this day list.`), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: onClose }, "Close"))));
 }
+function computeMonthlyAdvanceSummary(advance, monthKey) {
+  const names = [...new Set((advance.log || []).map((e) => e.name))];
+  const results = names.map((name) => {
+    const employeeLog = (advance.log || []).filter((e) => e.name === name).slice().sort((a, b) => a.date.localeCompare(b.date));
+    let runningBalance = 0;
+    let opening = 0;
+    let advanceGiven = 0;
+    let recovery = 0;
+    const monthEntries = [];
+    let seenThisMonth = false;
+    employeeLog.forEach((e) => {
+      const entryMonth = e.date.slice(0, 7);
+      const delta = e.type === 'Advance' ? (Number(e.amount) || 0) : -(Number(e.amount) || 0);
+      if (entryMonth < monthKey) {
+        runningBalance = round2(runningBalance + delta);
+      }
+      else if (entryMonth === monthKey) {
+        if (!seenThisMonth) { opening = runningBalance; seenThisMonth = true; }
+        runningBalance = round2(runningBalance + delta);
+        if (e.type === 'Advance') advanceGiven = round2(advanceGiven + (Number(e.amount) || 0));
+        else recovery = round2(recovery + (Number(e.amount) || 0));
+        monthEntries.push(e);
+      }
+    });
+    if (!seenThisMonth) opening = runningBalance;
+    const closing = round2(opening + advanceGiven - recovery);
+    return { name, opening, advanceGiven, recovery, closing, entries: monthEntries };
+  });
+  return results.filter((r) => r.opening !== 0 || r.advanceGiven !== 0 || r.recovery !== 0 || r.closing !== 0);
+}
 function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const [modal, setModal] = useState(null);
+    const [summaryMonth, setSummaryMonth] = useState(monthKeyOf(todayStr()));
+    const [expandedRow, setExpandedRow] = useState(null);
     const names = [...new Set([...(config.employees || []).map((e) => e.name), ...Object.keys(advance.balances || {})])];
     const openModal = (name, type) => setModal({ name, type, amount: '', date: todayStr(), desc: '' });
     const save = () => {
@@ -2466,7 +2498,38 @@ function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
         if (pushNow)
             pushNow();
     };
-    return React.createElement("div", { className: "card" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Current advance total", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, names.map((n) => React.createElement("tr", { key: n }, React.createElement("td", null, n), React.createElement("td", { className: "mono" }, fmt(advance.balances[n])), React.createElement("td", null, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => openModal(n, 'Advance') }, "Advance"), React.createElement("button", { className: "btn btn-secondary btn-sm", style: { marginLeft: 6 }, onClick: () => openModal(n, 'Recovery') }, "Recovery")))))), React.createElement("div", { className: "card-head", style: { marginTop: 16 } }, React.createElement("h3", null, "Transaction log")), React.createElement("div", null, (advance.log || []).slice(0, 30).map((e, i) => React.createElement("div", { key: i, className: "denom-total-row" }, React.createElement("span", null, `${fmtLogDate(e.date)} \u2014 ${e.name} \u2013 ${e.type}${e.monthKey || e.dayClosingCashDiffFor ? ' (auto)' : ''}: ${e.desc || ''}`), React.createElement("span", null, fmt(e.amount))))), modal && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `${modal.type} \u2013 ${modal.name}`), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: modal.amount, onChange: (v) => setModal(Object.assign(Object.assign({}, modal), { amount: v })) })), React.createElement(Field, { label: "Date" }, React.createElement("input", { type: "date", className: "date-input", value: modal.date, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { date: e.target.value })) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: modal.desc, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { desc: e.target.value })) })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save }, "Save")))));
+    const summaryRows = computeMonthlyAdvanceSummary(advance, summaryMonth);
+    const summaryHeaderRow = React.createElement("tr", null, ["Name", "Opening advance", "Advance given", "Recovery", "Closing balance"].map((h) => React.createElement("th", { key: h }, h)));
+    const summaryBodyRows = [];
+    summaryRows.forEach((r) => {
+        summaryBodyRows.push(React.createElement("tr", { key: r.name, style: { cursor: 'pointer' }, onClick: () => setExpandedRow(expandedRow === r.name ? null : r.name) },
+            React.createElement("td", null, r.name),
+            React.createElement("td", { className: "mono" }, fmt(r.opening)),
+            React.createElement("td", { className: "mono" }, fmt(r.advanceGiven)),
+            React.createElement("td", { className: "mono" }, fmt(r.recovery)),
+            React.createElement("td", { className: "mono" }, fmt(r.closing))));
+        if (expandedRow === r.name) {
+            const detailRows = r.entries.map((e, i) => React.createElement("div", { key: i, className: "denom-total-row" },
+                React.createElement("span", null, `${fmtLogDate(e.date)} \u2014 ${e.type}: ${e.desc || ''}`),
+                React.createElement("span", null, fmt(e.amount))));
+            const detailContent = r.entries.length === 0
+                ? React.createElement("div", { className: "empty-hint" }, "No dated entries this month.")
+                : React.createElement("div", null, ...detailRows);
+            summaryBodyRows.push(React.createElement("tr", { key: r.name + '_detail' }, React.createElement("td", { colSpan: 5, style: { background: 'var(--surface-2)', padding: 12 } }, detailContent)));
+        }
+    });
+    const summaryTable = React.createElement("table", { className: "data-table" }, React.createElement("thead", null, summaryHeaderRow), React.createElement("tbody", null, ...summaryBodyRows));
+    const summaryEmptyMsg = summaryRows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No advance activity for " + monthLabel(summaryMonth) + ".") : null;
+    const summarySection = React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Monthly summary"), React.createElement(MonthSelect, { value: summaryMonth, onChange: setSummaryMonth })),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Click a row to see its individual dated entries for that month."),
+        summaryEmptyMsg, summaryTable);
+    const balanceTable = React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Current advance total", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, names.map((n) => React.createElement("tr", { key: n }, React.createElement("td", null, n), React.createElement("td", { className: "mono" }, fmt(advance.balances[n])), React.createElement("td", null, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => openModal(n, 'Advance') }, "Advance"), React.createElement("button", { className: "btn btn-secondary btn-sm", style: { marginLeft: 6 }, onClick: () => openModal(n, 'Recovery') }, "Recovery"))))));
+    const balanceSection = React.createElement("div", { className: "card" }, balanceTable);
+    const logEntries = (advance.log || []).slice(0, 30).map((e, i) => React.createElement("div", { key: i, className: "denom-total-row" }, React.createElement("span", null, `${fmtLogDate(e.date)} \u2014 ${e.name} \u2013 ${e.type}${e.monthKey || e.dayClosingCashDiffFor ? ' (auto)' : ''}: ${e.desc || ''}`), React.createElement("span", null, fmt(e.amount))));
+    const logSection = React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "All transactions (unfiltered, most recent first)")), React.createElement("div", null, ...logEntries));
+    const modalNode = modal && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `${modal.type} \u2013 ${modal.name}`), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: modal.amount, onChange: (v) => setModal(Object.assign(Object.assign({}, modal), { amount: v })) })), React.createElement(Field, { label: "Date" }, React.createElement("input", { type: "date", className: "date-input", value: modal.date, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { date: e.target.value })) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: modal.desc, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { desc: e.target.value })) })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save }, "Save"))));
+    return React.createElement(React.Fragment, null, summarySection, balanceSection, logSection, modalNode);
 }
 function computeDieselVolumeForDate(config, dieselData, date) {
     const rec = dieselData[date];
@@ -3172,8 +3235,8 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
       const adv = Number(d.advance) || 0;
       const net = round2(d.base + bonus - adv);
       if (adv > 0) {
-        balances[name] = round2((balances[name] || 0) + adv);
-        log = [{ name, type: 'Advance', amount: adv, date: new Date().toISOString(), desc: `TT trip pay advance (${dateFrom} to ${dateTo})`, balanceAfter: balances[name] }, ...log];
+        balances[name] = round2((balances[name] || 0) - adv);
+        log = [{ name, type: 'Recovery', amount: adv, date: new Date().toISOString(), desc: `TT trip pay recovery (${dateFrom} to ${dateTo})`, balanceAfter: balances[name] }, ...log];
       }
       batch.entries.push({ name, rows: d.rows, base: round2(d.base), bonus, bonusDesc: d.bonusDesc, advance: adv, net });
     });
@@ -3240,7 +3303,7 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
       !salaryDraft ? React.createElement("div", { className: "empty-hint" }, "Nothing calculated yet \u2014 set a date range above and click \"Generate\".") :
       React.createElement(React.Fragment, null,
         React.createElement("table", { className: "data-table editable" },
-          React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trip counts (by rate)", "Base salary", "Current advance owed", "Bonus", "Bonus description", "New advance", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
+          React.createElement("thead", null, React.createElement("tr", null, ["Employee", "Trip counts (by rate)", "Base salary", "Current advance owed", "Bonus", "Bonus description", "Advance recovery", "Net"].map((h) => React.createElement("th", { key: h }, h)))),
           React.createElement("tbody", null, Object.keys(salaryDraft).map((name) => {
             const d = salaryDraft[name];
             const bonus = Number(d.bonus) || 0, adv = Number(d.advance) || 0;
