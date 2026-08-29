@@ -2758,25 +2758,14 @@ function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
         };
         const msNight = msLastShiftTotals(field);
         const dieselNight = dieselTotals(field);
-        if (type === 'paytm') {
-            // Petrol (MS) side follows the SAME same-day-only pattern as PhonePe.
-            // Diesel side keeps its own pattern: that date's Night Closing plus the
-            // PREVIOUS date's Morning Closing \u2014 these are genuinely different settlement timings.
-            const dieselMorning = dieselTotals('paytmMorningClosing');
-            const dates = new Set([...Object.keys(msNight), ...Object.keys(dieselNight), ...Object.keys(dieselMorning).map((d) => shiftDateStr(d, 1))]);
-            dates.forEach((date) => {
-                const combined = round2((msNight[date] || 0) + (dieselNight[date] || 0) + (dieselMorning[shiftDateStr(date, -1)] || 0));
-                if (combined > 0)
-                    out.push({ id: type + '_' + date, date, amount: combined });
-            });
-        }
-        else {
-            const totals = {};
-            Object.keys(msNight).forEach((d) => { totals[d] = (totals[d] || 0) + msNight[d]; });
-            Object.keys(dieselNight).forEach((d) => { totals[d] = (totals[d] || 0) + dieselNight[d]; });
-            Object.entries(totals).forEach(([date, amount]) => { if (amount > 0)
-                out.push({ id: type + '_' + date, date, amount: round2(amount) }); });
-        }
+        // Both PhonePe and Paytm now use the same same-day-only pattern: MS + Diesel Night Closing
+        // combined, no previous-day Morning Closing component \u2014 that addition was causing redundant
+        // totals since Diesel Daily started capturing multiple terminals.
+        const totals = {};
+        Object.keys(msNight).forEach((d) => { totals[d] = (totals[d] || 0) + msNight[d]; });
+        Object.keys(dieselNight).forEach((d) => { totals[d] = (totals[d] || 0) + dieselNight[d]; });
+        Object.entries(totals).forEach(([date, amount]) => { if (amount > 0)
+            out.push({ id: type + '_' + date, date, amount: round2(amount) }); });
     }
     else if (type === 'hppay') {
         dieselLog.forEach((r) => { if (r.hpPay)
