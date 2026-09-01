@@ -276,7 +276,7 @@ function mergeArraysById(localArr, cloudArr) {
 // Merge two date-keyed objects (e.g. dieselData, dayClosing) by taking the union of every date.
 // A date present on only one side is always kept in full \u2014 this is what prevents a whole day's
 // entries from being silently erased just because another device happened to sync more recently.
-function mergeByDateKey(localObj, cloudObj) {
+function mergeByDateKey(localObj, cloudObj, preferCloudOnTie) {
     const merged = Object.assign({}, cloudObj || {});
     Object.keys(localObj || {}).forEach((date) => {
         if (!(date in merged)) { merged[date] = localObj[date]; return; }
@@ -285,7 +285,11 @@ function mergeByDateKey(localObj, cloudObj) {
         const cDone = !!(c && (c.submitted || c.saved));
         if (lDone && !cDone) merged[date] = l;
         else if (!lDone && cDone) merged[date] = c;
-        else merged[date] = l; // genuine same-date overlap with matching status: prefer local as a stable tie-break
+        // Genuine same-date overlap with matching status (e.g. both still drafts): fall back to
+        // whichever DEVICE's data is more likely to be current overall, rather than always
+        // assuming "this device" is the fresher one \u2014 that assumption silently discarded real
+        // data on the other device when this device merely had a stale placeholder for that date.
+        else merged[date] = preferCloudOnTie ? c : l;
     });
     return merged;
 }
@@ -828,18 +832,18 @@ function App() {
                 driveFileIdRef.current = file.id;
                 const cloudData = await driveDownload(token, file.id);
                 const lastLocalChange = window.localStorage.getItem(LS_LAST_LOCAL_CHANGE);
+                const cloudIsNewer = cloudData.savedAt && (!lastLocalChange || cloudData.savedAt > lastLocalChange);
                 // Merge the daily transaction records (never discard a date that only exists on one side) \u2014
                 // this is what protects against exactly the scenario where two devices go out of sync.
                 const mergedMsLog = mergeArraysById(msLog, cloudData.msLog);
                 const mergedDieselLog = mergeArraysById(dieselLog, cloudData.dieselLog);
-                const mergedDieselData = mergeByDateKey(dieselData, cloudData.dieselData);
-                const mergedDayClosing = mergeByDateKey(dayClosing, cloudData.dayClosing);
-                const mergedMsReadings = mergeByDateKey(msReadings, cloudData.msReadings);
-                const mergedMsDrafts = mergeByDateKey(msDrafts, cloudData.msDrafts);
+                const mergedDieselData = mergeByDateKey(dieselData, cloudData.dieselData, cloudIsNewer);
+                const mergedDayClosing = mergeByDateKey(dayClosing, cloudData.dayClosing, cloudIsNewer);
+                const mergedMsReadings = mergeByDateKey(msReadings, cloudData.msReadings, cloudIsNewer);
+                const mergedMsDrafts = mergeByDateKey(msDrafts, cloudData.msDrafts, cloudIsNewer);
                 // Config/Advance/Salary/Bank/DSR/TT aren't simple date-unions, so these still use whichever
                 // side changed more recently as a whole \u2014 a smaller, lower-risk gap than daily records,
                 // but worth knowing: a genuine simultaneous edit to these on two devices could still conflict.
-                const cloudIsNewer = cloudData.savedAt && (!lastLocalChange || cloudData.savedAt > lastLocalChange);
                 const mergedPayload = {
                     version: 2, savedAt: new Date().toISOString(),
                     config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (cloudData.config.bankSettings || {})) }) : config,
@@ -2323,7 +2327,7 @@ function SalaryWorkingReport({ config, msLog, dieselLog, salaryRuns }) {
     const [detailFor, setDetailFor] = useState(null);
     return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), React.createElement("div", { className: "empty-hint print-hide" }, "Air attendance is now counted automatically from the \"Airman\" field in Diesel Daily each day \u2014 shown here read-only for reference. You can still override the total for a month on the Net Salary Report tab if needed. Click any Total Salary figure to see the day-by-day working."), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attd", "Sum of Diesel", "Pump boy", "Sum of MS", "Sum of Power", "Total MS", "Diesel-tag share (₹)", "Sum of Air", "Total Salary"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.attd)), React.createElement("td", { className: "mono" }, r.dieselDays ? fmtNum(r.dieselDays) : ''), React.createElement("td", { className: "mono" }, r.pumpBoyDays ? fmtNum(r.pumpBoyDays) : ''), React.createElement("td", { className: "mono" }, r.msVolume ? fmtNum(r.msVolume) : ''), React.createElement("td", { className: "mono" }, r.powerVolume ? fmtNum(r.powerVolume) : ''), React.createElement("td", { className: "mono" }, fmtNum(r.totalMS)), React.createElement("td", { className: "mono" }, r.dieselSplitShare ? fmt(r.dieselSplitShare) : '\u2014'), React.createElement("td", { className: "mono" }, r.isAir ? fmtNum(r.airDays) : '\u2014'), React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link print-hide", onClick: () => setDetailFor(r.name) }, fmt(r.totalSalary)), React.createElement("span", { className: "print-only" }, fmt(r.totalSalary)))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Grand Total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.attd))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.dieselDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.pumpBoyDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.msVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.powerVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.totalMS))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.dieselSplitShare))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.airDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.totalSalary)))))), detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (_a = rows.find((r) => r.name === detailFor)) === null || _a === void 0 ? void 0 : _a.totalSalary, onClose: () => setDetailFor(null) }));
 }
-function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, salaryRuns, persistSalaryRuns, showToast }) {
+function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, salaryRuns, persistSalaryRuns, pushNow, showToast }) {
     var _a;
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
     const credits = useMemo(() => computeSalaryWorking(config, msLog, dieselLog, month), [config, msLog, dieselLog, month]);
@@ -2387,6 +2391,7 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         persistAdvance({ balances, log });
         persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { submitted: { at: new Date().toISOString(), entries }, confirmReRun: false }) }));
         showToast('Salary statement submitted for ' + monthLabel(month));
+        if (pushNow) pushNow();
     };
     const reverseAndReRun = () => {
         const balances = Object.assign({}, advance.balances);
