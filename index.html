@@ -346,6 +346,9 @@ function shiftDateStr(dateStr, days) {
 const fmtDate = (d) => { if (!d)
     return ''; const dt = new Date(d + 'T00:00:00'); return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); };
 const fmt = (n) => { const v = Number(n) || 0; return '\u20B9' + v.toLocaleString('en-IN', { maximumFractionDigits: 2 }); };
+// jsPDF's built-in fonts can't render \u20B9 (Rupee) \u2014 it comes out as a garbled character.
+// Use this (plain number, no symbol) for any amount going into a PDF export instead of fmt().
+const fmtPdf = (n) => { const v = Number(n) || 0; return v.toLocaleString('en-IN', { maximumFractionDigits: 2 }); };
 const fmtNum = (n) => { const v = Number(n) || 0; return v.toLocaleString('en-IN', { maximumFractionDigits: 2 }); };
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const monthKeyOf = (dateStr) => dateStr.slice(0, 7); // YYYY-MM
@@ -2769,15 +2772,15 @@ function AuditTab({ config, msLog, dieselLog, dieselData }) {
     const downloadSalesPdf = () => {
         const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
         addPdfHeader(doc, 297, 'Sales Report');
-        const head = [["Date", "2T oil", "60 ml", "MS Oil", "MS LTR", "MS", "PWR LTR", "PWR", "HSD Oil", "HSD LTR", "HSD", "Total"]];
-        const body = salesRows.map((r) => [fmtDate(r.date), fmtNum(r.oilQty), fmtNum(r.pktQty), fmt(r.msOil), fmtNum(r.msLtr), fmt(r.ms), fmtNum(r.pwrLtr), fmt(r.pwr), fmt(r.hsdOil), r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014', fmt(r.hsd), fmt(r.total)]);
+        const head = [["Date", "2T oil", "60 ml", "MS Oil (Rs.)", "MS LTR", "MS (Rs.)", "PWR LTR", "PWR (Rs.)", "HSD Oil (Rs.)", "HSD LTR", "HSD (Rs.)", "Total (Rs.)"]];
+        const body = salesRows.map((r) => [fmtDate(r.date), fmtNum(r.oilQty), fmtNum(r.pktQty), fmtPdf(r.msOil), fmtNum(r.msLtr), fmtPdf(r.ms), fmtNum(r.pwrLtr), fmtPdf(r.pwr), fmtPdf(r.hsdOil), r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014', fmtPdf(r.hsd), fmtPdf(r.total)]);
         const totalRow = ["Total",
             fmtNum(salesRows.reduce((s, r) => s + r.oilQty, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pktQty, 0)),
-            fmt(salesRows.reduce((s, r) => s + r.msOil, 0)), fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)),
-            fmt(salesRows.reduce((s, r) => s + r.ms, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)),
-            fmt(salesRows.reduce((s, r) => s + r.pwr, 0)), fmt(salesRows.reduce((s, r) => s + r.hsdOil, 0)),
-            fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)), fmt(salesRows.reduce((s, r) => s + r.hsd, 0)),
-            fmt(salesRows.reduce((s, r) => s + r.total, 0))];
+            fmtPdf(salesRows.reduce((s, r) => s + r.msOil, 0)), fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)),
+            fmtPdf(salesRows.reduce((s, r) => s + r.ms, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)),
+            fmtPdf(salesRows.reduce((s, r) => s + r.pwr, 0)), fmtPdf(salesRows.reduce((s, r) => s + r.hsdOil, 0)),
+            fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)), fmtPdf(salesRows.reduce((s, r) => s + r.hsd, 0)),
+            fmtPdf(salesRows.reduce((s, r) => s + r.total, 0))];
         doc.autoTable({ head, body: [...body, totalRow], startY: 24, styles: { fontSize: 6.5, cellPadding: 1.2 }, headStyles: { fillColor: [40, 40, 40] }, footStyles: { fillColor: [230, 230, 230] }, margin: { left: 6, right: 6 } });
         doc.save(`Sales_Report_${month}.pdf`);
     };
@@ -2785,8 +2788,8 @@ function AuditTab({ config, msLog, dieselLog, dieselData }) {
     const downloadInventoryPdf = () => {
         const doc = new window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
         addPdfHeader(doc, 210, 'Inventory Report');
-        const head = [["Item", "Opening", "Purchases", "Recorded sales", "Expected closing", "Actual closing", "Variance", "Variance value", "Closing value"]];
-        const body = invRows.map((r) => [r.name, fmtNum(r.opening), fmtNum(r.purchases), fmtNum(r.recordedSales), fmtNum(r.expectedClosing), fmtNum(r.closing), (r.variance > 0 ? '+' : '') + fmtNum(r.variance), (r.varianceValue > 0 ? '+' : '') + fmt(r.varianceValue), fmt(r.closingValueTotal)]);
+        const head = [["Item", "Opening", "Purchases", "Recorded sales", "Expected closing", "Actual closing", "Variance", "Variance value (Rs.)", "Closing value (Rs.)"]];
+        const body = invRows.map((r) => [r.name, fmtNum(r.opening), fmtNum(r.purchases), fmtNum(r.recordedSales), fmtNum(r.expectedClosing), fmtNum(r.closing), (r.variance > 0 ? '+' : '') + fmtNum(r.variance), (r.varianceValue > 0 ? '+' : '') + fmtPdf(r.varianceValue), fmtPdf(r.closingValueTotal)]);
         doc.autoTable({ head, body, startY: 24, styles: { fontSize: 8, cellPadding: 1.8 }, headStyles: { fillColor: [40, 40, 40] }, margin: { left: 8, right: 8 } });
         doc.save(`Inventory_Report_${month}.pdf`);
     };
