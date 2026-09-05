@@ -10,6 +10,8 @@
 <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
 <!-- SheetJS for Excel export -->
 <script crossorigin src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
 <!-- Google Identity Services (Drive sign-in) -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 
@@ -2328,8 +2330,9 @@ function SalaryWorkingReport({ config, msLog, dieselLog, salaryRuns }) {
     return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), React.createElement("div", { className: "empty-hint print-hide" }, "Air attendance is now counted automatically from the \"Airman\" field in Diesel Daily each day \u2014 shown here read-only for reference. You can still override the total for a month on the Net Salary Report tab if needed. Click any Total Salary figure to see the day-by-day working."), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attd", "Sum of Diesel", "Pump boy", "Sum of MS", "Sum of Power", "Total MS", "Diesel-tag share (₹)", "Sum of Air", "Total Salary"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.attd)), React.createElement("td", { className: "mono" }, r.dieselDays ? fmtNum(r.dieselDays) : ''), React.createElement("td", { className: "mono" }, r.pumpBoyDays ? fmtNum(r.pumpBoyDays) : ''), React.createElement("td", { className: "mono" }, r.msVolume ? fmtNum(r.msVolume) : ''), React.createElement("td", { className: "mono" }, r.powerVolume ? fmtNum(r.powerVolume) : ''), React.createElement("td", { className: "mono" }, fmtNum(r.totalMS)), React.createElement("td", { className: "mono" }, r.dieselSplitShare ? fmt(r.dieselSplitShare) : '\u2014'), React.createElement("td", { className: "mono" }, r.isAir ? fmtNum(r.airDays) : '\u2014'), React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link print-hide", onClick: () => setDetailFor(r.name) }, fmt(r.totalSalary)), React.createElement("span", { className: "print-only" }, fmt(r.totalSalary)))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Grand Total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.attd))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.dieselDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.pumpBoyDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.msVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.powerVolume))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.totalMS))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.dieselSplitShare))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(grand.airDays))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grand.totalSalary)))))), detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (_a = rows.find((r) => r.name === detailFor)) === null || _a === void 0 ? void 0 : _a.totalSalary, onClose: () => setDetailFor(null) }));
 }
 function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, salaryRuns, persistSalaryRuns, pushNow, showToast }) {
-    var _a;
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
+    const [viewSubmitted, setViewSubmitted] = useState(false);
+    useEffect(() => { setViewSubmitted(false); }, [month]);
     const credits = useMemo(() => computeSalaryWorking(config, msLog, dieselLog, month), [config, msLog, dieselLog, month]);
     const runData = salaryRuns[month] || { overrides: {} };
     const updOverride = (name, field, value) => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { overrides: Object.assign(Object.assign({}, runData.overrides), { [name]: Object.assign(Object.assign({}, (runData.overrides[name] || {})), { [field]: value }) }) }) }));
@@ -2338,15 +2341,13 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
     const hiddenNames = new Set(config.employees.filter((e) => e.hideFromSalary || e.ttStaff).map((e) => e.name));
     const names = [...new Set([...Object.keys(credits), ...config.employees.map((e) => e.name)])].filter((n) => !hiddenNames.has(n));
     const rows = names.map((name) => {
-        var _a;
         const emp = config.employees.find((e) => e.name === name);
         const c = credits[name] || { msPowerComm: 0, volume: 0, dieselDayPay: 0, dieselSplitShare: 0, attd: 0 };
         const ov = runData.overrides[name] || {};
-        // "attendance" replaces the old air-only field \u2014 legacy airAttendance still read for backward compatibility
         let attendance, attendanceEditable, salary;
         if (emp && emp.airOn) {
             const derivedAirDays = round2((c.airDaysFromDaily || 0));
-            attendance = (ov.attendance !== undefined && ov.attendance !== '') ? ov.attendance : (derivedAirDays > 0 ? derivedAirDays : ((_a = ov.airAttendance) !== null && _a !== void 0 ? _a : ''));
+            attendance = (ov.attendance !== undefined && ov.attendance !== '') ? ov.attendance : (derivedAirDays > 0 ? derivedAirDays : (ov.airAttendance !== undefined && ov.airAttendance !== null ? ov.airAttendance : ''));
             attendanceEditable = true;
             const airPay = (Number(attendance) || 0) * (Number(emp.airRate) || 0);
             salary = round2(airPay + (c.msPowerComm || 0) + (c.dieselDayPay || 0) + (c.dieselSplitShare || 0));
@@ -2370,10 +2371,29 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         const adv = quit ? fullBalance : (ov.advance !== undefined ? ov.advance : defaultAdvance);
         const bonus = ov.bonus !== undefined ? ov.bonus : defaultBonus;
         const net = salary - (Number(pf) || 0) - (Number(adv) || 0) + (Number(bonus) || 0);
-        return { name, salary, pf, adv, bonus, net, defaultPf, defaultAdvance, defaultBonus, quit, fullBalance, attendance, attendanceEditable, group: employeeGroupOrder(emp, c) };
+        const netRounded = Math.round(net / 10) * 10;
+        return { name, salary, pf, adv, bonus, net, netRounded, defaultPf, defaultAdvance, defaultBonus, quit, fullBalance, attendance, attendanceEditable, group: employeeGroupOrder(emp, c) };
     }).sort((a, b) => a.group - b.group || a.name.localeCompare(b.name));
-    const grandNet = rows.reduce((s, r) => s + r.net, 0);
+    const grandNet = rows.reduce((s, r) => s + r.netRounded, 0);
     const submitted = runData.submitted;
+    const downloadSalaryCsv = () => {
+        const headers = ['Name', 'Attendance', 'Salary', 'PF', 'Advance', 'Bonus', 'Net'];
+        const csvLines = [headers.join(',')];
+        rows.forEach((r) => {
+            csvLines.push([r.name, r.attendance, r.salary, r.pf, r.adv, r.bonus, r.netRounded].map((v) => `"${v}"`).join(','));
+        });
+        csvLines.push(['Grand total net', '', '', '', '', '', grandNet].map((v) => `"${v}"`).join(','));
+        const csv = csvLines.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Salary_${month}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
     const submit = () => {
         if (submitted) {
             persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: true }) }));
@@ -2389,15 +2409,24 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         const log = [...advance.log];
         entries.forEach((e) => log.unshift({ name: e.name, type: 'Recovery', amount: e.amount, date: new Date().toISOString(), desc: 'Salary for ' + monthLabel(month), balanceAfter: balances[e.name], monthKey: month, reversed: false }));
         persistAdvance({ balances, log });
-        persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { submitted: { at: new Date().toISOString(), entries }, confirmReRun: false }) }));
-        showToast('Salary statement submitted for ' + monthLabel(month));
+        // Freeze each row's advance to EXACTLY what was actually submitted (whether it came from a
+        // manual override, the default suggestion, or the Quit checkbox) \u2014 so reopening this
+        // month later shows precisely what happened, ready for direct correction if it was wrong.
+        // Re-submitting a corrected value then reverses this exact frozen amount and reapplies the
+        // new one, instead of starting from a fresh (and unrelated) recomputed suggestion.
+        const frozenOverrides = {};
+        rows.forEach((r) => {
+            const existing = runData.overrides[r.name] || {};
+            frozenOverrides[r.name] = Object.assign(Object.assign({}, existing), { advance: r.adv, quit: false });
+        });
+        persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { overrides: frozenOverrides, submitted: { at: new Date().toISOString(), entries }, confirmReRun: false }) }));
+        showToast('Salary statement submitted for ' + monthLabel(month) + ' \u2014 downloading statement\u2026');
+        downloadSalaryCsv();
+        setViewSubmitted(false);
         if (pushNow) pushNow();
     };
     const reverseAndReRun = () => {
         const balances = Object.assign({}, advance.balances);
-        // Remove this month's previously-submitted entries directly (tagged monthKey), undoing their
-        // balance effect \u2014 instead of adding an offsetting "Reversal" line that inflates the log
-        // and would otherwise keep growing every time the same month gets re-run.
         const priorEntries = advance.log.filter((e) => e.monthKey === month && e.type === 'Recovery');
         priorEntries.forEach((e) => { balances[e.name] = round2((balances[e.name] || 0) + e.amount); });
         const log = advance.log.filter((e) => !(e.monthKey === month && e.type === 'Recovery'));
@@ -2406,10 +2435,40 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         setTimeout(doSubmit, 0);
     };
     const [detailFor, setDetailFor] = useState(null);
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group print-hide" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-primary", onClick: submit }, submitted ? 'Submitted \u2013 re-run' : 'Submit salary statement'), React.createElement(Pill, { tone: submitted ? 'green' : 'muted' }, submitted ? 'Submitted' : 'Not submitted'), React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print")) }), runData.confirmReRun && React.createElement(ConfirmBar, { message: `A salary statement for ${monthLabel(month)} was already submitted. Re-running will reverse those advance recoveries first, then reapply with the new figures.`, confirmLabel: "Reverse and re-run", onConfirm: reverseAndReRun, onCancel: () => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: false }) })) }), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attendance (days)", "Salary", "PF", "Advance", "Total Advance", "Bonus", "Net"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: r.attendanceEditable ? '' : 'mono' }, r.attendanceEditable
-        ? React.createElement(NumInput, { value: r.attendance, onChange: (v) => updOverride(r.name, 'attendance', v) })
-        : fmtNum(r.attendance)), React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link print-hide", onClick: () => setDetailFor(r.name) }, fmt(r.salary)), React.createElement("span", { className: "print-only" }, fmt(r.salary))), React.createElement("td", null, React.createElement(NumInput, { value: r.pf, onChange: (v) => updOverride(r.name, 'pf', v) })), React.createElement("td", null, React.createElement(NumInput, { value: r.adv, onChange: (v) => updOverride(r.name, 'advance', v), disabled: r.quit })), React.createElement("td", null, React.createElement("label", { className: "toggle no-print" }, React.createElement("input", { type: "checkbox", checked: r.quit,
-        onChange: (e) => updOverride(r.name, 'quit', e.target.checked) }), ` ${fmt(r.fullBalance)} owed`), React.createElement("span", { className: "print-only" }, fmt(r.fullBalance))), React.createElement("td", null, React.createElement(NumInput, { value: r.bonus, onChange: (v) => updOverride(r.name, 'bonus', v) })), React.createElement("td", { className: "mono" }, fmt(r.net))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 7 }, React.createElement("b", null, "Grand total net")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grandNet)))))), detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (_a = rows.find((r) => r.name === detailFor)) === null || _a === void 0 ? void 0 : _a.salary, onClose: () => setDetailFor(null) }));
+
+    if (submitted && !viewSubmitted) {
+        const collapsedActions = React.createElement("div", { className: "btn-group print-hide" },
+            React.createElement(MonthSelect, { value: month, onChange: setMonth }),
+            React.createElement("button", { className: "btn btn-secondary", onClick: () => setViewSubmitted(true) }, "View submitted statement"),
+            React.createElement("button", { className: "btn btn-secondary", onClick: downloadSalaryCsv }, "Download again"));
+        return React.createElement("div", { className: "card" },
+            React.createElement(PageHeader, { title: "", action: collapsedActions }),
+            React.createElement("div", { className: "empty-hint" }, `Salary for ${monthLabel(month)} was submitted on ${fmtDate(submitted.at.slice(0, 10))}. Click "View submitted statement" to review or make changes.`));
+    }
+
+    const headerActions = React.createElement("div", { className: "btn-group print-hide" },
+        React.createElement(MonthSelect, { value: month, onChange: setMonth }),
+        React.createElement("button", { className: "btn btn-primary", onClick: submit }, submitted ? 'Submitted \u2013 re-run' : 'Submit salary statement'),
+        React.createElement(Pill, { tone: submitted ? 'green' : 'muted' }, submitted ? 'Submitted' : 'Not submitted'),
+        React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print"));
+    const reRunConfirm = runData.confirmReRun && React.createElement(ConfirmBar, { message: `A salary statement for ${monthLabel(month)} was already submitted. Re-running will reverse those advance recoveries first, then reapply with the new figures.`, confirmLabel: "Reverse and re-run", onConfirm: reverseAndReRun, onCancel: () => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: false }) })) });
+    const tableRows = rows.map((r) => React.createElement("tr", { key: r.name },
+        React.createElement("td", null, r.name),
+        React.createElement("td", { className: r.attendanceEditable ? '' : 'mono' }, r.attendanceEditable
+            ? React.createElement(NumInput, { value: r.attendance, onChange: (v) => updOverride(r.name, 'attendance', v) })
+            : fmtNum(r.attendance)),
+        React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link print-hide", onClick: () => setDetailFor(r.name) }, fmt(r.salary)), React.createElement("span", { className: "print-only" }, fmt(r.salary))),
+        React.createElement("td", null, React.createElement(NumInput, { value: r.pf, onChange: (v) => updOverride(r.name, 'pf', v) })),
+        React.createElement("td", null, React.createElement(NumInput, { value: r.adv, onChange: (v) => updOverride(r.name, 'advance', v), disabled: r.quit })),
+        React.createElement("td", null, React.createElement("label", { className: "toggle no-print" }, React.createElement("input", { type: "checkbox", checked: r.quit, onChange: (e) => updOverride(r.name, 'quit', e.target.checked) }), ` ${fmt(r.fullBalance)} owed`), React.createElement("span", { className: "print-only" }, fmt(r.fullBalance))),
+        React.createElement("td", null, React.createElement(NumInput, { value: r.bonus, onChange: (v) => updOverride(r.name, 'bonus', v) })),
+        React.createElement("td", { className: "mono" }, fmt(r.netRounded))));
+    const table = React.createElement("table", { className: "data-table editable" },
+        React.createElement("thead", null, React.createElement("tr", null, ["Name", "Attendance (days)", "Salary", "PF", "Advance", "Total Advance", "Bonus", "Net (rounded to \u20b910)"].map((h) => React.createElement("th", { key: h }, h)))),
+        React.createElement("tbody", null, ...tableRows),
+        React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 7 }, React.createElement("b", null, "Grand total net")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grandNet))))));
+    const detailModal = detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (rows.find((r) => r.name === detailFor) || {}).salary, onClose: () => setDetailFor(null) });
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: headerActions }), reRunConfirm, table, detailModal);
 }
 function fmtLogDate(d) {
     if (!d)
@@ -2697,7 +2756,95 @@ function AuditTab({ config, msLog, dieselLog, dieselData }) {
     const salesRows = useMemo(() => computeSalesDataForMonth(config, msLog, dieselLog, dieselData, month), [config, msLog, dieselLog, dieselData, month]);
     const invRows = useMemo(() => computeInventoryForMonth(config, dieselLog, dieselData, month), [config, dieselLog, dieselData, month]);
     const flaggedCount = invRows.filter((r) => r.variance !== 0).length;
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Audit", action: React.createElement("div", { className: "btn-group" }, React.createElement(MonthSelect, { value: month, onChange: setMonth }), React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('sales'); setShowVariance(false); } }, "Run sales report"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('inventory'); setShowVariance(true); } }, "Run inventory report")) }), sub === 'sales' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Sales Data \u2014 " + monthLabel(month))), React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "2T oil", "60 ml", "MS Oil", "MS LTR", "MS", "PWR LTR", "PWR", "HSD Oil", "HSD LTR", "HSD", "Total"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, salesRows.map((r) => React.createElement("tr", { key: r.date }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.oilQty)), React.createElement("td", { className: "mono" }, fmtNum(r.pktQty)), React.createElement("td", { className: "mono" }, fmt(r.msOil)), React.createElement("td", { className: "mono" }, fmtNum(r.msLtr)), React.createElement("td", { className: "mono" }, fmt(r.ms)), React.createElement("td", { className: "mono" }, fmtNum(r.pwrLtr)), React.createElement("td", { className: "mono" }, fmt(r.pwr)), React.createElement("td", { className: "mono" }, fmt(r.hsdOil)), React.createElement("td", { className: "mono" }, r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.hsd)), React.createElement("td", { className: "mono" }, fmt(r.total))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.oilQty, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pktQty, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.msOil, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.ms, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.pwr, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsdOil, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsd, 0)))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.total, 0)))))))), salesRows.some((r) => r.hsdLtr === null) && React.createElement("div", { className: "empty-hint", style: { marginTop: 8 } }, "HSD LTR shows \u2014 for any date with no diesel point readings saved at all.")), sub === 'inventory' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Stock variance check \u2014 " + monthLabel(month))), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Opening and Closing are total stock on hand \u2014 Display + Godown combined."), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Item", "Opening", "Purchases", "Recorded sales", "Expected closing", "Actual closing", "Variance", "Variance value", "Closing stock value"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, invRows.map((r) => React.createElement("tr", { key: r.name, style: r.variance !== 0 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", { className: "mono" }, fmtNum(r.purchases)), React.createElement("td", { className: "mono" }, fmtNum(r.recordedSales)), React.createElement("td", { className: "mono" }, fmtNum(r.expectedClosing)), React.createElement("td", { className: "mono" }, fmtNum(r.closing)), React.createElement("td", { className: "mono" }, (r.variance > 0 ? '+' : '') + fmtNum(r.variance)), React.createElement("td", { className: "mono" }, (r.varianceValue > 0 ? '+' : '') + fmt(r.varianceValue)), React.createElement("td", { className: "mono" }, fmt(r.closingValueTotal)))))), React.createElement("div", { className: "empty-hint" }, flaggedCount === 0 ? 'All items reconcile \u2014 no variance found.' : `${flaggedCount} item(s) flagged with a stock variance \u2014 review before downloading, or proceed if already investigated.`), invRows.some((r) => r.tiers.length > 1) && React.createElement("div", { style: { marginTop: 18 } }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Batch-wise pricing breakdown (items with more than one active price tier this month)"), invRows.filter((r) => r.tiers.length > 1).map((r) => React.createElement("div", { key: r.name, style: { marginBottom: 14 } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 500, marginBottom: 4 } }, r.name), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tier", "Qty sold", "MRP", "Sales revenue", "Invoice price", "Closing qty", "Closing value"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, r.tiers.map((t, i) => React.createElement("tr", { key: i }, React.createElement("td", null, t.label), React.createElement("td", { className: "mono" }, fmtNum(t.qty)), React.createElement("td", { className: "mono" }, fmt(t.mrp)), React.createElement("td", { className: "mono" }, fmt(t.revenue)), React.createElement("td", { className: "mono" }, fmt(t.invoicePrice)), React.createElement("td", { className: "mono" }, fmtNum(t.closingQty)), React.createElement("td", { className: "mono" }, fmt(t.closingValue))))))))), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary" }, "Download inventory report (PDF)"))));
+
+    const addPdfHeader = (doc, pageWidthMm, title) => {
+        doc.setFontSize(14);
+        doc.setFont(undefined, 'bold');
+        doc.text('ANNAMALAIYAR AGENCIES', pageWidthMm / 2, 12, { align: 'center' });
+        doc.setFontSize(11);
+        doc.setFont(undefined, 'normal');
+        doc.text(title + ' \u2014 ' + monthLabel(month), pageWidthMm / 2, 19, { align: 'center' });
+    };
+
+    const downloadSalesPdf = () => {
+        const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+        addPdfHeader(doc, 297, 'Sales Report');
+        const head = [["Date", "2T oil", "60 ml", "MS Oil", "MS LTR", "MS", "PWR LTR", "PWR", "HSD Oil", "HSD LTR", "HSD", "Total"]];
+        const body = salesRows.map((r) => [fmtDate(r.date), fmtNum(r.oilQty), fmtNum(r.pktQty), fmt(r.msOil), fmtNum(r.msLtr), fmt(r.ms), fmtNum(r.pwrLtr), fmt(r.pwr), fmt(r.hsdOil), r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014', fmt(r.hsd), fmt(r.total)]);
+        const totalRow = ["Total",
+            fmtNum(salesRows.reduce((s, r) => s + r.oilQty, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pktQty, 0)),
+            fmt(salesRows.reduce((s, r) => s + r.msOil, 0)), fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)),
+            fmt(salesRows.reduce((s, r) => s + r.ms, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)),
+            fmt(salesRows.reduce((s, r) => s + r.pwr, 0)), fmt(salesRows.reduce((s, r) => s + r.hsdOil, 0)),
+            fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)), fmt(salesRows.reduce((s, r) => s + r.hsd, 0)),
+            fmt(salesRows.reduce((s, r) => s + r.total, 0))];
+        doc.autoTable({ head, body: [...body, totalRow], startY: 24, styles: { fontSize: 6.5, cellPadding: 1.2 }, headStyles: { fillColor: [40, 40, 40] }, footStyles: { fillColor: [230, 230, 230] }, margin: { left: 6, right: 6 } });
+        doc.save(`Sales_Report_${month}.pdf`);
+    };
+
+    const downloadInventoryPdf = () => {
+        const doc = new window.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        addPdfHeader(doc, 210, 'Inventory Report');
+        const head = [["Item", "Opening", "Purchases", "Recorded sales", "Expected closing", "Actual closing", "Variance", "Variance value", "Closing value"]];
+        const body = invRows.map((r) => [r.name, fmtNum(r.opening), fmtNum(r.purchases), fmtNum(r.recordedSales), fmtNum(r.expectedClosing), fmtNum(r.closing), (r.variance > 0 ? '+' : '') + fmtNum(r.variance), (r.varianceValue > 0 ? '+' : '') + fmt(r.varianceValue), fmt(r.closingValueTotal)]);
+        doc.autoTable({ head, body, startY: 24, styles: { fontSize: 8, cellPadding: 1.8 }, headStyles: { fillColor: [40, 40, 40] }, margin: { left: 8, right: 8 } });
+        doc.save(`Inventory_Report_${month}.pdf`);
+    };
+
+    const headerActions = React.createElement("div", { className: "btn-group" },
+        React.createElement(MonthSelect, { value: month, onChange: setMonth }),
+        React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('sales'); setShowVariance(false); } }, "Run sales report"),
+        React.createElement("button", { className: "btn btn-secondary", onClick: () => { setSub('inventory'); setShowVariance(true); } }, "Run inventory report"));
+
+    const salesSection = sub === 'sales' && React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Sales Data \u2014 " + monthLabel(month)), React.createElement("button", { className: "btn btn-primary", onClick: downloadSalesPdf }, "Download sales report (PDF)")),
+        React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
+            React.createElement("thead", null, React.createElement("tr", null, ["Date", "2T oil", "60 ml", "MS Oil", "MS LTR", "MS", "PWR LTR", "PWR", "HSD Oil", "HSD LTR", "HSD", "Total"].map((h) => React.createElement("th", { key: h }, h)))),
+            React.createElement("tbody", null, salesRows.map((r) => React.createElement("tr", { key: r.date },
+                React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.oilQty)), React.createElement("td", { className: "mono" }, fmtNum(r.pktQty)),
+                React.createElement("td", { className: "mono" }, fmt(r.msOil)), React.createElement("td", { className: "mono" }, fmtNum(r.msLtr)), React.createElement("td", { className: "mono" }, fmt(r.ms)),
+                React.createElement("td", { className: "mono" }, fmtNum(r.pwrLtr)), React.createElement("td", { className: "mono" }, fmt(r.pwr)), React.createElement("td", { className: "mono" }, fmt(r.hsdOil)),
+                React.createElement("td", { className: "mono" }, r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.hsd)), React.createElement("td", { className: "mono" }, fmt(r.total))))),
+            React.createElement("tfoot", null, React.createElement("tr", null,
+                React.createElement("td", null, React.createElement("b", null, "Total")),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.oilQty, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pktQty, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.msOil, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.ms, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.pwr, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsdOil, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsd, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.total, 0)))))))),
+        salesRows.some((r) => r.hsdLtr === null) && React.createElement("div", { className: "empty-hint", style: { marginTop: 8 } }, "HSD LTR shows \u2014 for any date with no diesel point readings saved at all."));
+
+    const batchBreakdown = invRows.some((r) => r.tiers.length > 1) && React.createElement("div", { style: { marginTop: 18 } },
+        React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Batch-wise pricing breakdown (items with more than one active price tier this month)"),
+        invRows.filter((r) => r.tiers.length > 1).map((r) => React.createElement("div", { key: r.name, style: { marginBottom: 14 } },
+            React.createElement("div", { style: { fontSize: 13, fontWeight: 500, marginBottom: 4 } }, r.name),
+            React.createElement("table", { className: "data-table" },
+                React.createElement("thead", null, React.createElement("tr", null, ["Tier", "Qty sold", "MRP", "Sales revenue", "Invoice price", "Closing qty", "Closing value"].map((h) => React.createElement("th", { key: h }, h)))),
+                React.createElement("tbody", null, r.tiers.map((t, i) => React.createElement("tr", { key: i },
+                    React.createElement("td", null, t.label), React.createElement("td", { className: "mono" }, fmtNum(t.qty)), React.createElement("td", { className: "mono" }, fmt(t.mrp)),
+                    React.createElement("td", { className: "mono" }, fmt(t.revenue)), React.createElement("td", { className: "mono" }, fmt(t.invoicePrice)),
+                    React.createElement("td", { className: "mono" }, fmtNum(t.closingQty)), React.createElement("td", { className: "mono" }, fmt(t.closingValue)))))))));
+
+    const inventorySection = sub === 'inventory' && React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Stock variance check \u2014 " + monthLabel(month)), React.createElement("button", { className: "btn btn-primary", onClick: downloadInventoryPdf }, "Download inventory report (PDF)")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Opening and Closing are total stock on hand \u2014 Display + Godown combined."),
+        React.createElement("table", { className: "data-table" },
+            React.createElement("thead", null, React.createElement("tr", null, ["Item", "Opening", "Purchases", "Recorded sales", "Expected closing", "Actual closing", "Variance", "Variance value", "Closing stock value"].map((h) => React.createElement("th", { key: h }, h)))),
+            React.createElement("tbody", null, invRows.map((r) => React.createElement("tr", { key: r.name, style: r.variance !== 0 ? { background: 'var(--red-bg)' } : {} },
+                React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", { className: "mono" }, fmtNum(r.purchases)),
+                React.createElement("td", { className: "mono" }, fmtNum(r.recordedSales)), React.createElement("td", { className: "mono" }, fmtNum(r.expectedClosing)), React.createElement("td", { className: "mono" }, fmtNum(r.closing)),
+                React.createElement("td", { className: "mono" }, (r.variance > 0 ? '+' : '') + fmtNum(r.variance)), React.createElement("td", { className: "mono" }, (r.varianceValue > 0 ? '+' : '') + fmt(r.varianceValue)),
+                React.createElement("td", { className: "mono" }, fmt(r.closingValueTotal)))))),
+        React.createElement("div", { className: "empty-hint" }, flaggedCount === 0 ? 'All items reconcile \u2014 no variance found.' : `${flaggedCount} item(s) flagged with a stock variance \u2014 review before downloading, or proceed if already investigated.`),
+        batchBreakdown);
+
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Audit", action: headerActions }), salesSection, inventorySection);
 }
 function splitLine(line, delimiter) {
     if (delimiter === 'tab')
