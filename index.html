@@ -1376,25 +1376,27 @@ function getPrevLubeBatches(dieselData, dateStr, lubeId) {
     }
     return [];
 }
-// FIFO batch costing: old (base/godown) stock always sells before any newer-priced batch.
-// A receipt only creates a new batch when its price actually differs from the lube's base price;
-// otherwise it simply tops up the base stock (no need to track a separate tier for an unchanged price).
-function lubeLine(config, dieselData, dateStr, lube, entry) {
-    const lubeInvoicePrice = Number(lube.invoicePrice) || 0;
-    const lubeMrp = Number(lube.mrp) || 0;
-    const lubeOpeningBalance = Number(lube.openingBalance) || 0;
-    const lubeGodownStock = Number(lube.godownStock) || 0;
+// Core per-day lube math, taking opening state as parameters instead of looking up a frozen
+// snapshot \u2014 this is what lets the chain walker below replay history from any starting point.
+function getEffectivePrice(lube, dateStr) {
+    const history = (lube.priceHistory || []).filter((p) => p.effectiveFrom <= dateStr).sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+    if (history.length === 0)
+        return { invoicePrice: Number(lube.invoicePrice) || 0, mrp: Number(lube.mrp) || 0 };
+    const latest = history[history.length - 1];
+    return { invoicePrice: Number(latest.invoicePrice) || 0, mrp: Number(latest.mrp) || 0 };
+}
+function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, dateStr) {
+    const effective = getEffectivePrice(lube, dateStr);
+    const lubeInvoicePrice = effective.invoicePrice;
+    const lubeMrp = effective.mrp;
     const lubeReplenishQty = Number(lube.replenishQty) || 0;
-    const baseOpening = getPrevLubeBalance(dieselData, dateStr, lube.id, lubeOpeningBalance);
-    const godownOpening = getPrevGodownBalance(dieselData, dateStr, lube.id, lubeGodownStock);
-    const batchesOpening = getPrevLubeBatches(dieselData, dateStr, lube.id);
     const sale = Number(entry === null || entry === void 0 ? void 0 : entry.saleQty) || 0;
     const receiptActive = !!(entry === null || entry === void 0 ? void 0 : entry.receiptOn);
     const receiptQty = receiptActive ? (Number(entry === null || entry === void 0 ? void 0 : entry.receipt) || 0) : 0;
     const batchInvoicePrice = (entry === null || entry === void 0 ? void 0 : entry.batchInvoicePrice) !== undefined && (entry === null || entry === void 0 ? void 0 : entry.batchInvoicePrice) !== '' ? Number(entry.batchInvoicePrice) : lubeInvoicePrice;
     const batchMrp = (entry === null || entry === void 0 ? void 0 : entry.batchMrp) !== undefined && (entry === null || entry === void 0 ? void 0 : entry.batchMrp) !== '' ? Number(entry.batchMrp) : lubeMrp;
     const isNewPriceTier = receiptActive && receiptQty > 0 && (batchInvoicePrice !== lubeInvoicePrice || batchMrp !== lubeMrp);
-    let batches = batchesOpening;
+    let batches = (batchesOpening || []).map((b) => (Object.assign({}, b)));
     let base = baseOpening;
     if (receiptActive && receiptQty > 0) {
         if (isNewPriceTier)
@@ -1402,7 +1404,6 @@ function lubeLine(config, dieselData, dateStr, lube, entry) {
         else
             base += receiptQty;
     }
-    // manual restock: each click pulls one replenishQty chunk from godown into display stock, for this day only
     const manualClicks = Number(entry === null || entry === void 0 ? void 0 : entry.manualReplenishCount) || 0;
     const requestedReplenish = manualClicks * lubeReplenishQty;
     const replenished = Math.min(requestedReplenish, godownOpening);
@@ -1425,12 +1426,41 @@ function lubeLine(config, dieselData, dateStr, lube, entry) {
     if (remainingSale > 0) {
         base -= remainingSale;
         remainingSale = 0;
-    } // shortage: base goes negative as a visible flag
+    }
     const baseSaleQty = sale - batchBreakdown.reduce((s, x) => s + x.qty, 0);
     let priceTotal = baseSaleQty * (lubeMrp || lubeInvoicePrice || 0);
     batchBreakdown.forEach((x) => { priceTotal += x.qty * x.mrp; });
     return { opening: baseOpening, openingGodown: godownOpening, openingBatches: batchesOpening, sale, receipt: receiptQty, receiptActive,
         closingBalance: base, closingGodown: godown, closingBatches: batches, batchBreakdown, baseSaleQty, isNewPriceTier, replenished, priceTotal: round2(priceTotal) };
+}
+function computeLubeChainUpTo(dieselData, lube, targetDate) {
+    let base = Number(lube.openingBalance) || 0;
+    let godown = Number(lube.godownStock) || 0;
+    let batches = [];
+    let startAfter = null;
+    const corrections = (lube.corrections || []).filter((c) => c.date < targetDate).sort((a, b) => a.date.localeCompare(b.date));
+    if (corrections.length > 0) {
+        const latest = corrections[corrections.length - 1];
+        base = Number(latest.base) || 0;
+        godown = Number(latest.godown) || 0;
+        batches = [];
+        startAfter = latest.date;
+    }
+    const dates = Object.keys(dieselData).filter((d) => d < targetDate && (startAfter === null || d > startAfter)).sort();
+    dates.forEach((d) => {
+        const entry = (dieselData[d].lubeEntries || {})[lube.id];
+        if (!entry)
+            return;
+        const line = lubeLineCore(lube, entry, base, godown, batches, d);
+        base = line.closingBalance;
+        godown = line.closingGodown;
+        batches = line.closingBatches;
+    });
+    return { base, godown, batches };
+}
+function lubeLine(config, dieselData, dateStr, lube, entry) {
+    const chain = computeLubeChainUpTo(dieselData, lube, dateStr);
+    return lubeLineCore(lube, entry, chain.base, chain.godown, chain.batches, dateStr);
 }
 function computeDieselFinance(config, dieselData, dateStr, rec, msLog) {
     var _a, _b;
@@ -1812,6 +1842,28 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     // lubes
     const addLube = () => setLocal((c) => (Object.assign(Object.assign({}, c), { lubes: [...c.lubes, { id: uid('l'), name: 'New lube', openingBalance: 0, invoicePrice: 0, mrp: 0 }] })));
     const updLube = (idx, patch) => setLocal((c) => (Object.assign(Object.assign({}, c), { lubes: c.lubes.map((l, i) => i === idx ? Object.assign(Object.assign({}, l), patch) : l) })));
+    const [correctingLubeId, setCorrectingLubeId] = useState(null);
+    const [priceLubeId, setPriceLubeId] = useState(null);
+    const [priceDraft, setPriceDraft] = useState({ effectiveFrom: todayStr(), invoicePrice: '', mrp: '' });
+    const openPriceChange = (lubeId) => { setPriceLubeId(lubeId); const l = local.lubes.find((x) => x.id === lubeId); setPriceDraft({ effectiveFrom: todayStr(), invoicePrice: (l && l.invoicePrice) || '', mrp: (l && l.mrp) || '' }); };
+    const savePriceChange = (idx) => {
+        const l = local.lubes[idx];
+        const newEntry = { effectiveFrom: priceDraft.effectiveFrom, invoicePrice: Number(priceDraft.invoicePrice) || 0, mrp: Number(priceDraft.mrp) || 0 };
+        const nextHistory = [...(l.priceHistory || []).filter((p) => p.effectiveFrom !== newEntry.effectiveFrom), newEntry];
+        updLube(idx, { priceHistory: nextHistory });
+        setPriceLubeId(null);
+        showToast('Price change saved \u2014 remember to click Save at the top for it to take effect.');
+    };
+    const [correctionDraft, setCorrectionDraft] = useState({ date: todayStr(), base: '', godown: '' });
+    const openCorrection = (lubeId) => { setCorrectingLubeId(lubeId); setCorrectionDraft({ date: todayStr(), base: '', godown: '' }); };
+    const saveCorrection = (idx) => {
+        const l = local.lubes[idx];
+        const newCorrection = { date: correctionDraft.date, base: Number(correctionDraft.base) || 0, godown: Number(correctionDraft.godown) || 0 };
+        const nextCorrections = [...(l.corrections || []).filter((c) => c.date !== newCorrection.date), newCorrection];
+        updLube(idx, { corrections: nextCorrections });
+        setCorrectingLubeId(null);
+        showToast('Correction saved \u2014 remember to click Save at the top for it to take effect.');
+    };
     const removeLube = (idx) => setLocal((c) => (Object.assign(Object.assign({}, c), { lubes: c.lubes.filter((_, i) => i !== idx) })));
     const resetLubeLedger = (lubeId) => {
         const next = {};
@@ -1841,7 +1893,35 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     }), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => addTerminal('paytm') }, React.createElement(IconPlus, { size: 14 }), " Add Paytm terminal")), sub === 'tanks' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Tanks"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addTank }, React.createElement(IconPlus, { size: 14 }), " Add Tank")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Group nozzles (meters/diesel points) into the physical tank they draw from \u2014 this feeds the Daily Stock Register report. Two tanks can hold the same grade (e.g. MS1 and MS2)."), (local.tanks || []).map((t, idx) => {
         const nozzleOptions = t.productId === 'p_diesel' ? local.dieselPoints.map((p) => ({ id: p.id, label: p.label })) : local.meters.filter((m) => m.productId === t.productId).map((m) => ({ id: m.id, label: m.label }));
         return React.createElement("div", { key: t.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: t.name, onChange: (e) => updTank(idx, { name: e.target.value }) }), React.createElement("select", { className: "select-input", style: { width: 140 }, value: t.productId, onChange: (e) => updTank(idx, { productId: e.target.value, nozzleIds: [] }) }, local.products.map((p) => React.createElement("option", { key: p.id, value: p.id }, p.name))), React.createElement("button", { className: "icon-btn", onClick: () => removeTank(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { style: { fontSize: 12, color: 'var(--text-muted)', margin: '6px 0 4px' } }, "Nozzles feeding this tank:"), React.createElement("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, nozzleOptions.map((n) => React.createElement("label", { key: n.id, className: "toggle" }, React.createElement("input", { type: "checkbox", checked: (t.nozzleIds || []).includes(n.id), onChange: () => toggleTankNozzle(idx, n.id) }), " ", n.label))));
-    })), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across. \"Empty barrel item\" adds 1 to that item's stock automatically whenever Barrel Used is clicked for this lube."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Feeds MS item", "Avg. barrel volume", "Empty barrel item", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, l.feedsMsLubeId ? React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.emptyBarrelLubeId || '', onChange: (e) => updLube(idx, { emptyBarrelLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.id !== l.id && !x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name))) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 }))))))))), sub === 'opening' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Opening Readings (first-time setup)")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Only used when a meter or diesel point has no previous day's reading yet \u2014 set these once when you start using the app."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "MS / Power meters"), React.createElement("div", { className: "form-grid", style: { marginBottom: 14 } }, local.meters.map((m) => {
+    })), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across. \"Empty barrel item\" adds 1 to that item's stock automatically whenever Barrel Used is clicked for this lube."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Feeds MS item", "Avg. barrel volume", "Empty barrel item", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, l.feedsMsLubeId ? React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.emptyBarrelLubeId || '', onChange: (e) => updLube(idx, { emptyBarrelLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.id !== l.id && !x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name))) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 }))))
+, React.createElement("div", { className: "card" },
+  React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Correct lube stock")),
+  React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set the correct Display and Godown quantities as of a specific date \u2014 everything after that date recalculates automatically, with no need to revisit each day in between."),
+  React.createElement("div", { className: "form-grid" },
+    React.createElement(Field, { label: "Lube" }, React.createElement("select", { className: "select-input", value: correctingLubeId || '', onChange: (e) => openCorrection(e.target.value) },
+      React.createElement("option", { value: "" }, "\u2014 select \u2014"),
+      local.lubes.filter((l) => !l.msOnly).map((l) => React.createElement("option", { key: l.id, value: l.id }, l.name)))),
+    correctingLubeId && React.createElement(Field, { label: "As of date" }, React.createElement(CalendarDatePicker, { value: correctionDraft.date, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { date: v })), maxDate: todayStr() })),
+    correctingLubeId && React.createElement(Field, { label: "Correct Display qty" }, React.createElement(NumInput, { value: correctionDraft.base, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { base: v })) })),
+    correctingLubeId && React.createElement(Field, { label: "Correct Godown qty" }, React.createElement(NumInput, { value: correctionDraft.godown, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { godown: v })) }))),
+  correctingLubeId && React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } },
+    React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => saveCorrection(local.lubes.findIndex((l) => l.id === correctingLubeId)) }, "Save correction"),
+    React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setCorrectingLubeId(null) }, "Cancel")))
+, React.createElement("div", { className: "card" },
+  React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Price changes")),
+  React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set a new Invoice price / MRP effective from a specific date \u2014 sales before that date keep using whichever price was active at the time; sales from that date onward use the new price."),
+  React.createElement("div", { className: "form-grid" },
+    React.createElement(Field, { label: "Lube" }, React.createElement("select", { className: "select-input", value: priceLubeId || '', onChange: (e) => openPriceChange(e.target.value) },
+      React.createElement("option", { value: "" }, "\u2014 select \u2014"),
+      local.lubes.filter((l) => !l.msOnly).map((l) => React.createElement("option", { key: l.id, value: l.id }, l.name)))),
+    priceLubeId && React.createElement(Field, { label: "Effective from" }, React.createElement(CalendarDatePicker, { value: priceDraft.effectiveFrom, onChange: (v) => setPriceDraft(Object.assign(Object.assign({}, priceDraft), { effectiveFrom: v })) })),
+    priceLubeId && React.createElement(Field, { label: "New invoice price" }, React.createElement(NumInput, { value: priceDraft.invoicePrice, onChange: (v) => setPriceDraft(Object.assign(Object.assign({}, priceDraft), { invoicePrice: v })) })),
+    priceLubeId && React.createElement(Field, { label: "New MRP" }, React.createElement(NumInput, { value: priceDraft.mrp, onChange: (v) => setPriceDraft(Object.assign(Object.assign({}, priceDraft), { mrp: v })) }))),
+  priceLubeId && (local.lubes.find((l) => l.id === priceLubeId).priceHistory || []).length > 0 && React.createElement("div", { style: { marginTop: 10, fontSize: 12, color: 'var(--text-muted)' } },
+    "Existing price changes: ", (local.lubes.find((l) => l.id === priceLubeId).priceHistory || []).map((p) => `${p.effectiveFrom} \u2192 Rs.${p.invoicePrice}/Rs.${p.mrp}`).join(', ')),
+  priceLubeId && React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } },
+    React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => savePriceChange(local.lubes.findIndex((l) => l.id === priceLubeId)) }, "Save price change"),
+    React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setPriceLubeId(null) }, "Cancel")))))))), sub === 'opening' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Opening Readings (first-time setup)")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Only used when a meter or diesel point has no previous day's reading yet \u2014 set these once when you start using the app."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "MS / Power meters"), React.createElement("div", { className: "form-grid", style: { marginBottom: 14 } }, local.meters.map((m) => {
         var _a, _b;
         return React.createElement(Field, { key: m.id, label: m.label }, React.createElement(NumInput, { value: (_b = (_a = local.meterOpeningReadings) === null || _a === void 0 ? void 0 : _a[m.id]) !== null && _b !== void 0 ? _b : '', onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { meterOpeningReadings: Object.assign(Object.assign({}, c.meterOpeningReadings), { [m.id]: v }) }))) }));
     })), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Diesel points"), React.createElement("div", { className: "form-grid" }, local.dieselPoints.map((p) => {
@@ -2702,8 +2782,9 @@ function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
     return config.lubes.filter((l) => !l.msOnly).map((l) => {
         var _a, _b, _c, _d, _e, _f, _g, _h;
         const firstDate = monthDates[0];
-        const openingDisplay = firstDate ? getPrevLubeBalance(dieselData, firstDate, l.id, l.openingBalance || 0) : (l.openingBalance || 0);
-        const openingGodown = firstDate ? getPrevGodownBalance(dieselData, firstDate, l.id, l.godownStock || 0) : (l.godownStock || 0);
+        const openingChain = firstDate ? computeLubeChainUpTo(dieselData, l, firstDate) : { base: l.openingBalance || 0, godown: l.godownStock || 0 };
+        const openingDisplay = openingChain.base;
+        const openingGodown = openingChain.godown;
         const opening = round2(openingDisplay + openingGodown);
         let purchases = 0, recordedSales = 0;
         let baseSalesQty = 0, baseSalesRevenue = 0;
@@ -2736,8 +2817,11 @@ function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
         const closingBatches = lastDate ? (((_h = (_g = dieselData[lastDate]) === null || _g === void 0 ? void 0 : _g.lubeBatchesClosing) === null || _h === void 0 ? void 0 : _h[l.id]) || []) : [];
         const expectedClosing = opening + purchases - recordedSales;
         const variance = closing - expectedClosing;
-        const closingValueBase = closing * (l.invoicePrice || 0);
-        const tiers = [{ label: 'Base', qty: baseSalesQty, mrp: l.mrp || l.invoicePrice, revenue: baseSalesRevenue, invoicePrice: l.invoicePrice, closingQty: closing, closingValue: closingValueBase }];
+        const [invY, invM] = monthKey.split('-');
+        const monthEndDate = monthKey + '-' + String(new Date(Number(invY), Number(invM), 0).getDate()).padStart(2, '0');
+        const effectivePrice = getEffectivePrice(l, monthEndDate);
+        const closingValueBase = closing * (effectivePrice.invoicePrice || 0);
+        const tiers = [{ label: 'Base', qty: baseSalesQty, mrp: effectivePrice.mrp || effectivePrice.invoicePrice, revenue: baseSalesRevenue, invoicePrice: effectivePrice.invoicePrice, closingQty: closing, closingValue: closingValueBase }];
         Object.values(batchSalesMap).forEach((b) => tiers.push({ label: 'New batch', qty: b.qty, mrp: b.mrp, revenue: b.revenue, invoicePrice: b.invoicePrice, closingQty: 0, closingValue: 0 }));
         closingBatches.forEach((cb) => {
             const existing = tiers.find((t) => t.label === 'New batch' && t.invoicePrice === cb.invoicePrice && t.mrp === cb.mrp);
@@ -2749,7 +2833,7 @@ function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
                 tiers.push({ label: 'New batch', qty: 0, mrp: cb.mrp, revenue: 0, invoicePrice: cb.invoicePrice, closingQty: cb.qty, closingValue: cb.qty * cb.invoicePrice });
         });
         const closingValueTotal = tiers.reduce((s, t) => s + t.closingValue, 0);
-        return { name: l.name, opening, purchases, recordedSales, expectedClosing, closing, variance, varianceValue: variance * (l.invoicePrice || 0), rate: l.invoicePrice || 0, tiers, closingValueTotal };
+        return { name: l.name, opening, purchases, recordedSales, expectedClosing, closing, variance, varianceValue: variance * (effectivePrice.invoicePrice || 0), rate: effectivePrice.invoicePrice || 0, tiers, closingValueTotal };
     });
 }
 function AuditTab({ config, msLog, dieselLog, dieselData }) {
