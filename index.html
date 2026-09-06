@@ -2785,7 +2785,8 @@ function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
         const openingChain = firstDate ? computeLubeChainUpTo(dieselData, l, firstDate) : { base: l.openingBalance || 0, godown: l.godownStock || 0 };
         const openingDisplay = openingChain.base;
         const openingGodown = openingChain.godown;
-        const opening = round2(openingDisplay + openingGodown);
+        const openingBatchQty = (openingChain.batches || []).reduce((s, b) => s + (Number(b.qty) || 0), 0);
+        const opening = round2(openingDisplay + openingGodown + openingBatchQty);
         let purchases = 0, recordedSales = 0;
         let baseSalesQty = 0, baseSalesRevenue = 0;
         const batchSalesMap = {};
@@ -2815,8 +2816,9 @@ function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
         const closingChain = lastDate ? computeLubeChainUpTo(dieselData, l, dayAfterLastDate) : { base: openingDisplay, godown: openingGodown, batches: [] };
         const closingDisplay = closingChain.base;
         const closingGodown = closingChain.godown;
-        const closing = round2(closingDisplay + closingGodown);
         const closingBatches = closingChain.batches;
+        const closingBatchQty = closingBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+        const closing = round2(closingDisplay + closingGodown + closingBatchQty);
         const expectedClosing = opening + purchases - recordedSales;
         const variance = closing - expectedClosing;
         const [invY, invM] = monthKey.split('-');
