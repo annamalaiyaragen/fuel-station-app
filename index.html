@@ -2811,10 +2811,12 @@ function computeInventoryForMonth(config, dieselLog, dieselData, monthKey) {
             }
         });
         const lastDate = monthDates[monthDates.length - 1];
-        const closingDisplay = lastDate ? ((_c = (_b = (_a = dieselData[lastDate]) === null || _a === void 0 ? void 0 : _a.lubeClosingBalances) === null || _b === void 0 ? void 0 : _b[l.id]) !== null && _c !== void 0 ? _c : (openingDisplay + purchases - recordedSales)) : openingDisplay;
-        const closingGodown = lastDate ? ((_f = (_e = (_d = dieselData[lastDate]) === null || _d === void 0 ? void 0 : _d.godownClosingBalances) === null || _e === void 0 ? void 0 : _e[l.id]) !== null && _f !== void 0 ? _f : openingGodown) : openingGodown;
+        const dayAfterLastDate = lastDate ? shiftDateStr(lastDate, 1) : null;
+        const closingChain = lastDate ? computeLubeChainUpTo(dieselData, l, dayAfterLastDate) : { base: openingDisplay, godown: openingGodown, batches: [] };
+        const closingDisplay = closingChain.base;
+        const closingGodown = closingChain.godown;
         const closing = round2(closingDisplay + closingGodown);
-        const closingBatches = lastDate ? (((_h = (_g = dieselData[lastDate]) === null || _g === void 0 ? void 0 : _g.lubeBatchesClosing) === null || _h === void 0 ? void 0 : _h[l.id]) || []) : [];
+        const closingBatches = closingChain.batches;
         const expectedClosing = opening + purchases - recordedSales;
         const variance = closing - expectedClosing;
         const [invY, invM] = monthKey.split('-');
