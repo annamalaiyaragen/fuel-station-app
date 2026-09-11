@@ -619,11 +619,27 @@ const K = {
     DSR_DATA: 'fs_dsr_data',
     TT_DATA: 'fs_tt_data',
 };
-const BANK_TXN_TYPES = [{ key: 'deposit', label: 'Bank deposit' }, { key: 'phonepe', label: 'PhonePe settlement' }, { key: 'paytm', label: 'Paytm settlement' }, { key: 'hppay', label: 'HP Pay / DTPlus' }, { key: 'statement', label: 'Full Bank Statement' }];
+const BANK_TXN_TYPES = [{ key: 'deposit', label: 'Bank deposit' }, { key: 'phonepe', label: 'PhonePe settlement' }, { key: 'paytm', label: 'Paytm settlement' }, { key: 'hppay', label: 'HP Pay / DTPlus' }];
 function defaultBankTypeSetting() { return { delimiter: 'tab', dateCol: 1, amountCol: 3, keyword: '' }; }
 function defaultBankSettings() {
     const out = {};
     ['SBI', 'BOB', 'TMB'].forEach((b) => { out[b] = {}; BANK_TXN_TYPES.forEach((t) => { out[b][t.key] = defaultBankTypeSetting(); }); });
+    return out;
+}
+// A plain Object.assign at the per-bank level would replace an OLD saved bank's whole settings
+// object wholesale, silently dropping any newly-added transaction type (like 'statement') that
+// didn't exist when that config was last saved. This backfills per-type instead, so old saved
+// settings for existing types are kept exactly as-is, while any new type gets sensible defaults.
+function mergeBankSettings(saved) {
+    const out = defaultBankSettings();
+    Object.keys(out).forEach((bank) => {
+        if (saved && saved[bank]) {
+            Object.keys(out[bank]).forEach((type) => {
+                if (saved[bank][type])
+                    out[bank][type] = Object.assign(Object.assign({}, out[bank][type]), saved[bank][type]);
+            });
+        }
+    });
     return out;
 }
 const defaultConfig = {
@@ -671,6 +687,7 @@ const defaultConfig = {
     terminals: [],
     tanks: [],
     allowPreDatedChanges: false,
+    bankTypeMapping: { deposit: 'BOB', paytm: 'TMB', phonepe: 'TMB', hppay: 'SBI' },
     ttMaintenance: { '12': [], '20': [] },
     bankSettings: defaultBankSettings(),
     oilPrice: 320, pktPrice: 23,
@@ -748,7 +765,7 @@ function App() {
                 storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, { book: [], entries: [], proposals: [], lastSucceeded: {} }), storageGet(K.BANK_STATEMENTS, { TMB: [], BOB: [] }),
                 storageGet(K.DSR_DATA, {}), storageGet(K.TT_DATA, { history: [] }),
             ]);
-            setConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (c.bankSettings || {})) }));
+            setConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: mergeBankSettings(c.bankSettings) }));
             setMsReadings(mr);
             setMsDrafts(md);
             setMsLog(ml);
@@ -761,7 +778,7 @@ function App() {
             setBankStatements(bs);
             setDsrData(dsr);
             setTtData(tt);
-            latestStateRef.current = { config: Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (c.bankSettings || {})) }), msReadings: mr, msDrafts: md, msLog: ml, dieselData: dd, dieselLog: dl, dayClosing: dc, advance: av, salaryRuns: sr, bankRecon: br, bankStatements: bs, dsrData: dsr, ttData: tt };
+            latestStateRef.current = { config: Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: mergeBankSettings(c.bankSettings) }), msReadings: mr, msDrafts: md, msLog: ml, dieselData: dd, dieselLog: dl, dayClosing: dc, advance: av, salaryRuns: sr, bankRecon: br, bankStatements: bs, dsrData: dsr, ttData: tt };
             setReady(true);
         })();
     }, []);
@@ -834,7 +851,7 @@ function App() {
     function applyCloudData(data, push = true) {
         suppressPushRef.current = !push;
         if (data.config)
-            persistConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), data.config), { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (data.config.bankSettings || {})) }));
+            persistConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), data.config), { bankSettings: mergeBankSettings(data.config.bankSettings) }));
         if (data.msReadings)
             persistMsReadings(data.msReadings);
         if (data.msDrafts)
@@ -885,7 +902,7 @@ function App() {
                 // but worth knowing: a genuine simultaneous edit to these on two devices could still conflict.
                 const mergedPayload = {
                     version: 2, savedAt: new Date().toISOString(),
-                    config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (cloudData.config.bankSettings || {})) }) : s.config,
+                    config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: mergeBankSettings(cloudData.config.bankSettings) }) : s.config,
                     msReadings: mergedMsReadings, msDrafts: mergedMsDrafts, msLog: mergedMsLog,
                     dieselData: mergedDieselData, dieselLog: mergedDieselLog, dayClosing: mergedDayClosing,
                     advance: cloudIsNewer && cloudData.advance ? cloudData.advance : s.advance,
@@ -1034,28 +1051,24 @@ function App() {
         window.addEventListener('online', onOnline);
         return () => window.removeEventListener('online', onOnline);
     }, [driveConnected, pushNow]);
-    // A device left open for a long time previously only ever PUSHED its own state outward \u2014
-    // it never checked whether another device had made changes in the meantime, so it kept
-    // showing (and re-pushing) an increasingly stale snapshot. This periodically pulls and merges
-    // in whatever's actually on Drive, using the exact same safe merge logic as connecting fresh.
-    const pullAndMergeNow = useCallback(async () => {
-        if (!driveConnected || driveSyncInFlightRef.current)
-            return;
-        driveSyncInFlightRef.current = true;
-        try {
-            const token = await getCachedOrFreshToken();
-            await handleConnected(token, true);
-        }
-        catch (e) { }
-        finally {
-            driveSyncInFlightRef.current = false;
-        }
-        // eslint-disable-next-line
-    }, [driveConnected]);
-    // Manual "check for updates" \u2014 separate from the automatic background sync above, this is
-    // purely for on-demand peace of mind. Checking never pulls anything by itself; it just compares
-    // dates and shows the result. Pulling only happens if the person explicitly clicks "Update now"
-    // inside the dialog this opens.
+    // Automatic background pulls (periodic, tab-focus, silent reconnect) must never interrupt someone
+    // mid-keystroke: a draft field's latest character may not be persisted yet, so merging in the
+    // cloud's older version of that same draft would visually reset what they're still typing. This
+    // check defers the pull rather than skip it outright \u2014 it retries shortly after, so data still
+    // syncs, just not at the exact moment someone has an input actively focused.
+    function isUserActivelyTyping() {
+        const el = document.activeElement;
+        if (!el)
+            return false;
+        const tag = el.tagName;
+        return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+    }
+    // Manual "check for updates" \u2014 this and the auto-reconnect-on-load effect below are now the
+    // only two ways this app pulls from Drive automatically or on demand. An earlier periodic
+    // (every 3 minutes) and tab-focus pull were removed: both used this same merge path, and even
+    // with the typing guard, they were still found to occasionally clobber freshly-entered data
+    // (e.g. just-parsed Bank Statement entries) before it had a chance to push through. Pulling now
+    // only happens at a deliberate "connect" moment, or when explicitly requested via this dialog.
     const [checkDialog, setCheckDialog] = useState(null);
     const checkForUpdates = useCallback(async () => {
         if (!driveConnected) {
@@ -1097,12 +1110,6 @@ function App() {
         setCheckDialog(null);
         // eslint-disable-next-line
     }, []);
-    useEffect(() => {
-        if (!driveConnected)
-            return;
-        const intervalId = setInterval(() => { pullAndMergeNow(); }, 3 * 60 * 1000);
-        return () => clearInterval(intervalId);
-    }, [driveConnected, pullAndMergeNow]);
     // On every fresh page load, if this device has connected to Drive before, silently try to
     // reconnect and pull+merge automatically \u2014 rather than only syncing once someone happens to
     // click Connect (or notices stale data and goes looking for a reason why). A silent token
@@ -1114,7 +1121,14 @@ function App() {
         const wasConnectedBefore = window.localStorage.getItem(LS_DRIVE_FLAG) === '1';
         if (!wasConnectedBefore)
             return;
-        (async () => {
+        let cancelled = false;
+        const attemptSilentReconnect = async () => {
+            if (cancelled)
+                return;
+            if (isUserActivelyTyping()) {
+                setTimeout(attemptSilentReconnect, 15000); // retry shortly once they've likely paused
+                return;
+            }
             try {
                 const resp = await requestToken('none');
                 cachedTokenRef.current = { token: resp.access_token, expiresAt: Date.now() + ((Number(resp.expires_in) || 3300) * 1000) };
@@ -1124,15 +1138,11 @@ function App() {
                 // Silent attempt failed (e.g. access revoked or expired) \u2014 the normal
                 // "Connect Google Drive" screen remains available as the fallback.
             }
-        })();
+        };
+        attemptSilentReconnect();
+        return () => { cancelled = true; };
         // eslint-disable-next-line
     }, [ready, driveReady, driveConnected]);
-    useEffect(() => {
-        const onVisible = () => { if (document.visibilityState === 'visible' && driveConnected)
-            pullAndMergeNow(); };
-        document.addEventListener('visibilitychange', onVisible);
-        return () => document.removeEventListener('visibilitychange', onVisible);
-    }, [driveConnected, pullAndMergeNow]);
     if (!ready)
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "boot" }, React.createElement(IconFuel, { size: 28 }), React.createElement("span", null, "Loading station data\u2026")));
     if (!unlocked) {
@@ -1145,7 +1155,7 @@ function App() {
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
     }
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt, checkForUpdates }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }));
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt, checkForUpdates }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }));
 }
 function CheckUpdatesDialog({ state, onUpdate, onClose }) {
     if (!state)
@@ -1187,6 +1197,7 @@ function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyn
         { id: 'reports', label: 'Reports', Icon: IconPrint },
         { id: 'bank', label: 'Bank Reconciliation', Icon: IconBank },
         { id: 'bankstatement', label: 'Bank Statement', Icon: IconBank },
+        { id: 'dataparsing', label: 'Data Parsing', Icon: IconBank },
         { id: 'master', label: 'Master Data', Icon: IconWallet },
         { id: 'settings', label: 'Settings', Icon: IconSettings },
     ];
@@ -3400,51 +3411,55 @@ function parseRawBankStatementLines(rawLines) {
     records.reverse(); // bank lists newest-first; internal order should be old\u2192new
     return { records, errors };
 }
-function BankStatementTab({ bankStatements, persistBankStatements, dayClosing, msLog, dieselLog, showToast }) {
+// For data that's already tabular (e.g. from a spreadsheet/macro export), one transaction per line,
+// tab-separated: Date, (blank), Description, Debit, Credit, Balance \u2014 matching the same column
+// layout as the raw parser's output, just skipping the repeating-pattern detection since this data
+// is already structured. A bad line is skipped (with an error reported) rather than halting the
+// whole batch, since each line here is already a complete, independent record.
+function parseLegacyTabularLines(rawLines) {
+    const records = [];
+    const errors = [];
+    rawLines.map((l) => l.trim()).filter(Boolean).forEach((line, idx) => {
+        const cols = line.split('\t').map((c) => c.trim());
+        if (cols.length < 6) {
+            errors.push(`Line ${idx + 1}: expected 6 tab-separated columns (Date, blank, Description, Debit, Credit, Balance), got ${cols.length}.`);
+            return;
+        }
+        const dateNorm = tryParseRawDate(cols[0]);
+        if (!dateNorm) {
+            errors.push(`Line ${idx + 1}: couldn't read "${cols[0]}" as a date.`);
+            return;
+        }
+        const desc = cols[2];
+        const debitR = cleanRawAmount(cols[3]);
+        const creditR = cleanRawAmount(cols[4]);
+        const balR = cleanRawAmount(cols[5]);
+        if (!debitR.ok || !creditR.ok || !balR.ok) {
+            errors.push(`Line ${idx + 1}: couldn't read an amount (${(!debitR.ok && debitR.reason) || (!creditR.ok && creditR.reason) || (!balR.ok && balR.reason)}).`);
+            return;
+        }
+        records.push({ date: dateNorm, desc, debit: debitR.value, credit: creditR.value, balance: balR.value });
+    });
+    return { records, errors };
+}
+function BankStatementTab({ config, bankStatements, dayClosing, msLog, dieselLog }) {
     const [bank, setBank] = useState('TMB');
-    const [pasteText, setPasteText] = useState('');
-    const [parseErrors, setParseErrors] = useState([]);
     const entries = bankStatements[bank] || [];
-
-    const parseAndAppend = () => {
-        const lines = pasteText.split('\n');
-        const { records, errors } = parseRawBankStatementLines(lines);
-        const existingKeys = new Set(entries.map((e) => e.date + '|' + e.desc + '|' + e.balance));
-        const newEntries = [];
-        let duplicates = 0;
-        records.forEach((r) => {
-            const key = r.date + '|' + r.desc + '|' + r.balance;
-            if (existingKeys.has(key)) { duplicates += 1; return; }
-            existingKeys.add(key);
-            newEntries.push(Object.assign({ id: uid('bs') }, r));
-        });
-        const merged = [...entries, ...newEntries].sort((a, b) => a.date.localeCompare(b.date));
-        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: merged }));
-        setParseErrors(errors);
-        showToast(`Added ${newEntries.length} new transaction(s), ${duplicates} duplicate(s) skipped.` + (errors.length ? ' Parsing stopped early \u2014 see note below.' : ''));
-        if (newEntries.length > 0 || errors.length === 0)
-            setPasteText('');
-    };
-
-    const clearAll = () => {
-        if (entries.length === 0) return;
-        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: [] }));
-        showToast(`Cleared ${bank}'s stored statement.`);
-    };
 
     const allBookEntries = React.useMemo(() => {
         const out = [];
-        BANK_TXN_TYPES.filter((t) => t.key !== 'statement').forEach((t) => {
+        const mapping = config.bankTypeMapping || {};
+        BANK_TXN_TYPES.filter((t) => mapping[t.key] === bank).forEach((t) => {
             out.push(...bookEntriesFor(bank, t.key, dayClosing, msLog, dieselLog));
         });
         return out;
-    }, [bank, dayClosing, msLog, dieselLog]);
+    }, [bank, config.bankTypeMapping, dayClosing, msLog, dieselLog]);
 
     const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
     const isMatched = (entry) => {
         const amt = entry.credit > 0 ? entry.credit : entry.debit;
         if (!amt)
-            return null; // nothing to match against (both zero)
+            return null;
         return allBookEntries.some((b) => Math.abs(b.amount - amt) <= 10 && daysBetween(b.date, entry.date) >= 0 && daysBetween(b.date, entry.date) <= 4);
     };
 
@@ -3462,26 +3477,81 @@ function BankStatementTab({ bankStatements, persistBankStatements, dayClosing, m
 
     const table = entries.length > 0 ? React.createElement("table", { className: "data-table" },
         React.createElement("thead", null, React.createElement("tr", null, ["Date", "Description", "Debit", "Credit", "Balance", "Status"].map((h) => React.createElement("th", { key: h }, h)))),
-        React.createElement("tbody", null, ...tableRows)) : React.createElement("div", { className: "empty-hint" }, `No ${bank} statement entries stored yet \u2014 paste some text below.`);
+        React.createElement("tbody", null, ...tableRows)) : React.createElement("div", { className: "empty-hint" }, `No ${bank} statement entries stored yet \u2014 go to Data Parsing to add some.`);
 
     const unmatchedCount = entries.filter((e) => isMatched(e) === false).length;
-    const errorNote = parseErrors.length > 0 ? React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, parseErrors[0]) : null;
 
     return React.createElement("div", { className: "page" },
         React.createElement(PageHeader, { title: "Bank Statement", action: headerActions }),
         React.createElement("div", { className: "card" },
-            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 paste raw statement text")),
-            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Paste exactly as copied from the bank site \u2014 one value per line, repeating: Date, Description, (date again if shown), Debit, Credit, Balance, (Raise Dispute if shown). Pasted entries are added to what's already stored \u2014 duplicates (same date + description + balance) are skipped automatically."),
-            React.createElement("textarea", { className: "text-input", rows: 10, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste raw statement text here, one value per line" }),
-            errorNote,
-            React.createElement("div", { className: "slot-actions" },
-                React.createElement("button", { className: "btn btn-primary", onClick: parseAndAppend }, "Parse and append"),
-                React.createElement("button", { className: "btn btn-ghost", onClick: clearAll }, "Clear stored " + bank + " statement"))),
-        React.createElement("div", { className: "card" },
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Stored ${bank} statement (${entries.length} entries)`)),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a permanent record \u2014 entries are added from the Data Parsing tab and kept here for reference; there's no way to clear them from this screen."),
             unmatchedCount > 0 && React.createElement("div", { className: "empty-hint" }, `${unmatchedCount} entr${unmatchedCount === 1 ? 'y' : 'ies'} not found in your book records within the usual 0\u20134 day settlement window.`),
             table));
 }
+function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
+    const [bank, setBank] = useState('TMB');
+    const [pasteText, setPasteText] = useState('');
+    const [parseErrors, setParseErrors] = useState([]);
+    const [legacyText, setLegacyText] = useState('');
+    const [legacyErrors, setLegacyErrors] = useState([]);
+    const entries = bankStatements[bank] || [];
+
+    const appendRecords = (records, sourceLabel) => {
+        const existingKeys = new Set(entries.map((e) => e.date + '|' + e.desc + '|' + e.balance));
+        const newEntries = [];
+        let duplicates = 0;
+        records.forEach((r) => {
+            const key = r.date + '|' + r.desc + '|' + r.balance;
+            if (existingKeys.has(key)) { duplicates += 1; return; }
+            existingKeys.add(key);
+            newEntries.push(Object.assign({ id: uid('bs') }, r));
+        });
+        const merged = [...entries, ...newEntries].sort((a, b) => a.date.localeCompare(b.date));
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: merged }));
+        showToast(`${sourceLabel}: added ${newEntries.length} new transaction(s), ${duplicates} duplicate(s) skipped.`);
+        return newEntries.length;
+    };
+
+    const parseAndAppend = () => {
+        const lines = pasteText.split('\n');
+        const { records, errors } = parseRawBankStatementLines(lines);
+        const added = appendRecords(records, 'Raw paste');
+        setParseErrors(errors);
+        if (added > 0 || errors.length === 0)
+            setPasteText('');
+    };
+
+    const uploadLegacyAndAppend = () => {
+        const lines = legacyText.split('\n');
+        const { records, errors } = parseLegacyTabularLines(lines);
+        const added = appendRecords(records, 'Legacy upload');
+        setLegacyErrors(errors);
+        if (errors.length === 0)
+            setLegacyText('');
+    };
+
+    const headerActions = React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => setBank(b) }, b)));
+
+    const rawErrorNote = parseErrors.length > 0 ? React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, parseErrors[0]) : null;
+    const legacyErrorList = legacyErrors.length > 0 ? React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, `${legacyErrors.length} line(s) couldn't be read \u2014 first issue: ${legacyErrors[0]}`) : null;
+
+    return React.createElement("div", { className: "page" },
+        React.createElement(PageHeader, { title: "Data Parsing", action: headerActions }),
+        React.createElement("div", { className: "card" },
+            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 paste raw statement text")),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Paste exactly as copied from the bank site \u2014 one value per line, repeating: Date, Description, (date again if shown), Debit, Credit, Balance, (Raise Dispute if shown). Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + description + balance) are skipped automatically."),
+            React.createElement("textarea", { className: "text-input", rows: 10, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste raw statement text here, one value per line" }),
+            rawErrorNote,
+            React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: parseAndAppend }, "Parse and append"))),
+        React.createElement("div", { className: "card" },
+            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 upload legacy data")),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "For data you already have in a structured table (e.g. from a spreadsheet) \u2014 no pattern detection, just read as-is. One transaction per line, tab-separated, in this exact column order: Date, (blank), Description, Debit, Credit, Balance. Use \"-\" for a column with no amount."),
+            React.createElement("textarea", { className: "text-input", rows: 6, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: legacyText, onChange: (e) => setLegacyText(e.target.value), placeholder: "Paste tab-separated legacy data here" }),
+            legacyErrorList,
+            React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: uploadLegacyAndAppend }, "Upload legacy data"))));
+}
+
 function BankReconTab(props) {
     const [sub, setSub] = useState('reconcile');
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Bank Reconciliation" }), React.createElement("div", { className: "tab-switch" }, ['reconcile', 'settings'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'reconcile' ? 'Reconcile' : 'Settings'))), sub === 'reconcile' && React.createElement(BankReconcilePane, props), sub === 'settings' && React.createElement(BankSettingsPane, props));
@@ -3548,8 +3618,8 @@ function BookEntryDetailModal({ date, type, msLog, dieselLog, config, onClose })
     return ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, modalBox), document.body);
 }
 function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, persistBankRecon }) {
-    const [bank, setBank] = useState('SBI');
     const [type, setType] = useState('deposit');
+    const bank = (config.bankTypeMapping || {})[type] || 'SBI';
     const [pasteText, setPasteText] = useState('');
     const bankFileInputRef = useRef(null);
     const handleBankFileChosen = (e) => {
@@ -3680,19 +3750,29 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
         const lastSucceeded = !st.lastSucceeded || maxDate > st.lastSucceeded ? maxDate : st.lastSucceeded;
         updSt({ proposals, statuses, lastSucceeded });
     };
-    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Bank" }, React.createElement("select", { className: "select-input", value: bank, onChange: (e) => setBank(e.target.value) }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("option", { key: b, value: b }, b)))), React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: type, onChange: (e) => setType(e.target.value) }, BANK_TXN_TYPES.map((t) => React.createElement("option", { key: t.key, value: t.key }, t.label))))), React.createElement("textarea", { className: "text-input", rows: 5, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste statement text here, one transaction per line" }), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: () => parse() }, "Parse pasted text"), React.createElement("input", { type: "file", accept: ".csv,.txt", ref: bankFileInputRef, style: { display: 'none' }, onChange: handleBankFileChosen }), React.createElement("button", { className: "btn btn-secondary", onClick: () => bankFileInputRef.current && bankFileInputRef.current.click() }, "Choose file \u2014 parses automatically")), parseMsg && React.createElement("div", { className: "empty-hint" }, parseMsg), React.createElement("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 } }, React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Book entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, bookAll.map((b) => React.createElement(React.Fragment, { key: b.id }, React.createElement("tr", null, React.createElement("td", null, fmtDate(b.date)), React.createElement("td", { className: "mono" }, (type === 'phonepe' || type === 'paytm') ? React.createElement("button", { className: "btn-link", onClick: () => setDetailDate(b.date) }, fmt(b.amount)) : fmt(b.amount)), React.createElement("td", null, React.createElement(Pill, { tone: st.statuses[b.id] === 'confirmed' ? 'green' : st.statuses[b.id] === 'approx' ? 'amber' : st.statuses[b.id] === 'flagged' ? 'red' : st.statuses[b.id] === 'ignored' ? 'muted' : 'muted', onClick: st.statuses[b.id] === 'flagged' ? () => setExpandedFlag(expandedFlag === b.id ? null : b.id) : undefined, style: st.statuses[b.id] === 'flagged' ? { cursor: 'pointer' } : {} }, st.statuses[b.id] || 'pending'))), expandedFlag === b.id && React.createElement("tr", null, React.createElement("td", { colSpan: 3, style: { background: 'var(--surface-2)', padding: 12 } }, React.createElement("textarea", { className: "text-input", rows: 2, placeholder: "Add a note about why this doesn't match (optional)", value: (st.notes || {})[b.id] || '', onChange: (e) => updateNote(b.id, e.target.value) }), React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } }, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => ignoreBookEntry(b.id) }, "Ignore"), React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => tallyBookEntry(b.id) }, "Tally (mark reconciled)"))))))))), detailDate && (type === 'phonepe' || type === 'paytm') && React.createElement(BookEntryDetailModal, { date: detailDate, type, msLog, dieselLog, config, onClose: () => setDetailDate(null) }), React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Parsed bank entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, st.entries.map((e) => React.createElement("tr", { key: e.id, style: e.consumed ? { opacity: 0.5 } : {} }, React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { className: "mono" }, fmt(e.amount) + (e.consumed ? ' \u2713' : '')))))))), React.createElement("div", { className: "slot-actions", style: { marginTop: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: runReconciliation }, "Run reconciliation"), React.createElement("span", { style: { marginLeft: 12, fontSize: 13, color: 'var(--text-muted)' } }, "Last succeeded date: ", React.createElement("b", null, st.lastSucceeded ? fmtDate(st.lastSucceeded) : 'None yet'))), reconcileMsg && React.createElement("div", { className: "empty-hint" }, reconcileMsg), st.proposals.filter((p) => !p.confirmed).map((p, idx) => React.createElement("div", { key: idx, className: "confirm-bar", style: { background: p.approx ? 'var(--amber-dim)' : 'var(--surface-2)', color: p.approx ? 'var(--amber)' : 'var(--text-primary)', border: '1px solid var(--border)', flexDirection: 'column', alignItems: 'stretch', gap: 6 } }, React.createElement("span", null, `${p.approx ? 'Approximate match' : p.bookIds.length > 1 ? 'Cumulative match' : 'Match'}: book ${fmt(p.bookTotal)} on ${fmtDate(p.bookDate)} \u2194 bank ${fmt(p.total)} on ${fmtDate(p.bankDate)}` + (p.bookTotal !== p.total ? ` (off by ${fmt(Math.abs(p.bookTotal - p.total))})` : '')), p.desc && React.createElement("span", { style: { fontSize: 12.5 } }, p.desc), React.createElement("div", { style: { display: 'flex', gap: 8 } }, React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => confirmProposal(idx) }, "OK, confirm match"), p.approx && React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => rejectProposal(idx) }, "Reject \u2014 leave flagged")))));
+    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: type, onChange: (e) => setType(e.target.value) }, BANK_TXN_TYPES.map((t) => React.createElement("option", { key: t.key, value: t.key }, t.label)))), React.createElement(Field, { label: "Bank (set in Settings)" }, React.createElement("span", { className: "readonly-value" }, bank))), React.createElement("textarea", { className: "text-input", rows: 5, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste statement text here, one transaction per line" }), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: () => parse() }, "Parse pasted text"), React.createElement("input", { type: "file", accept: ".csv,.txt", ref: bankFileInputRef, style: { display: 'none' }, onChange: handleBankFileChosen }), React.createElement("button", { className: "btn btn-secondary", onClick: () => bankFileInputRef.current && bankFileInputRef.current.click() }, "Choose file \u2014 parses automatically")), parseMsg && React.createElement("div", { className: "empty-hint" }, parseMsg), React.createElement("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 } }, React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Book entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, bookAll.map((b) => React.createElement(React.Fragment, { key: b.id }, React.createElement("tr", null, React.createElement("td", null, fmtDate(b.date)), React.createElement("td", { className: "mono" }, (type === 'phonepe' || type === 'paytm') ? React.createElement("button", { className: "btn-link", onClick: () => setDetailDate(b.date) }, fmt(b.amount)) : fmt(b.amount)), React.createElement("td", null, React.createElement(Pill, { tone: st.statuses[b.id] === 'confirmed' ? 'green' : st.statuses[b.id] === 'approx' ? 'amber' : st.statuses[b.id] === 'flagged' ? 'red' : st.statuses[b.id] === 'ignored' ? 'muted' : 'muted', onClick: st.statuses[b.id] === 'flagged' ? () => setExpandedFlag(expandedFlag === b.id ? null : b.id) : undefined, style: st.statuses[b.id] === 'flagged' ? { cursor: 'pointer' } : {} }, st.statuses[b.id] || 'pending'))), expandedFlag === b.id && React.createElement("tr", null, React.createElement("td", { colSpan: 3, style: { background: 'var(--surface-2)', padding: 12 } }, React.createElement("textarea", { className: "text-input", rows: 2, placeholder: "Add a note about why this doesn't match (optional)", value: (st.notes || {})[b.id] || '', onChange: (e) => updateNote(b.id, e.target.value) }), React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } }, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => ignoreBookEntry(b.id) }, "Ignore"), React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => tallyBookEntry(b.id) }, "Tally (mark reconciled)"))))))))), detailDate && (type === 'phonepe' || type === 'paytm') && React.createElement(BookEntryDetailModal, { date: detailDate, type, msLog, dieselLog, config, onClose: () => setDetailDate(null) }), React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Parsed bank entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, st.entries.map((e) => React.createElement("tr", { key: e.id, style: e.consumed ? { opacity: 0.5 } : {} }, React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { className: "mono" }, fmt(e.amount) + (e.consumed ? ' \u2713' : '')))))))), React.createElement("div", { className: "slot-actions", style: { marginTop: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: runReconciliation }, "Run reconciliation"), React.createElement("span", { style: { marginLeft: 12, fontSize: 13, color: 'var(--text-muted)' } }, "Last succeeded date: ", React.createElement("b", null, st.lastSucceeded ? fmtDate(st.lastSucceeded) : 'None yet'))), reconcileMsg && React.createElement("div", { className: "empty-hint" }, reconcileMsg), st.proposals.filter((p) => !p.confirmed).map((p, idx) => React.createElement("div", { key: idx, className: "confirm-bar", style: { background: p.approx ? 'var(--amber-dim)' : 'var(--surface-2)', color: p.approx ? 'var(--amber)' : 'var(--text-primary)', border: '1px solid var(--border)', flexDirection: 'column', alignItems: 'stretch', gap: 6 } }, React.createElement("span", null, `${p.approx ? 'Approximate match' : p.bookIds.length > 1 ? 'Cumulative match' : 'Match'}: book ${fmt(p.bookTotal)} on ${fmtDate(p.bookDate)} \u2194 bank ${fmt(p.total)} on ${fmtDate(p.bankDate)}` + (p.bookTotal !== p.total ? ` (off by ${fmt(Math.abs(p.bookTotal - p.total))})` : '')), p.desc && React.createElement("span", { style: { fontSize: 12.5 } }, p.desc), React.createElement("div", { style: { display: 'flex', gap: 8 } }, React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => confirmProposal(idx) }, "OK, confirm match"), p.approx && React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => rejectProposal(idx) }, "Reject \u2014 leave flagged")))));
 }
 function BankSettingsPane({ config, persistConfig }) {
-    const [bankTab, setBankTab] = useState('SBI');
     const [local, setLocal] = useState(config.bankSettings);
+    const [mapping, setMapping] = useState(config.bankTypeMapping || {});
     useEffect(() => { setLocal(config.bankSettings); }, [config.bankSettings]);
+    useEffect(() => { setMapping(config.bankTypeMapping || {}); }, [config.bankTypeMapping]);
     const upd = (bank, type, field, value) => setLocal((c) => (Object.assign(Object.assign({}, c), { [bank]: Object.assign(Object.assign({}, c[bank]), { [type]: Object.assign(Object.assign({}, c[bank][type]), { [field]: value }) }) })));
-    const dirty = JSON.stringify(local) !== JSON.stringify(config.bankSettings);
-    const save = () => persistConfig(Object.assign(Object.assign({}, config), { bankSettings: local }));
+    const updMapping = (type, bankValue) => setMapping((m) => Object.assign(Object.assign({}, m), { [type]: bankValue }));
+    const dirty = JSON.stringify(local) !== JSON.stringify(config.bankSettings) || JSON.stringify(mapping) !== JSON.stringify(config.bankTypeMapping || {});
+    const save = () => persistConfig(Object.assign(Object.assign({}, config), { bankSettings: local, bankTypeMapping: mapping }));
     const [testLine, setTestLine] = useState({});
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save settings") }), dirty && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)', marginBottom: 12 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "You have unsaved changes. The Test parse preview below reflects them, but the Reconcile page will keep using the last saved settings until you click \"Save settings\" above.")), React.createElement("div", { className: "tab-switch" }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("button", { key: b, className: bankTab === b ? 'active' : '', onClick: () => setBankTab(b) }, b))), BANK_TXN_TYPES.map((t) => {
-        const cfg = local[bankTab][t.key];
-        const tkey = bankTab + '_' + t.key;
+
+    const mappingFields = BANK_TXN_TYPES.map((t) => React.createElement(Field, { key: t.key, label: t.label }, React.createElement("select", { className: "select-input", value: mapping[t.key] || 'SBI', onChange: (e) => updMapping(t.key, e.target.value) }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("option", { key: b, value: b }, b)))));
+    const mappingSection = React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Which bank handles each type")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set this once \u2014 Bank Reconciliation then uses the right bank automatically for each type, no need to pick it every time."),
+        React.createElement("div", { className: "form-grid" }, ...mappingFields));
+
+    const typeSections = BANK_TXN_TYPES.map((t) => {
+        const bankForType = mapping[t.key] || 'SBI';
+        const cfg = local[bankForType][t.key];
+        const tkey = bankForType + '_' + t.key;
         const tl = testLine[tkey] || '';
         let preview = null;
         if (tl.trim()) {
@@ -3701,8 +3781,10 @@ function BankSettingsPane({ config, persistConfig }) {
                 ? React.createElement("span", { style: { color: 'var(--green)' } }, `Parsed \u2014 date: ${result.date}, amount: ${fmt(result.amount)}`)
                 : React.createElement("span", { style: { color: 'var(--red)' } }, result.reason);
         }
-        return React.createElement("div", { key: t.key, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, t.label), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Delimiter" }, React.createElement("select", { className: "select-input", value: cfg.delimiter, onChange: (e) => upd(bankTab, t.key, 'delimiter', e.target.value) }, React.createElement("option", { value: "tab" }, "Tab"), React.createElement("option", { value: "comma" }, "Comma"), React.createElement("option", { value: "pipe" }, "Pipe |"))), React.createElement(Field, { label: "Date column #" }, React.createElement(NumInput, { value: cfg.dateCol, onChange: (v) => upd(bankTab, t.key, 'dateCol', v) })), React.createElement(Field, { label: "Amount column #" }, React.createElement(NumInput, { value: cfg.amountCol, onChange: (v) => upd(bankTab, t.key, 'amountCol', v) })), React.createElement(Field, { label: "Keyword filter" }, React.createElement("input", { className: "text-input", value: cfg.keyword, onChange: (e) => upd(bankTab, t.key, 'keyword', e.target.value) }))), React.createElement(Field, { label: "Test parse \u2014 paste a sample line" }, React.createElement("input", { className: "text-input", style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: tl, onChange: (e) => setTestLine(Object.assign(Object.assign({}, testLine), { [tkey]: e.target.value })) })), preview && React.createElement("div", { style: { fontSize: 13 } }, preview));
-    }));
+        return React.createElement("div", { key: t.key, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, `${t.label} (${bankForType})`), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Delimiter" }, React.createElement("select", { className: "select-input", value: cfg.delimiter, onChange: (e) => upd(bankForType, t.key, 'delimiter', e.target.value) }, React.createElement("option", { value: "tab" }, "Tab"), React.createElement("option", { value: "comma" }, "Comma"), React.createElement("option", { value: "pipe" }, "Pipe |"))), React.createElement(Field, { label: "Date column #" }, React.createElement(NumInput, { value: cfg.dateCol, onChange: (v) => upd(bankForType, t.key, 'dateCol', v) })), React.createElement(Field, { label: "Amount column #" }, React.createElement(NumInput, { value: cfg.amountCol, onChange: (v) => upd(bankForType, t.key, 'amountCol', v) })), React.createElement(Field, { label: "Keyword filter" }, React.createElement("input", { className: "text-input", value: cfg.keyword, onChange: (e) => upd(bankForType, t.key, 'keyword', e.target.value) }))), React.createElement(Field, { label: "Test parse \u2014 paste a sample line" }, React.createElement("input", { className: "text-input", style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: tl, onChange: (e) => setTestLine(Object.assign(Object.assign({}, testLine), { [tkey]: e.target.value })) })), preview && React.createElement("div", { style: { fontSize: 13 } }, preview));
+    });
+
+    return React.createElement(React.Fragment, null, mappingSection, React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save settings") }), dirty && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)', marginBottom: 12 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "You have unsaved changes. The Test parse preview below reflects them, but the Reconcile page will keep using the last saved settings until you click \"Save settings\" above.")), ...typeSections));
 }
 function SettingsGate(props) {
     const [unlocked, setUnlocked] = useState(false);
