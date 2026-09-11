@@ -596,10 +596,11 @@ const K = {
     DIESEL_DATA: 'fs_diesel_data', DIESEL_LOG: 'fs_diesel_log',
     DAY_CLOSING: 'fs_day_closing', ADVANCE: 'fs_advance', SALARY_RUNS: 'fs_salary_runs',
     BANK_RECON: 'fs_bank_recon',
+    BANK_STATEMENTS: 'fs_bank_statements',
     DSR_DATA: 'fs_dsr_data',
     TT_DATA: 'fs_tt_data',
 };
-const BANK_TXN_TYPES = [{ key: 'deposit', label: 'Bank deposit' }, { key: 'phonepe', label: 'PhonePe settlement' }, { key: 'paytm', label: 'Paytm settlement' }, { key: 'hppay', label: 'HP Pay / DTPlus' }];
+const BANK_TXN_TYPES = [{ key: 'deposit', label: 'Bank deposit' }, { key: 'phonepe', label: 'PhonePe settlement' }, { key: 'paytm', label: 'Paytm settlement' }, { key: 'hppay', label: 'HP Pay / DTPlus' }, { key: 'statement', label: 'Full Bank Statement' }];
 function defaultBankTypeSetting() { return { delimiter: 'tab', dateCol: 1, amountCol: 3, keyword: '' }; }
 function defaultBankSettings() {
     const out = {};
@@ -671,6 +672,7 @@ function App() {
     const [advance, setAdvance] = useState({ balances: {}, log: [] });
     const [salaryRuns, setSalaryRuns] = useState({});
     const [bankRecon, setBankRecon] = useState({ book: [], entries: [], proposals: [], lastSucceeded: {} });
+    const [bankStatements, setBankStatements] = useState({ TMB: [], BOB: [] });
     const [dsrData, setDsrData] = useState({});
     const [ttData, setTtData] = useState({ history: [] });
     const [tab, setTab] = useState('dashboard');
@@ -721,10 +723,10 @@ function App() {
     const configuredClientId = GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('PASTE_');
     useEffect(() => {
         (async () => {
-            const [c, mr, md, ml, dd, dl, dc, av, sr, br, dsr, tt] = await Promise.all([
+            const [c, mr, md, ml, dd, dl, dc, av, sr, br, bs, dsr, tt] = await Promise.all([
                 storageGet(K.CONFIG, defaultConfig), storageGet(K.MS_READINGS, {}), storageGet(K.MS_DRAFTS, {}), storageGet(K.MS_LOG, []),
                 storageGet(K.DIESEL_DATA, {}), storageGet(K.DIESEL_LOG, []), storageGet(K.DAY_CLOSING, {}),
-                storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, { book: [], entries: [], proposals: [], lastSucceeded: {} }),
+                storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, { book: [], entries: [], proposals: [], lastSucceeded: {} }), storageGet(K.BANK_STATEMENTS, { TMB: [], BOB: [] }),
                 storageGet(K.DSR_DATA, {}), storageGet(K.TT_DATA, { history: [] }),
             ]);
             setConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (c.bankSettings || {})) }));
@@ -737,6 +739,7 @@ function App() {
             setAdvance(av);
             setSalaryRuns(sr);
             setBankRecon(br);
+            setBankStatements(bs);
             setDsrData(dsr);
             setTtData(tt);
             setReady(true);
@@ -753,6 +756,7 @@ function App() {
     const persistAdvance = useCallback(async (next) => { setAdvance(next); await storageSet(K.ADVANCE, next); }, []);
     const persistSalaryRuns = useCallback(async (next) => { setSalaryRuns(next); await storageSet(K.SALARY_RUNS, next); }, []);
     const persistBankRecon = useCallback(async (next) => { setBankRecon(next); await storageSet(K.BANK_RECON, next); }, []);
+    const persistBankStatements = useCallback(async (next) => { setBankStatements(next); await storageSet(K.BANK_STATEMENTS, next); }, []);
     const persistDsrData = useCallback(async (next) => { setDsrData(next); await storageSet(K.DSR_DATA, next); }, []);
     const persistTtData = useCallback(async (next) => { setTtData(next); await storageSet(K.TT_DATA, next); }, []);
     /* ---------- Google Drive sync (backs up everything as one payload) ---------- */
@@ -798,7 +802,7 @@ function App() {
         return resp.access_token;
     }
     function buildPayload() {
-        return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData };
+        return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements, dsrData, ttData };
     }
     function applyCloudData(data, push = true) {
         suppressPushRef.current = !push;
@@ -822,12 +826,14 @@ function App() {
             persistSalaryRuns(data.salaryRuns);
         if (data.bankRecon)
             persistBankRecon(data.bankRecon);
+        if (data.bankStatements)
+            persistBankStatements(data.bankStatements);
         if (data.dsrData)
             persistDsrData(data.dsrData);
         if (data.ttData)
             persistTtData(data.ttData);
     }
-    async function handleConnected(token) {
+    async function handleConnected(token, silent) {
         setDriveConnected(true);
         window.localStorage.setItem(LS_DRIVE_FLAG, '1');
         setSyncStatus('syncing');
@@ -857,6 +863,7 @@ function App() {
                     advance: cloudIsNewer && cloudData.advance ? cloudData.advance : advance,
                     salaryRuns: cloudIsNewer && cloudData.salaryRuns ? cloudData.salaryRuns : salaryRuns,
                     bankRecon: cloudIsNewer && cloudData.bankRecon ? cloudData.bankRecon : bankRecon,
+                    bankStatements: cloudIsNewer && cloudData.bankStatements ? cloudData.bankStatements : bankStatements,
                     dsrData: cloudIsNewer && cloudData.dsrData ? cloudData.dsrData : dsrData,
                     ttData: cloudIsNewer && cloudData.ttData ? cloudData.ttData : ttData,
                 };
@@ -871,11 +878,13 @@ function App() {
                 persistAdvance(mergedPayload.advance);
                 persistSalaryRuns(mergedPayload.salaryRuns);
                 persistBankRecon(mergedPayload.bankRecon);
+                persistBankStatements(mergedPayload.bankStatements);
                 persistDsrData(mergedPayload.dsrData);
                 persistTtData(mergedPayload.ttData);
                 await driveUpdate(token, file.id, mergedPayload);
                 window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, mergedPayload.savedAt);
-                showToast('Synced \u2014 merged with Google Drive (no dates were discarded from either side)');
+                if (!silent)
+                    showToast('Synced \u2014 merged with Google Drive (no dates were discarded from either side)');
             }
             else {
                 const payload = buildPayload();
@@ -961,7 +970,7 @@ function App() {
             driveSyncInFlightRef.current = false;
         }
         // eslint-disable-next-line
-    }, [driveConnected, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
+    }, [driveConnected, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements]);
     useEffect(() => {
         if (!ready)
             return; // still loading saved data \u2014 not a real edit yet
@@ -977,7 +986,7 @@ function App() {
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, new Date().toISOString());
         }
         catch (e) { }
-    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData]);
+    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements, dsrData, ttData]);
     useEffect(() => {
         if (!driveConnected)
             return;
@@ -990,13 +999,67 @@ function App() {
         pushTimerRef.current = setTimeout(() => { pushNow(); }, 3000);
         return () => clearTimeout(pushTimerRef.current);
         // eslint-disable-next-line
-    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData, driveConnected]);
+    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements, dsrData, ttData, driveConnected]);
     useEffect(() => {
         const onOnline = () => { if (driveConnected)
             pushNow(); };
         window.addEventListener('online', onOnline);
         return () => window.removeEventListener('online', onOnline);
     }, [driveConnected, pushNow]);
+    // A device left open for a long time previously only ever PUSHED its own state outward \u2014
+    // it never checked whether another device had made changes in the meantime, so it kept
+    // showing (and re-pushing) an increasingly stale snapshot. This periodically pulls and merges
+    // in whatever's actually on Drive, using the exact same safe merge logic as connecting fresh.
+    const pullAndMergeNow = useCallback(async () => {
+        if (!driveConnected || driveSyncInFlightRef.current)
+            return;
+        driveSyncInFlightRef.current = true;
+        try {
+            const token = await getCachedOrFreshToken();
+            await handleConnected(token, true);
+        }
+        catch (e) { }
+        finally {
+            driveSyncInFlightRef.current = false;
+        }
+        // eslint-disable-next-line
+    }, [driveConnected]);
+    useEffect(() => {
+        if (!driveConnected)
+            return;
+        const intervalId = setInterval(() => { pullAndMergeNow(); }, 3 * 60 * 1000);
+        return () => clearInterval(intervalId);
+    }, [driveConnected, pullAndMergeNow]);
+    // On every fresh page load, if this device has connected to Drive before, silently try to
+    // reconnect and pull+merge automatically \u2014 rather than only syncing once someone happens to
+    // click Connect (or notices stale data and goes looking for a reason why). A silent token
+    // request never shows a popup; if it fails (e.g. access was revoked), the normal "Connect"
+    // screen still appears as a fallback, so nothing about manual connecting changes.
+    useEffect(() => {
+        if (!ready || !driveReady || driveConnected)
+            return;
+        const wasConnectedBefore = window.localStorage.getItem(LS_DRIVE_FLAG) === '1';
+        if (!wasConnectedBefore)
+            return;
+        (async () => {
+            try {
+                const resp = await requestToken('none');
+                cachedTokenRef.current = { token: resp.access_token, expiresAt: Date.now() + ((Number(resp.expires_in) || 3300) * 1000) };
+                await handleConnected(resp.access_token, true);
+            }
+            catch (e) {
+                // Silent attempt failed (e.g. access revoked or expired) \u2014 the normal
+                // "Connect Google Drive" screen remains available as the fallback.
+            }
+        })();
+        // eslint-disable-next-line
+    }, [ready, driveReady, driveConnected]);
+    useEffect(() => {
+        const onVisible = () => { if (document.visibilityState === 'visible' && driveConnected)
+            pullAndMergeNow(); };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => document.removeEventListener('visibilitychange', onVisible);
+    }, [driveConnected, pullAndMergeNow]);
     if (!ready)
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "boot" }, React.createElement(IconFuel, { size: 28 }), React.createElement("span", null, "Loading station data\u2026")));
     if (!unlocked) {
@@ -1004,12 +1067,12 @@ function App() {
     }
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
-        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, dsrData, persistDsrData, ttData, persistTtData, workingDate, setWorkingDate, pushNow, showToast };
+        advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, bankStatements, persistBankStatements, dsrData, persistDsrData, ttData, persistTtData, workingDate, setWorkingDate, pushNow, showToast };
     const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline;
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
     }
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
 }
 function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt }) {
     const items = [
@@ -1022,6 +1085,7 @@ function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyn
         { id: 'tt', label: 'TT', Icon: IconWallet },
         { id: 'reports', label: 'Reports', Icon: IconPrint },
         { id: 'bank', label: 'Bank Reconciliation', Icon: IconBank },
+        { id: 'bankstatement', label: 'Bank Statement', Icon: IconBank },
         { id: 'master', label: 'Master Data', Icon: IconWallet },
         { id: 'settings', label: 'Settings', Icon: IconSettings },
     ];
@@ -3132,6 +3196,175 @@ function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
             out.push({ id: 'hppay_' + r.date, date: r.date, amount: round2(r.hpPay) }); });
     }
     return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+// Direct port of the VBA TryParseDate: handles "03 Sep 2026" / "03-Sep-26" style text,
+// or an already-normalized "YYYY-MM-DD" string (treated as already a date).
+function tryParseRawDate(v) {
+    const s = String(v).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s))
+        return s;
+    const s2 = s.replace(/-/g, ' ');
+    const parts = s2.split(/\s+/).filter(Boolean);
+    if (parts.length !== 3)
+        return null;
+    const [dStr, monStr, yStr] = parts;
+    if (!/^\d{1,2}$/.test(dStr))
+        return null;
+    if (!/^\d{2}$|^\d{4}$/.test(yStr))
+        return null;
+    if (monStr.length < 3 || !/^[A-Za-z]+$/.test(monStr))
+        return null;
+    const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const mi = monthNames.indexOf(monStr.slice(0, 3).toLowerCase());
+    if (mi === -1)
+        return null;
+    let y = parseInt(yStr, 10);
+    if (yStr.length === 2)
+        y = 2000 + y;
+    const d = parseInt(dStr, 10);
+    const m = mi + 1;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+function isDisputeLine(v) {
+    return String(v).trim().toLowerCase() === 'raise dispute';
+}
+// Direct port of VBA CleanAmount: strips \u20b9, non-breaking spaces, commas; "-" means no amount.
+// Returns { ok: true, value } or { ok: false, reason }.
+function cleanRawAmount(v) {
+    let t = String(v).trim();
+    if (t === '-')
+        return { ok: true, value: 0 };
+    t = t.replace(/\u20B9/g, '').replace(/\u00A0/g, '').replace(/,/g, '').trim();
+    const n = parseFloat(t);
+    if (isNaN(n) || !/^-?\d+(\.\d+)?$/.test(t))
+        return { ok: false, reason: `Couldn't read "${v}" as an amount.` };
+    return { ok: true, value: n };
+}
+// Direct port of the VBA's main parsing loop: repeating pattern of
+// Date, Description, [optional duplicate date], Debit, Credit, Balance, [optional "Raise Dispute"].
+// Bank site lists newest-first, so the parsed batch is reversed to old\u2192new before returning.
+function parseRawBankStatementLines(rawLines) {
+    const vals = rawLines.map((l) => l.trim()).filter((l) => l.length > 0);
+    const records = [];
+    const errors = [];
+    let i = 0;
+    while (i < vals.length) {
+        const dateNorm = tryParseRawDate(vals[i]);
+        if (!dateNorm) {
+            errors.push(`Unexpected value at position ${i + 1}: "${vals[i]}" (expected a date). Stopped parsing there; anything before this point was still processed.`);
+            break;
+        }
+        i++;
+        if (i >= vals.length)
+            break;
+        const desc = vals[i];
+        i++;
+        if (i < vals.length && tryParseRawDate(vals[i])) {
+            i++; // skip duplicate date line
+        }
+        if (i + 2 >= vals.length) {
+            errors.push(`Incomplete record near position ${i + 1}. Stopped parsing there.`);
+            break;
+        }
+        const debitRaw = vals[i]; i++;
+        const creditRaw = vals[i]; i++;
+        const balRaw = vals[i]; i++;
+        if (i < vals.length && isDisputeLine(vals[i])) {
+            i++; // skip "Raise Dispute"
+        }
+        const debitR = cleanRawAmount(debitRaw);
+        const creditR = cleanRawAmount(creditRaw);
+        const balR = cleanRawAmount(balRaw);
+        if (!debitR.ok || !creditR.ok || !balR.ok) {
+            errors.push((!debitR.ok && debitR.reason) || (!creditR.ok && creditR.reason) || (!balR.ok && balR.reason));
+            break; // matches VBA: a bad amount halts parsing entirely, doesn't silently skip
+        }
+        records.push({ date: dateNorm, desc, debit: debitR.value, credit: creditR.value, balance: balR.value });
+    }
+    records.reverse(); // bank lists newest-first; internal order should be old\u2192new
+    return { records, errors };
+}
+function BankStatementTab({ bankStatements, persistBankStatements, dayClosing, msLog, dieselLog, showToast }) {
+    const [bank, setBank] = useState('TMB');
+    const [pasteText, setPasteText] = useState('');
+    const [parseErrors, setParseErrors] = useState([]);
+    const entries = bankStatements[bank] || [];
+
+    const parseAndAppend = () => {
+        const lines = pasteText.split('\n');
+        const { records, errors } = parseRawBankStatementLines(lines);
+        const existingKeys = new Set(entries.map((e) => e.date + '|' + e.desc + '|' + e.balance));
+        const newEntries = [];
+        let duplicates = 0;
+        records.forEach((r) => {
+            const key = r.date + '|' + r.desc + '|' + r.balance;
+            if (existingKeys.has(key)) { duplicates += 1; return; }
+            existingKeys.add(key);
+            newEntries.push(Object.assign({ id: uid('bs') }, r));
+        });
+        const merged = [...entries, ...newEntries].sort((a, b) => a.date.localeCompare(b.date));
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: merged }));
+        setParseErrors(errors);
+        showToast(`Added ${newEntries.length} new transaction(s), ${duplicates} duplicate(s) skipped.` + (errors.length ? ' Parsing stopped early \u2014 see note below.' : ''));
+        if (newEntries.length > 0 || errors.length === 0)
+            setPasteText('');
+    };
+
+    const clearAll = () => {
+        if (entries.length === 0) return;
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: [] }));
+        showToast(`Cleared ${bank}'s stored statement.`);
+    };
+
+    const allBookEntries = React.useMemo(() => {
+        const out = [];
+        BANK_TXN_TYPES.filter((t) => t.key !== 'statement').forEach((t) => {
+            out.push(...bookEntriesFor(bank, t.key, dayClosing, msLog, dieselLog));
+        });
+        return out;
+    }, [bank, dayClosing, msLog, dieselLog]);
+
+    const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+    const isMatched = (entry) => {
+        const amt = entry.credit > 0 ? entry.credit : entry.debit;
+        if (!amt)
+            return null; // nothing to match against (both zero)
+        return allBookEntries.some((b) => Math.abs(b.amount - amt) <= 10 && daysBetween(b.date, entry.date) >= 0 && daysBetween(b.date, entry.date) <= 4);
+    };
+
+    const headerActions = React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => setBank(b) }, b)));
+
+    const tableRows = entries.map((e) => {
+        const matched = isMatched(e);
+        return React.createElement("tr", { key: e.id },
+            React.createElement("td", null, fmtDate(e.date)), React.createElement("td", null, e.desc),
+            React.createElement("td", { className: "mono" }, e.debit > 0 ? fmt(e.debit) : '\u2014'),
+            React.createElement("td", { className: "mono" }, e.credit > 0 ? fmt(e.credit) : '\u2014'),
+            React.createElement("td", { className: "mono" }, fmt(e.balance)),
+            React.createElement("td", null, matched === null ? React.createElement(Pill, { tone: "muted" }, "\u2014") : React.createElement(Pill, { tone: matched ? 'green' : 'red' }, matched ? 'Matched in books' : 'Not found in books')));
+    });
+
+    const table = entries.length > 0 ? React.createElement("table", { className: "data-table" },
+        React.createElement("thead", null, React.createElement("tr", null, ["Date", "Description", "Debit", "Credit", "Balance", "Status"].map((h) => React.createElement("th", { key: h }, h)))),
+        React.createElement("tbody", null, ...tableRows)) : React.createElement("div", { className: "empty-hint" }, `No ${bank} statement entries stored yet \u2014 paste some text below.`);
+
+    const unmatchedCount = entries.filter((e) => isMatched(e) === false).length;
+    const errorNote = parseErrors.length > 0 ? React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, parseErrors[0]) : null;
+
+    return React.createElement("div", { className: "page" },
+        React.createElement(PageHeader, { title: "Bank Statement", action: headerActions }),
+        React.createElement("div", { className: "card" },
+            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 paste raw statement text")),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Paste exactly as copied from the bank site \u2014 one value per line, repeating: Date, Description, (date again if shown), Debit, Credit, Balance, (Raise Dispute if shown). Pasted entries are added to what's already stored \u2014 duplicates (same date + description + balance) are skipped automatically."),
+            React.createElement("textarea", { className: "text-input", rows: 10, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste raw statement text here, one value per line" }),
+            errorNote,
+            React.createElement("div", { className: "slot-actions" },
+                React.createElement("button", { className: "btn btn-primary", onClick: parseAndAppend }, "Parse and append"),
+                React.createElement("button", { className: "btn btn-ghost", onClick: clearAll }, "Clear stored " + bank + " statement"))),
+        React.createElement("div", { className: "card" },
+            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Stored ${bank} statement (${entries.length} entries)`)),
+            unmatchedCount > 0 && React.createElement("div", { className: "empty-hint" }, `${unmatchedCount} entr${unmatchedCount === 1 ? 'y' : 'ies'} not found in your book records within the usual 0\u20134 day settlement window.`),
+            table));
 }
 function BankReconTab(props) {
     const [sub, setSub] = useState('reconcile');
