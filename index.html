@@ -301,6 +301,25 @@ const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILE_NAME = 'fuel_station_backup.json';
 const LS_DRIVE_FLAG = 'fuelapp_drive_was_connected';
 const LS_LAST_LOCAL_CHANGE = 'fuelapp_last_local_change';
+function latestDataDate(msLog, dieselLog) {
+    const dates = [...(msLog || []).map((r) => r.date), ...(dieselLog || []).map((r) => r.date)].filter(Boolean);
+    return dates.length > 0 ? dates.sort().pop() : null;
+}
+function perCategoryLatestDates(data) {
+    const msDates = (data.msLog || []).map((r) => r.date);
+    const dieselDates = (data.dieselLog || []).map((r) => r.date);
+    const dayClosingDates = Object.keys(data.dayClosing || {}).filter((d) => data.dayClosing[d] && data.dayClosing[d].submitted);
+    const advanceDates = (((data.advance || {}).log) || []).map((e) => e.date);
+    const salaryMonths = Object.keys(data.salaryRuns || {}).filter((m) => data.salaryRuns[m] && data.salaryRuns[m].submitted);
+    const pick = (arr) => arr.length > 0 ? arr.slice().sort().pop() : null;
+    return {
+        msDaily: pick(msDates),
+        dieselDaily: pick(dieselDates),
+        dayClosing: pick(dayClosingDates),
+        advance: pick(advanceDates) ? pick(advanceDates).slice(0, 10) : null,
+        salary: pick(salaryMonths),
+    };
+}
 async function driveFindFile(token) {
     const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
     const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)`, { headers: { Authorization: `Bearer ${token}` } });
@@ -742,23 +761,30 @@ function App() {
             setBankStatements(bs);
             setDsrData(dsr);
             setTtData(tt);
+            latestStateRef.current = { config: Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (c.bankSettings || {})) }), msReadings: mr, msDrafts: md, msLog: ml, dieselData: dd, dieselLog: dl, dayClosing: dc, advance: av, salaryRuns: sr, bankRecon: br, bankStatements: bs, dsrData: dsr, ttData: tt };
             setReady(true);
         })();
     }, []);
     const showToast = useCallback((msg, tone = 'ok') => { setToast({ msg, tone, key: Date.now() }); setTimeout(() => setToast(null), 2600); }, []);
-    const persistConfig = useCallback(async (next) => { setConfig(next); await storageSet(K.CONFIG, next); }, []);
-    const persistMsReadings = useCallback(async (next) => { setMsReadings(next); await storageSet(K.MS_READINGS, next); }, []);
-    const persistMsDrafts = useCallback(async (next) => { setMsDrafts(next); await storageSet(K.MS_DRAFTS, next); }, []);
-    const persistMsLog = useCallback(async (next) => { setMsLog(next); await storageSet(K.MS_LOG, next); }, []);
-    const persistDieselData = useCallback(async (next) => { setDieselData(next); await storageSet(K.DIESEL_DATA, next); }, []);
-    const persistDieselLog = useCallback(async (next) => { setDieselLog(next); await storageSet(K.DIESEL_LOG, next); }, []);
-    const persistDayClosing = useCallback(async (next) => { setDayClosing(next); await storageSet(K.DAY_CLOSING, next); }, []);
-    const persistAdvance = useCallback(async (next) => { setAdvance(next); await storageSet(K.ADVANCE, next); }, []);
-    const persistSalaryRuns = useCallback(async (next) => { setSalaryRuns(next); await storageSet(K.SALARY_RUNS, next); }, []);
-    const persistBankRecon = useCallback(async (next) => { setBankRecon(next); await storageSet(K.BANK_RECON, next); }, []);
-    const persistBankStatements = useCallback(async (next) => { setBankStatements(next); await storageSet(K.BANK_STATEMENTS, next); }, []);
-    const persistDsrData = useCallback(async (next) => { setDsrData(next); await storageSet(K.DSR_DATA, next); }, []);
-    const persistTtData = useCallback(async (next) => { setTtData(next); await storageSet(K.TT_DATA, next); }, []);
+    // React state updates aren't applied until the next render \u2014 so a persistX() call followed
+    // immediately (synchronously) by pushNow() would otherwise push the OLD value, since pushNow's
+    // own closure hasn't been recreated with the new state yet. This ref is updated synchronously
+    // by every persistX call below, so buildPayload() always sees the true latest value regardless
+    // of timing, closing that gap for every "save then push immediately" action in the app.
+    const latestStateRef = useRef({});
+    const persistConfig = useCallback(async (next) => { setConfig(next); latestStateRef.current.config = next; await storageSet(K.CONFIG, next); }, []);
+    const persistMsReadings = useCallback(async (next) => { setMsReadings(next); latestStateRef.current.msReadings = next; await storageSet(K.MS_READINGS, next); }, []);
+    const persistMsDrafts = useCallback(async (next) => { setMsDrafts(next); latestStateRef.current.msDrafts = next; await storageSet(K.MS_DRAFTS, next); }, []);
+    const persistMsLog = useCallback(async (next) => { setMsLog(next); latestStateRef.current.msLog = next; await storageSet(K.MS_LOG, next); }, []);
+    const persistDieselData = useCallback(async (next) => { setDieselData(next); latestStateRef.current.dieselData = next; await storageSet(K.DIESEL_DATA, next); }, []);
+    const persistDieselLog = useCallback(async (next) => { setDieselLog(next); latestStateRef.current.dieselLog = next; await storageSet(K.DIESEL_LOG, next); }, []);
+    const persistDayClosing = useCallback(async (next) => { setDayClosing(next); latestStateRef.current.dayClosing = next; await storageSet(K.DAY_CLOSING, next); }, []);
+    const persistAdvance = useCallback(async (next) => { setAdvance(next); latestStateRef.current.advance = next; await storageSet(K.ADVANCE, next); }, []);
+    const persistSalaryRuns = useCallback(async (next) => { setSalaryRuns(next); latestStateRef.current.salaryRuns = next; await storageSet(K.SALARY_RUNS, next); }, []);
+    const persistBankRecon = useCallback(async (next) => { setBankRecon(next); latestStateRef.current.bankRecon = next; await storageSet(K.BANK_RECON, next); }, []);
+    const persistBankStatements = useCallback(async (next) => { setBankStatements(next); latestStateRef.current.bankStatements = next; await storageSet(K.BANK_STATEMENTS, next); }, []);
+    const persistDsrData = useCallback(async (next) => { setDsrData(next); latestStateRef.current.dsrData = next; await storageSet(K.DSR_DATA, next); }, []);
+    const persistTtData = useCallback(async (next) => { setTtData(next); latestStateRef.current.ttData = next; await storageSet(K.TT_DATA, next); }, []);
     /* ---------- Google Drive sync (backs up everything as one payload) ---------- */
     useEffect(() => {
         if (!configuredClientId)
@@ -802,7 +828,8 @@ function App() {
         return resp.access_token;
     }
     function buildPayload() {
-        return { version: 2, savedAt: new Date().toISOString(), config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements, dsrData, ttData };
+        const s = latestStateRef.current;
+        return { version: 2, savedAt: new Date().toISOString(), config: s.config, msReadings: s.msReadings, msDrafts: s.msDrafts, msLog: s.msLog, dieselData: s.dieselData, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns, bankRecon: s.bankRecon, bankStatements: s.bankStatements, dsrData: s.dsrData, ttData: s.ttData };
     }
     function applyCloudData(data, push = true) {
         suppressPushRef.current = !push;
@@ -843,29 +870,30 @@ function App() {
                 driveFileIdRef.current = file.id;
                 const cloudData = await driveDownload(token, file.id);
                 const lastLocalChange = window.localStorage.getItem(LS_LAST_LOCAL_CHANGE);
+                const s = latestStateRef.current;
                 const cloudIsNewer = cloudData.savedAt && (!lastLocalChange || cloudData.savedAt > lastLocalChange);
                 // Merge the daily transaction records (never discard a date that only exists on one side) \u2014
                 // this is what protects against exactly the scenario where two devices go out of sync.
-                const mergedMsLog = mergeArraysById(msLog, cloudData.msLog);
-                const mergedDieselLog = mergeArraysById(dieselLog, cloudData.dieselLog);
-                const mergedDieselData = mergeByDateKey(dieselData, cloudData.dieselData, cloudIsNewer);
-                const mergedDayClosing = mergeByDateKey(dayClosing, cloudData.dayClosing, cloudIsNewer);
-                const mergedMsReadings = mergeByDateKey(msReadings, cloudData.msReadings, cloudIsNewer);
-                const mergedMsDrafts = mergeByDateKey(msDrafts, cloudData.msDrafts, cloudIsNewer);
+                const mergedMsLog = mergeArraysById(s.msLog, cloudData.msLog);
+                const mergedDieselLog = mergeArraysById(s.dieselLog, cloudData.dieselLog);
+                const mergedDieselData = mergeByDateKey(s.dieselData, cloudData.dieselData, cloudIsNewer);
+                const mergedDayClosing = mergeByDateKey(s.dayClosing, cloudData.dayClosing, cloudIsNewer);
+                const mergedMsReadings = mergeByDateKey(s.msReadings, cloudData.msReadings, cloudIsNewer);
+                const mergedMsDrafts = mergeByDateKey(s.msDrafts, cloudData.msDrafts, cloudIsNewer);
                 // Config/Advance/Salary/Bank/DSR/TT aren't simple date-unions, so these still use whichever
                 // side changed more recently as a whole \u2014 a smaller, lower-risk gap than daily records,
                 // but worth knowing: a genuine simultaneous edit to these on two devices could still conflict.
                 const mergedPayload = {
                     version: 2, savedAt: new Date().toISOString(),
-                    config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (cloudData.config.bankSettings || {})) }) : config,
+                    config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: Object.assign(Object.assign({}, defaultBankSettings()), (cloudData.config.bankSettings || {})) }) : s.config,
                     msReadings: mergedMsReadings, msDrafts: mergedMsDrafts, msLog: mergedMsLog,
                     dieselData: mergedDieselData, dieselLog: mergedDieselLog, dayClosing: mergedDayClosing,
-                    advance: cloudIsNewer && cloudData.advance ? cloudData.advance : advance,
-                    salaryRuns: cloudIsNewer && cloudData.salaryRuns ? cloudData.salaryRuns : salaryRuns,
-                    bankRecon: cloudIsNewer && cloudData.bankRecon ? cloudData.bankRecon : bankRecon,
-                    bankStatements: cloudIsNewer && cloudData.bankStatements ? cloudData.bankStatements : bankStatements,
-                    dsrData: cloudIsNewer && cloudData.dsrData ? cloudData.dsrData : dsrData,
-                    ttData: cloudIsNewer && cloudData.ttData ? cloudData.ttData : ttData,
+                    advance: cloudIsNewer && cloudData.advance ? cloudData.advance : s.advance,
+                    salaryRuns: cloudIsNewer && cloudData.salaryRuns ? cloudData.salaryRuns : s.salaryRuns,
+                    bankRecon: cloudIsNewer && cloudData.bankRecon ? cloudData.bankRecon : s.bankRecon,
+                    bankStatements: cloudIsNewer && cloudData.bankStatements ? cloudData.bankStatements : s.bankStatements,
+                    dsrData: cloudIsNewer && cloudData.dsrData ? cloudData.dsrData : s.dsrData,
+                    ttData: cloudIsNewer && cloudData.ttData ? cloudData.ttData : s.ttData,
                 };
                 suppressPushRef.current = true;
                 persistConfig(mergedPayload.config);
@@ -1024,6 +1052,51 @@ function App() {
         }
         // eslint-disable-next-line
     }, [driveConnected]);
+    // Manual "check for updates" \u2014 separate from the automatic background sync above, this is
+    // purely for on-demand peace of mind. Checking never pulls anything by itself; it just compares
+    // dates and shows the result. Pulling only happens if the person explicitly clicks "Update now"
+    // inside the dialog this opens.
+    const [checkDialog, setCheckDialog] = useState(null);
+    const checkForUpdates = useCallback(async () => {
+        if (!driveConnected) {
+            showToast('Connect Google Drive first.', 'red');
+            return;
+        }
+        setCheckDialog({ status: 'checking' });
+        try {
+            const token = await getCachedOrFreshToken();
+            const file = await driveFindFile(token);
+            if (!file) {
+                setCheckDialog({ status: 'error', message: 'No backup found on Drive yet.' });
+                return;
+            }
+            const cloudData = await driveDownload(token, file.id);
+            const s = latestStateRef.current;
+            const localDate = latestDataDate(s.msLog, s.dieselLog);
+            const cloudDate = latestDataDate(cloudData.msLog, cloudData.dieselLog);
+            const cloudIsNewerCheck = cloudDate && (!localDate || cloudDate > localDate);
+            setCheckDialog({ status: 'done', localDate, cloudDate, cloudIsNewer: cloudIsNewerCheck,
+                localDetail: perCategoryLatestDates({ msLog: s.msLog, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns }),
+                cloudDetail: perCategoryLatestDates(cloudData) });
+        }
+        catch (e) {
+            setCheckDialog({ status: 'error', message: 'Could not reach Google Drive right now.' });
+        }
+        // eslint-disable-next-line
+    }, [driveConnected, msLog, dieselLog, dayClosing, advance, salaryRuns]);
+    const updateFromCheckDialog = useCallback(async () => {
+        setCheckDialog((d) => Object.assign(Object.assign({}, d), { status: 'updating' }));
+        try {
+            const token = await getCachedOrFreshToken();
+            await handleConnected(token, true);
+            showToast('Updated with the latest data from Drive.');
+        }
+        catch (e) {
+            showToast('Could not update right now.', 'red');
+        }
+        setCheckDialog(null);
+        // eslint-disable-next-line
+    }, []);
     useEffect(() => {
         if (!driveConnected)
             return;
@@ -1072,9 +1145,37 @@ function App() {
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
     }
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg));
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt, checkForUpdates }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }));
 }
-function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt }) {
+function CheckUpdatesDialog({ state, onUpdate, onClose }) {
+    if (!state)
+        return null;
+    let body;
+    if (state.status === 'checking') {
+        body = React.createElement("p", null, "Checking Google Drive\u2026");
+    }
+    else if (state.status === 'updating') {
+        body = React.createElement("p", null, "Updating\u2026");
+    }
+    else if (state.status === 'error') {
+        body = React.createElement("p", null, state.message);
+    }
+    else if (state.status === 'done' && !state.cloudIsNewer) {
+        body = React.createElement("p", null, `You're up to date. Data entered up to ${state.localDate ? fmtDate(state.localDate) : '\u2014'}.`);
+    }
+    else if (state.status === 'done' && state.cloudIsNewer) {
+        body = React.createElement(React.Fragment, null,
+            React.createElement("p", null, `This device: data up to ${state.localDate ? fmtDate(state.localDate) : '\u2014'}.`),
+            React.createElement("p", null, `Cloud: data up to ${fmtDate(state.cloudDate)}.`),
+            React.createElement("button", { className: "btn btn-primary", onClick: onUpdate }, "Update now"));
+    }
+    const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 420, background: 'var(--surface)', color: 'var(--text)' } },
+        React.createElement("h3", { style: { color: 'var(--text)' } }, "Check for updates"),
+        body,
+        React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: onClose }, "Close")));
+    return ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, modalBox), document.body);
+}
+function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt, checkForUpdates }) {
     const items = [
         { id: 'dashboard', label: 'Dashboard', Icon: IconDash },
         { id: 'ms', label: 'MS Daily', Icon: IconClip },
@@ -1091,7 +1192,7 @@ function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyn
     ];
     const syncLabel = !driveConnected ? 'Local only' : syncStatus === 'syncing' ? 'Syncing\u2026' : syncStatus === 'error' ? 'Sync error' : syncStatus === 'offline' ? 'Offline \u2014 will retry' : lastSyncedAt ? `Synced ${lastSyncedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : 'Connected';
     const syncTone = !driveConnected ? 'muted' : syncStatus === 'synced' ? 'green' : syncStatus === 'syncing' ? 'amber' : 'red';
-    return React.createElement("nav", { className: "sidebar no-print" }, React.createElement("div", { className: "brand" }, React.createElement("div", { className: "brand-mark" }, React.createElement(IconFuel, { size: 20 })), React.createElement("div", { className: "brand-text" }, React.createElement("div", { className: "brand-name" }, stationName), React.createElement("div", { className: "brand-sub" }, "Station Management"))), React.createElement("div", { className: "nav-items" }, items.map((it) => React.createElement("button", { key: it.id, className: `nav-item ${tab === it.id ? 'active' : ''}`, onClick: () => setTab(it.id) }, React.createElement(it.Icon, { size: 17 }), React.createElement("span", null, it.label)))), React.createElement("div", { className: "sync-indicator", onClick: () => setTab('settings') }, React.createElement("span", { className: `sync-dot sync-dot-${syncTone}` }), syncLabel), React.createElement("div", { className: "sidebar-foot" }, "Runs fully offline in this browser.", React.createElement("br"), "Your data stays under your control."));
+    return React.createElement("nav", { className: "sidebar no-print" }, React.createElement("div", { className: "brand" }, React.createElement("div", { className: "brand-mark" }, React.createElement(IconFuel, { size: 20 })), React.createElement("div", { className: "brand-text" }, React.createElement("div", { className: "brand-name" }, stationName), React.createElement("div", { className: "brand-sub" }, "Station Management"))), React.createElement("div", { className: "nav-items" }, items.map((it) => React.createElement("button", { key: it.id, className: `nav-item ${tab === it.id ? 'active' : ''}`, onClick: () => setTab(it.id) }, React.createElement(it.Icon, { size: 17 }), React.createElement("span", null, it.label)))), React.createElement("div", { className: "sync-indicator", onClick: checkForUpdates, title: "Check for updates" }, React.createElement("span", { className: `sync-dot sync-dot-${syncTone}` }), syncLabel), React.createElement("div", { className: "sidebar-foot" }, "Runs fully offline in this browser.", React.createElement("br"), "Your data stays under your control."));
 }
 function Dashboard({ config, msLog, dieselLog, dieselData, dayClosing, advance, showToast, setTab }) {
     const [viewDate, setViewDate] = useState(yesterdayStr());
@@ -1822,12 +1923,27 @@ function DieselDenomBlock({ denom, onSave }) {
     useEffect(() => { setTmp(denom || Object.assign({}, emptyDenom)); }, [open]);
     return React.createElement(React.Fragment, null, React.createElement("button", { className: "btn btn-secondary", onClick: () => setOpen(true) }, denomEntered(denom) ? 'Edit diesel denomination' : 'Enter diesel denomination'), open && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, "Diesel denomination"), React.createElement("div", { className: "denom-grid" }, DENOM_ROWS.map(([key, lbl]) => React.createElement(Field, { key, label: lbl }, React.createElement(NumInput, { value: tmp[key], onChange: (v) => setTmp(Object.assign(Object.assign({}, tmp), { [key]: v })) })))), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setOpen(false) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: () => { onSave(tmp); setOpen(false); } }, "Save")))));
 }
-function CloudBackupPanel({ configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow }) {
+function CloudBackupPanel({ configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }) {
     if (!configuredClientId)
         return React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cloud Backup (Google Drive)")), React.createElement("div", { className: "empty-hint" }, "Not set up yet \u2014 paste your Google OAuth Client ID into GOOGLE_CLIENT_ID near the top of the script."));
+    const localBreakdown = perCategoryLatestDates({ msLog, dieselLog, dayClosing, advance, salaryRuns });
+    const cloudBreakdown = checkDialog && checkDialog.status === 'done' ? checkDialog.cloudDetail : null;
+    const catLabels = { msDaily: 'MS Daily', dieselDaily: 'Diesel Daily', dayClosing: 'Day Closing (submitted)', advance: 'Advance (last entry)', salary: 'Salary (last submitted month)' };
+    const detailRows = Object.keys(catLabels).map((key) => React.createElement("tr", { key },
+        React.createElement("td", null, catLabels[key]),
+        React.createElement("td", { className: "mono" }, localBreakdown[key] ? fmtDate(localBreakdown[key]) : '\u2014'),
+        React.createElement("td", { className: "mono" }, cloudBreakdown ? (cloudBreakdown[key] ? fmtDate(cloudBreakdown[key]) : '\u2014') : '\u2014')));
+    const syncDetailsSection = driveConnected ? React.createElement("div", { style: { marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' } },
+        React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
+            React.createElement("div", { style: { fontWeight: 500 } }, "Sync details"),
+            React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: checkForUpdates }, "Check for updates")),
+        React.createElement("table", { className: "data-table" },
+            React.createElement("thead", null, React.createElement("tr", null, ["Category", "This device", "Cloud"].map((h) => React.createElement("th", { key: h }, h)))),
+            React.createElement("tbody", null, ...detailRows)),
+        !cloudBreakdown && React.createElement("div", { className: "empty-hint" }, "Click \"Check for updates\" to compare against what's on Drive.")) : null;
     return React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cloud Backup (Google Drive)"), driveConnected && React.createElement(Pill, { tone: syncStatus === 'synced' ? 'green' : syncStatus === 'syncing' ? 'amber' : 'red' }, syncStatus === 'synced' ? 'Synced' : syncStatus === 'syncing' ? 'Syncing\u2026' : syncStatus === 'offline' ? 'Offline' : 'Error')), !driveConnected
         ? React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, "Connect Google Drive to back up automatically and sync across devices."), React.createElement("button", { className: "btn btn-primary", disabled: !driveReady, onClick: connectDrive }, "Connect Google Drive"))
-        : React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, lastSyncedAt ? `Last backed up ${lastSyncedAt.toLocaleString('en-IN')}.` : 'Not backed up yet.'), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-secondary", onClick: pushNow }, React.createElement(IconSave, { size: 14 }), " Backup Now"), React.createElement("button", { className: "btn btn-ghost", onClick: disconnectDrive }, "Disconnect"))));
+        : React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, lastSyncedAt ? `Last backed up ${lastSyncedAt.toLocaleString('en-IN')}.` : 'Not backed up yet.'), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-secondary", onClick: pushNow }, React.createElement(IconSave, { size: 14 }), " Backup Now"), React.createElement("button", { className: "btn btn-ghost", onClick: disconnectDrive }, "Disconnect"))), syncDetailsSection);
 }
 function MasterDataGate(props) {
     const [unlocked, setUnlocked] = useState(false);
@@ -3594,7 +3710,7 @@ function SettingsGate(props) {
         return React.createElement("div", { className: "page" }, React.createElement("div", { style: { margin: 'auto', maxWidth: 380 } }, React.createElement(PasswordGate, { onUnlock: () => setUnlocked(true) })));
     return React.createElement(SettingsTab, props);
 }
-function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts, persistMsLog, persistDieselData, persistDieselLog, persistDayClosing, persistAdvance, persistSalaryRuns, persistBankRecon, showToast, configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, exportData, importData, theme, setTheme }) {
+function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts, persistMsLog, persistDieselData, persistDieselLog, persistDayClosing, persistAdvance, persistSalaryRuns, persistBankRecon, showToast, configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns, exportData, importData, theme, setTheme }) {
     const [confirmingReset, setConfirmingReset] = useState(false);
     const [confirmText, setConfirmText] = useState('');
     const fileInputRef = useRef(null);
@@ -3613,7 +3729,7 @@ function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts
         setConfirmText('');
         showToast('Everything has been wiped \u2014 starting from a clean slate.');
     };
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
         onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { allowPreDatedChanges: e.target.checked })) }), " Allow pre-dated changes")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Move data to a new device or hosted copy")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Since your data lives only in this browser, moving to a new hosted copy (like GitHub Pages) or a different device won't bring it along automatically. Export a backup here, then Import it on the new copy \u2014 do this once, and Google Drive will keep them in sync from then on."), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-primary", onClick: exportData }, React.createElement(IconDownload, { size: 15 }), " Export backup (.json)"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { var _a; return (_a = fileInputRef.current) === null || _a === void 0 ? void 0 : _a.click(); } }, "Import backup (.json)"), React.createElement("input", { ref: fileInputRef, type: "file", accept: "application/json", style: { display: 'none' },
         onChange: (e) => { var _a; const f = (_a = e.target.files) === null || _a === void 0 ? void 0 : _a[0]; if (f)
             importData(f); e.target.value = ''; } }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Master reset")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This permanently wipes every MS Daily, Diesel Daily, Day Closing, Salary, Advance, and Bank Reconciliation entry you've saved, and resets Master Data (employees, pumps, products, lubes, opening readings, bank parsing settings) back to the built-in defaults. There is no undo \u2014 make sure any data you care about is backed up (Google Drive, or otherwise) before doing this."), !confirmingReset && React.createElement("button", { className: "btn btn-danger", onClick: () => setConfirmingReset(true) }, "Wipe all data and master data"), confirmingReset && React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "confirm-bar" }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "Type RESET below to confirm \u2014 this cannot be undone.")), React.createElement("input", { className: "text-input", style: { maxWidth: 200 }, value: confirmText, onChange: (e) => setConfirmText(e.target.value), placeholder: "Type RESET" }), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-danger", disabled: confirmText !== 'RESET', onClick: doMasterReset }, "Confirm wipe"), React.createElement("button", { className: "btn btn-ghost", onClick: () => { setConfirmingReset(false); setConfirmText(''); } }, "Cancel")))));
