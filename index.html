@@ -3457,22 +3457,52 @@ function parseLegacyTabularLines(rawLines) {
     });
     return { records, errors };
 }
-function BankStatementTab({ bankStatements, persistBankStatements }) {
+function BankStatementTab({ bankStatements, persistBankStatements, showToast }) {
     const [bank, setBank] = useState('TMB');
     const entries = bankStatements[bank] || [];
+    const showPartyFields = bank === 'TMB';
 
-    // No book-matching here at all \u2014 this tab is purely a fast, permanent record of what's been
-    // parsed/uploaded. Reconciling against your books happens on the Reconciliation page itself,
-    // which only needs to look at unreconciled dates, not compare the whole stored history every time.
+    const [filters, setFilters] = useState({ dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
     const availableMonths = React.useMemo(() => {
-        const months = new Set(entries.map((e) => monthKeyOf(e.date)));
+        const months = new Set(entries.map((e) => e.date.slice(0, 7)));
         return [...months].sort().reverse();
     }, [entries]);
-    const [month, setMonth] = useState(availableMonths[0] || monthKeyOf(todayStr()));
     useEffect(() => {
-        if (availableMonths.length > 0 && !availableMonths.includes(month))
-            setMonth(availableMonths[0]);
-    }, [bank, availableMonths]);
+        if (entries.length > 0) {
+            const latest = entries[entries.length - 1].date; // entries are kept sorted ascending by date
+            setFilters((f) => Object.assign(Object.assign({}, f), { dateFrom: latest.slice(0, 8) + '01', dateTo: '' }));
+        }
+        // eslint-disable-next-line
+    }, [bank]);
+    const jumpToMonth = (ym) => {
+        if (!ym) return;
+        const [y, m] = ym.split('-').map(Number);
+        const lastDay = new Date(y, m, 0).getDate();
+        updFilter2({ dateFrom: ym + '-01', dateTo: ym + '-' + String(lastDay).padStart(2, '0') });
+    };
+    const updFilter = (field, value) => setFilters((f) => Object.assign(Object.assign({}, f), { [field]: value }));
+    const updFilter2 = (patch) => setFilters((f) => Object.assign(Object.assign({}, f), patch));
+    const clearFilters = () => setFilters({ dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
+
+    const entryMatchesFilters = (e, f) => {
+        if (f.dateFrom && e.date < f.dateFrom)
+            return false;
+        if (f.dateTo && e.date > f.dateTo)
+            return false;
+        if (f.desc && !e.desc.toLowerCase().includes(f.desc.toLowerCase()))
+            return false;
+        if (f.debitMin && e.debit < Number(f.debitMin))
+            return false;
+        if (f.creditMin && e.credit < Number(f.creditMin))
+            return false;
+        if (f.party && !(e.party || '').toLowerCase().includes(f.party.toLowerCase()))
+            return false;
+        if (f.paymentMonth && e.paymentMonth !== f.paymentMonth)
+            return false;
+        return true;
+    };
+
+    const filteredEntries = React.useMemo(() => entries.filter((e) => entryMatchesFilters(e, filters)), [entries, filters]);
 
     const updateEntry = (id, patch) => {
         const next = entries.map((e) => e.id === id ? Object.assign(Object.assign({}, e), patch) : e);
@@ -3491,16 +3521,53 @@ function BankStatementTab({ bankStatements, persistBankStatements }) {
         return opts;
     }, []);
 
-    const monthEntries = React.useMemo(() => entries.filter((e) => monthKeyOf(e.date) === month), [entries, month]);
+    // "Update" can't actually reach your separate Petrosoft software from here \u2014 this app has no
+    // way to connect to it directly. Instead it marks every checked row as processed and downloads
+    // a CSV of exactly those rows, so you have something ready to feed into your existing uploader.
+    const runUpdate = () => {
+        const checked = filteredEntries.filter((e) => e.enteredInCreditSoftware);
+        if (checked.length === 0) {
+            showToast('No rows are checked.', 'red');
+            return;
+        }
+        const headers = ['Date', 'Description', 'Debit', 'Credit', 'Balance', 'Party', 'Month'];
+        const csvLines = [headers.join(',')];
+        checked.forEach((e) => {
+            csvLines.push([fmtDate(e.date), e.desc, e.debit, e.credit, e.balance, e.party || '', e.paymentMonth || ''].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+        });
+        const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${bank}_credit_entries_${todayStr()}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showToast(`${checked.length} entr${checked.length === 1 ? 'y' : 'ies'} marked and downloaded.`);
+    };
 
-    const headerActions = React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => setBank(b) }, b)));
-    const monthPicker = availableMonths.length > 0 ? React.createElement("select", { className: "select-input", value: month, onChange: (e) => setMonth(e.target.value) }, availableMonths.map((m) => React.createElement("option", { key: m, value: m }, monthLabel(m)))) : null;
+    const headerActions = React.createElement("div", { style: { display: 'flex', gap: 10, alignItems: 'center' } },
+        React.createElement("select", { className: "select-input", value: "", onChange: (e) => jumpToMonth(e.target.value) }, React.createElement("option", { value: "" }, "Jump to month\u2026"), availableMonths.map((m) => React.createElement("option", { key: m, value: m }, monthLabel(m)))),
+        React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => setBank(b) }, b))),
+        showPartyFields && React.createElement("button", { className: "btn btn-primary", onClick: runUpdate }, "Update"));
 
-    const showPartyFields = bank === 'TMB';
     const datalistId = 'bs-party-suggestions';
     const partyDatalist = showPartyFields ? React.createElement("datalist", { id: datalistId }, knownParties.map((p) => React.createElement("option", { key: p, value: p }))) : null;
 
-    const tableRows = monthEntries.map((e) => {
+    const filterRow = React.createElement("tr", null,
+        React.createElement("td", null, React.createElement("div", { style: { display: 'flex', gap: 4 } }, React.createElement(CalendarDatePicker, { value: filters.dateFrom, onChange: (v) => updFilter('dateFrom', v) }), React.createElement(CalendarDatePicker, { value: filters.dateTo, onChange: (v) => updFilter('dateTo', v) }))),
+        React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.desc, onChange: (e) => updFilter('desc', e.target.value), placeholder: "Search description" })),
+        React.createElement("td", null, React.createElement(NumInput, { value: filters.debitMin, onChange: (v) => updFilter('debitMin', v), placeholder: "Debit \u2265" })),
+        React.createElement("td", null, React.createElement(NumInput, { value: filters.creditMin, onChange: (v) => updFilter('creditMin', v), placeholder: "Credit \u2265" })),
+        React.createElement("td", null),
+        showPartyFields ? React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: filters.party, onChange: (e) => updFilter('party', e.target.value), placeholder: "Search party" })) : null,
+        showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
+        showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null);
+
+    const tableRows = filteredEntries.map((e) => {
+        const hasParty = !!(e.party && e.party.trim());
+        const rowStyle = e.enteredInCreditSoftware ? { background: 'var(--amber-dim)' } : hasParty ? { background: 'var(--green-bg)' } : {};
         const cells = [
             React.createElement("td", null, fmtDate(e.date)), React.createElement("td", null, e.desc),
             React.createElement("td", { className: "mono" }, e.debit > 0 ? fmt(e.debit) : '\u2014'),
@@ -3512,24 +3579,26 @@ function BankStatementTab({ bankStatements, persistBankStatements }) {
             cells.push(React.createElement("td", null, React.createElement("select", { className: "select-input", value: e.paymentMonth || '', onChange: (ev) => updateEntry(e.id, { paymentMonth: ev.target.value }) }, React.createElement("option", { value: "" }, "\u2014"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))));
             cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
         }
-        return React.createElement("tr", { key: e.id, style: e.enteredInCreditSoftware ? { background: 'var(--green-bg)' } : {} }, ...cells);
+        return React.createElement("tr", { key: e.id, style: rowStyle }, ...cells);
     });
 
     const headerCells = ["Date", "Description", "Debit", "Credit", "Balance"];
     if (showPartyFields)
         headerCells.push("Party", "Month", "In credit software");
 
-    const table = monthEntries.length > 0 ? React.createElement("table", { className: "data-table" },
-        React.createElement("thead", null, React.createElement("tr", null, headerCells.map((h) => React.createElement("th", { key: h }, h)))),
-        React.createElement("tbody", null, ...tableRows)) : React.createElement("div", { className: "empty-hint" }, entries.length === 0 ? `No ${bank} statement entries stored yet \u2014 go to Data Parsing to add some.` : `No entries for this month.`);
+    const table = React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
+        React.createElement("thead", null, React.createElement("tr", null, headerCells.map((h) => React.createElement("th", { key: h }, h))), filterRow),
+        React.createElement("tbody", null, ...tableRows)));
+
+    const emptyMsg = filteredEntries.length === 0 ? React.createElement("div", { className: "empty-hint" }, entries.length === 0 ? `No ${bank} statement entries stored yet \u2014 go to Data Parsing to add some.` : `No entries match the current filters.`) : null;
 
     return React.createElement("div", { className: "page" },
         React.createElement(PageHeader, { title: "Bank Statement", action: headerActions }),
         partyDatalist,
         React.createElement("div", { className: "card" },
-            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Stored ${bank} statement \u2014 ${entries.length} entries total`), monthPicker),
-            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Showing ${monthLabel(month)} (${monthEntries.length} entries) \u2014 this is a permanent record; entries are added from the Data Parsing tab and there's no way to clear them from this screen. Use the Reconciliation page to check these against your books.`),
-            table));
+            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Stored ${bank} statement \u2014 ${entries.length} entries total, ${filteredEntries.length} shown`)),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a permanent record \u2014 entries are added from the Data Parsing tab; there's no way to clear them from this screen. Use the Reconciliation page to check these against your books."),
+            emptyMsg, table));
 }
 function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
     const [bank, setBank] = useState('TMB');
