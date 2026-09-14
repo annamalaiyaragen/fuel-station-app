@@ -299,6 +299,7 @@ function mergeByDateKey(localObj, cloudObj, preferCloudOnTie) {
 const GOOGLE_CLIENT_ID = '510184910102-9gd9iudnjq2260okdc301qilm9p71qv1.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILE_NAME = 'fuel_station_backup.json';
+const DRIVE_BANK_STATEMENTS_FILE_NAME = 'fuel_station_bank_statements.json';
 const LS_DRIVE_FLAG = 'fuelapp_drive_was_connected';
 const LS_LAST_LOCAL_CHANGE = 'fuelapp_last_local_change';
 function latestDataDate(msLog, dieselLog) {
@@ -320,8 +321,8 @@ function perCategoryLatestDates(data) {
         salary: pick(salaryMonths),
     };
 }
-async function driveFindFile(token) {
-    const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
+async function driveFindFile(token, fileName) {
+    const q = encodeURIComponent(`name='${fileName || DRIVE_FILE_NAME}' and trashed=false`);
     const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)`, { headers: { Authorization: `Bearer ${token}` } });
     if (!res.ok)
         throw new Error('drive_find_failed_' + res.status);
@@ -334,9 +335,9 @@ async function driveDownload(token, fileId) {
         throw new Error('drive_download_failed_' + res.status);
     return res.json();
 }
-async function driveCreate(token, content) {
+async function driveCreate(token, content, fileName) {
     const boundary = 'fuelstation314159265';
-    const metadata = { name: DRIVE_FILE_NAME, mimeType: 'application/json' };
+    const metadata = { name: fileName || DRIVE_FILE_NAME, mimeType: 'application/json' };
     const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(content)}\r\n--${boundary}--`;
     const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
     if (!res.ok)
@@ -752,6 +753,7 @@ function App() {
     const tokenClientRef = useRef(null);
     const cachedTokenRef = useRef({ token: null, expiresAt: 0 });
     const driveFileIdRef = useRef(null);
+    const bankStatementsDriveFileIdRef = useRef(null);
     const suppressPushRef = useRef(false);
     const pushTimerRef = useRef(null);
     const driveSyncInFlightRef = useRef(false);
@@ -846,7 +848,7 @@ function App() {
     }
     function buildPayload() {
         const s = latestStateRef.current;
-        return { version: 2, savedAt: new Date().toISOString(), config: s.config, msReadings: s.msReadings, msDrafts: s.msDrafts, msLog: s.msLog, dieselData: s.dieselData, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns, bankRecon: s.bankRecon, bankStatements: s.bankStatements, dsrData: s.dsrData, ttData: s.ttData };
+        return { version: 2, savedAt: new Date().toISOString(), config: s.config, msReadings: s.msReadings, msDrafts: s.msDrafts, msLog: s.msLog, dieselData: s.dieselData, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns, bankRecon: s.bankRecon, dsrData: s.dsrData, ttData: s.ttData };
     }
     function applyCloudData(data, push = true) {
         suppressPushRef.current = !push;
@@ -908,7 +910,6 @@ function App() {
                     advance: cloudIsNewer && cloudData.advance ? cloudData.advance : s.advance,
                     salaryRuns: cloudIsNewer && cloudData.salaryRuns ? cloudData.salaryRuns : s.salaryRuns,
                     bankRecon: cloudIsNewer && cloudData.bankRecon ? cloudData.bankRecon : s.bankRecon,
-                    bankStatements: cloudIsNewer && cloudData.bankStatements ? cloudData.bankStatements : s.bankStatements,
                     dsrData: cloudIsNewer && cloudData.dsrData ? cloudData.dsrData : s.dsrData,
                     ttData: cloudIsNewer && cloudData.ttData ? cloudData.ttData : s.ttData,
                 };
@@ -923,7 +924,6 @@ function App() {
                 persistAdvance(mergedPayload.advance);
                 persistSalaryRuns(mergedPayload.salaryRuns);
                 persistBankRecon(mergedPayload.bankRecon);
-                persistBankStatements(mergedPayload.bankStatements);
                 persistDsrData(mergedPayload.dsrData);
                 persistTtData(mergedPayload.ttData);
                 await driveUpdate(token, file.id, mergedPayload);
@@ -1015,7 +1015,7 @@ function App() {
             driveSyncInFlightRef.current = false;
         }
         // eslint-disable-next-line
-    }, [driveConnected, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements]);
+    }, [driveConnected, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
     useEffect(() => {
         if (!ready)
             return; // still loading saved data \u2014 not a real edit yet
@@ -1031,7 +1031,7 @@ function App() {
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, new Date().toISOString());
         }
         catch (e) { }
-    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements, dsrData, ttData]);
+    }, [ready, config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData]);
     useEffect(() => {
         if (!driveConnected)
             return;
@@ -1044,7 +1044,87 @@ function App() {
         pushTimerRef.current = setTimeout(() => { pushNow(); }, 3000);
         return () => clearTimeout(pushTimerRef.current);
         // eslint-disable-next-line
-    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, bankStatements, dsrData, ttData, driveConnected]);
+    }, [config, msLog, dieselLog, dayClosing, advance, salaryRuns, bankRecon, dsrData, ttData, driveConnected]);
+    // Bank Statement data can grow very large (thousands of rows once legacy data is uploaded).
+    // Including it in the main app payload meant EVERY save anywhere in the app \u2014 even a single MS
+    // Daily shift \u2014 had to re-serialize and re-upload the entire statement history each time,
+    // which is what froze the page. This keeps it in its own Drive file, pushed independently.
+    const bankStatementsPushTimerRef = useRef(null);
+    const bankStatementsSyncInFlightRef = useRef(false);
+    const pushBankStatementsNow = useCallback(async () => {
+        if (!driveConnected || bankStatementsSyncInFlightRef.current)
+            return;
+        bankStatementsSyncInFlightRef.current = true;
+        try {
+            const token = await getCachedOrFreshToken();
+            const payload = { version: 1, savedAt: new Date().toISOString(), bankStatements: latestStateRef.current.bankStatements };
+            if (!bankStatementsDriveFileIdRef.current) {
+                const existing = await driveFindFile(token, DRIVE_BANK_STATEMENTS_FILE_NAME);
+                if (existing)
+                    bankStatementsDriveFileIdRef.current = existing.id;
+            }
+            if (bankStatementsDriveFileIdRef.current) {
+                await driveUpdate(token, bankStatementsDriveFileIdRef.current, payload);
+            }
+            else {
+                const created = await driveCreate(token, payload, DRIVE_BANK_STATEMENTS_FILE_NAME);
+                bankStatementsDriveFileIdRef.current = created.id;
+            }
+        }
+        catch (e) { }
+        finally {
+            bankStatementsSyncInFlightRef.current = false;
+        }
+    }, [driveConnected]);
+    useEffect(() => {
+        if (!driveConnected)
+            return;
+        if (bankStatementsPushTimerRef.current)
+            clearTimeout(bankStatementsPushTimerRef.current);
+        bankStatementsPushTimerRef.current = setTimeout(() => { pushBankStatementsNow(); }, 3000);
+        return () => clearTimeout(bankStatementsPushTimerRef.current);
+        // eslint-disable-next-line
+    }, [bankStatements, driveConnected]);
+    // Pull the bank statements file once per connect (mirrors the main app's connect-time pull) \u2014
+    // merged by date+desc+balance per entry, so nothing gets lost between devices, without ever
+    // needing to touch (or re-upload) the main app state file.
+    useEffect(() => {
+        if (!driveConnected)
+            return;
+        (async () => {
+            try {
+                const token = await getCachedOrFreshToken();
+                const file = await driveFindFile(token, DRIVE_BANK_STATEMENTS_FILE_NAME);
+                if (!file) {
+                    bankStatementsDriveFileIdRef.current = null;
+                    return;
+                }
+                bankStatementsDriveFileIdRef.current = file.id;
+                const cloudData = await driveDownload(token, file.id);
+                const cloudStatements = (cloudData && cloudData.bankStatements) || {};
+                const localStatements = latestStateRef.current.bankStatements || { TMB: [], BOB: [] };
+                const mergedStatements = {};
+                ['TMB', 'BOB'].forEach((bankKey) => {
+                    const localList = localStatements[bankKey] || [];
+                    const cloudList = cloudStatements[bankKey] || [];
+                    const seen = new Set();
+                    const merged = [];
+                    [...localList, ...cloudList].forEach((e) => {
+                        const key = e.date + '|' + e.desc + '|' + e.balance;
+                        if (seen.has(key))
+                            return;
+                        seen.add(key);
+                        merged.push(e);
+                    });
+                    merged.sort((a, b) => a.date.localeCompare(b.date));
+                    mergedStatements[bankKey] = merged;
+                });
+                persistBankStatements(mergedStatements);
+            }
+            catch (e) { }
+        })();
+        // eslint-disable-next-line
+    }, [driveConnected]);
     useEffect(() => {
         const onOnline = () => { if (driveConnected)
             pushNow(); };
@@ -3462,18 +3542,17 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const entries = bankStatements[bank] || [];
     const showPartyFields = bank === 'TMB';
 
-    const [filters, setFilters] = useState({ dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
+    const [filters, setFilters] = useState(() => {
+        if (entries.length > 0) {
+            const latest = entries[entries.length - 1].date; // entries are kept sorted ascending by date
+            return { dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' };
+        }
+        return { dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' };
+    });
     const availableMonths = React.useMemo(() => {
         const months = new Set(entries.map((e) => e.date.slice(0, 7)));
         return [...months].sort().reverse();
     }, [entries]);
-    useEffect(() => {
-        if (entries.length > 0) {
-            const latest = entries[entries.length - 1].date; // entries are kept sorted ascending by date
-            setFilters((f) => Object.assign(Object.assign({}, f), { dateFrom: latest.slice(0, 8) + '01', dateTo: '' }));
-        }
-        // eslint-disable-next-line
-    }, [bank]);
     const jumpToMonth = (ym) => {
         if (!ym) return;
         const [y, m] = ym.split('-').map(Number);
@@ -3547,9 +3626,21 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         showToast(`${checked.length} entr${checked.length === 1 ? 'y' : 'ies'} marked and downloaded.`);
     };
 
+    const switchBank = (newBank) => {
+        const newEntries = bankStatements[newBank] || [];
+        if (newEntries.length > 0) {
+            const latest = newEntries[newEntries.length - 1].date;
+            setFilters({ dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
+        }
+        else {
+            setFilters({ dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
+        }
+        setBank(newBank);
+    };
+
     const headerActions = React.createElement("div", { style: { display: 'flex', gap: 10, alignItems: 'center' } },
         React.createElement("select", { className: "select-input", value: "", onChange: (e) => jumpToMonth(e.target.value) }, React.createElement("option", { value: "" }, "Jump to month\u2026"), availableMonths.map((m) => React.createElement("option", { key: m, value: m }, monthLabel(m)))),
-        React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => setBank(b) }, b))),
+        React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => switchBank(b) }, b))),
         showPartyFields && React.createElement("button", { className: "btn btn-primary", onClick: runUpdate }, "Update"));
 
     const datalistId = 'bs-party-suggestions';
