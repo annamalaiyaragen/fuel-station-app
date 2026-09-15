@@ -3647,7 +3647,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const partyDatalist = showPartyFields ? React.createElement("datalist", { id: datalistId }, knownParties.map((p) => React.createElement("option", { key: p, value: p }))) : null;
 
     const filterRow = React.createElement("tr", null,
-        React.createElement("td", null, React.createElement("div", { style: { display: 'flex', gap: 4 } }, React.createElement(CalendarDatePicker, { value: filters.dateFrom, onChange: (v) => updFilter('dateFrom', v) }), React.createElement(CalendarDatePicker, { value: filters.dateTo, onChange: (v) => updFilter('dateTo', v) }))),
+        React.createElement("td", null, React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 4 } }, React.createElement(CalendarDatePicker, { value: filters.dateFrom, onChange: (v) => updFilter('dateFrom', v) }), React.createElement(CalendarDatePicker, { value: filters.dateTo, onChange: (v) => updFilter('dateTo', v) }))),
         React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.desc, onChange: (e) => updFilter('desc', e.target.value), placeholder: "Search description" })),
         React.createElement("td", null, React.createElement(NumInput, { value: filters.debitMin, onChange: (v) => updFilter('debitMin', v), placeholder: "Debit \u2265" })),
         React.createElement("td", null, React.createElement(NumInput, { value: filters.creditMin, onChange: (v) => updFilter('creditMin', v), placeholder: "Credit \u2265" })),
@@ -3677,7 +3677,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     if (showPartyFields)
         headerCells.push("Party", "Month", "In credit software");
 
-    const table = React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
+    const table = React.createElement("div", { style: { overflowX: 'auto', maxWidth: '100%' } }, React.createElement("table", { className: "data-table" },
         React.createElement("thead", null, React.createElement("tr", null, headerCells.map((h) => React.createElement("th", { key: h }, h))), filterRow),
         React.createElement("tbody", null, ...tableRows)));
 
