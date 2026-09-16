@@ -3721,6 +3721,14 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const datalistId = 'bs-party-suggestions';
     const partyDatalist = showPartyFields ? React.createElement("datalist", { id: datalistId }, knownParties.map((p) => React.createElement("option", { key: p, value: p }))) : null;
 
+    // Explicit column widths reclaim space from Description (which truncates with an ellipsis
+    // rather than eating the row's width) and give Party/Month room to actually be readable and
+    // usable, instead of every column just splitting whatever space happens to be left over.
+    const colWidths = showPartyFields
+        ? [150, 220, 100, 220, 100, 130]
+        : [150, 320, 110];
+    const colGroup = React.createElement("colgroup", null, colWidths.map((w, i) => React.createElement("col", { key: i, style: { width: w } })));
+
     const filterRow = React.createElement("tr", null,
         React.createElement("td", null, React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 4 } }, React.createElement(CalendarDatePicker, { value: filters.dateFrom, onChange: (v) => updFilter('dateFrom', v) }), React.createElement(CalendarDatePicker, { value: filters.dateTo, onChange: (v) => updFilter('dateTo', v) }))),
         React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.desc, onChange: (e) => updFilter('desc', e.target.value), placeholder: "Search description" })),
@@ -3729,11 +3737,12 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null);
 
+    const descCellStyle = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const tableRows = filteredEntries.map((e) => {
         const hasParty = !!(e.party && e.party.trim());
         const rowStyle = e.enteredInCreditSoftware ? { background: 'var(--amber-dim)' } : hasParty ? { background: 'var(--green-bg)' } : {};
         const cells = [
-            React.createElement("td", null, fmtDate(e.date)), React.createElement("td", null, e.desc),
+            React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { style: descCellStyle, title: e.desc }, e.desc),
             React.createElement("td", { className: "mono" }, e.credit > 0 ? fmt(e.credit) : '\u2014'),
         ];
         if (showPartyFields) {
@@ -3748,7 +3757,8 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     if (showPartyFields)
         headerCells.push("Party", "Month", "In credit software");
 
-    const table = React.createElement("div", { style: { overflowX: 'auto', maxWidth: '100%' } }, React.createElement("table", { className: "data-table" },
+    const table = React.createElement("div", { style: { overflowX: 'auto', maxWidth: '100%' } }, React.createElement("table", { className: "data-table", style: { tableLayout: 'fixed' } },
+        colGroup,
         React.createElement("thead", null, React.createElement("tr", null, headerCells.map((h) => React.createElement("th", { key: h }, h))), filterRow),
         React.createElement("tbody", null, ...tableRows)));
 
