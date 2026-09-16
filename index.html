@@ -3577,7 +3577,7 @@ function parseRawBankStatementLines(rawLines) {
             errors.push((!debitR.ok && debitR.reason) || (!creditR.ok && creditR.reason) || (!balR.ok && balR.reason));
             break; // matches VBA: a bad amount halts parsing entirely, doesn't silently skip
         }
-        records.push({ date: dateNorm, desc, debit: debitR.value, credit: creditR.value, balance: balR.value });
+        records.push({ date: dateNorm, desc, credit: creditR.value });
     }
     records.reverse(); // bank lists newest-first; internal order should be old\u2192new
     return { records, errors };
@@ -3613,7 +3613,7 @@ function parseLegacyTabularLines(rawLines) {
         // reference. Present as-is if the row has them; left blank otherwise for later manual entry.
         const party = cols.length > 6 ? cols[6] : '';
         const paymentMonth = cols.length > 7 ? cols[7] : '';
-        records.push({ date: dateNorm, desc, debit: debitR.value, credit: creditR.value, balance: balR.value, party, paymentMonth, enteredInCreditSoftware: false });
+        records.push({ date: dateNorm, desc, credit: creditR.value, party, paymentMonth, enteredInCreditSoftware: false });
     });
     return { records, errors };
 }
@@ -3624,10 +3624,10 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
 
     const [filters, setFilters] = useState(() => {
         if (entries.length > 0) {
-            const latest = entries[entries.length - 1].date; // entries are kept sorted ascending by date
-            return { dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' };
+            const latest = entries[entries.length - 1].date;
+            return { dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' };
         }
-        return { dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' };
+        return { dateFrom: '', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' };
     });
     const availableMonths = React.useMemo(() => {
         const months = new Set(entries.map((e) => e.date.slice(0, 7)));
@@ -3641,7 +3641,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     };
     const updFilter = (field, value) => setFilters((f) => Object.assign(Object.assign({}, f), { [field]: value }));
     const updFilter2 = (patch) => setFilters((f) => Object.assign(Object.assign({}, f), patch));
-    const clearFilters = () => setFilters({ dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
+    const clearFilters = () => setFilters({ dateFrom: '', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' });
 
     const entryMatchesFilters = (e, f) => {
         if (f.dateFrom && e.date < f.dateFrom)
@@ -3649,8 +3649,6 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         if (f.dateTo && e.date > f.dateTo)
             return false;
         if (f.desc && !e.desc.toLowerCase().includes(f.desc.toLowerCase()))
-            return false;
-        if (f.debitMin && e.debit < Number(f.debitMin))
             return false;
         if (f.creditMin && e.credit < Number(f.creditMin))
             return false;
@@ -3680,19 +3678,16 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         return opts;
     }, []);
 
-    // "Update" can't actually reach your separate Petrosoft software from here \u2014 this app has no
-    // way to connect to it directly. Instead it marks every checked row as processed and downloads
-    // a CSV of exactly those rows, so you have something ready to feed into your existing uploader.
     const runUpdate = () => {
         const checked = filteredEntries.filter((e) => e.enteredInCreditSoftware);
         if (checked.length === 0) {
             showToast('No rows are checked.', 'red');
             return;
         }
-        const headers = ['Date', 'Description', 'Debit', 'Credit', 'Balance', 'Party', 'Month'];
+        const headers = ['Date', 'Description', 'Credit', 'Party', 'Month'];
         const csvLines = [headers.join(',')];
         checked.forEach((e) => {
-            csvLines.push([fmtDate(e.date), e.desc, e.debit, e.credit, e.balance, e.party || '', e.paymentMonth || ''].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+            csvLines.push([fmtDate(e.date), e.desc, e.credit, e.party || '', e.paymentMonth || ''].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
         });
         const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
@@ -3710,10 +3705,10 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         const newEntries = bankStatements[newBank] || [];
         if (newEntries.length > 0) {
             const latest = newEntries[newEntries.length - 1].date;
-            setFilters({ dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
+            setFilters({ dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' });
         }
         else {
-            setFilters({ dateFrom: '', dateTo: '', desc: '', debitMin: '', creditMin: '', party: '', paymentMonth: '' });
+            setFilters({ dateFrom: '', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' });
         }
         setBank(newBank);
     };
@@ -3729,9 +3724,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const filterRow = React.createElement("tr", null,
         React.createElement("td", null, React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 4 } }, React.createElement(CalendarDatePicker, { value: filters.dateFrom, onChange: (v) => updFilter('dateFrom', v) }), React.createElement(CalendarDatePicker, { value: filters.dateTo, onChange: (v) => updFilter('dateTo', v) }))),
         React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.desc, onChange: (e) => updFilter('desc', e.target.value), placeholder: "Search description" })),
-        React.createElement("td", null, React.createElement(NumInput, { value: filters.debitMin, onChange: (v) => updFilter('debitMin', v), placeholder: "Debit \u2265" })),
         React.createElement("td", null, React.createElement(NumInput, { value: filters.creditMin, onChange: (v) => updFilter('creditMin', v), placeholder: "Credit \u2265" })),
-        React.createElement("td", null),
         showPartyFields ? React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: filters.party, onChange: (e) => updFilter('party', e.target.value), placeholder: "Search party" })) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null);
@@ -3741,9 +3734,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         const rowStyle = e.enteredInCreditSoftware ? { background: 'var(--amber-dim)' } : hasParty ? { background: 'var(--green-bg)' } : {};
         const cells = [
             React.createElement("td", null, fmtDate(e.date)), React.createElement("td", null, e.desc),
-            React.createElement("td", { className: "mono" }, e.debit > 0 ? fmt(e.debit) : '\u2014'),
             React.createElement("td", { className: "mono" }, e.credit > 0 ? fmt(e.credit) : '\u2014'),
-            React.createElement("td", { className: "mono" }, fmt(e.balance)),
         ];
         if (showPartyFields) {
             cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: e.party || '', onChange: (ev) => updateEntry(e.id, { party: ev.target.value }), placeholder: "Party name" })));
@@ -3753,7 +3744,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         return React.createElement("tr", { key: e.id, style: rowStyle }, ...cells);
     });
 
-    const headerCells = ["Date", "Description", "Debit", "Credit", "Balance"];
+    const headerCells = ["Date", "Description", "Credit"];
     if (showPartyFields)
         headerCells.push("Party", "Month", "In credit software");
 
