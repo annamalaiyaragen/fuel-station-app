@@ -327,7 +327,55 @@ function recomputeAdvanceBalances(log) {
     });
     return balances;
 }
-/* ---------- Google Drive setup ---------- */
+// Trip logs and settlement history both use the same id+savedAt shape as msLog/dieselLog, just
+// nested one level under vehicle type (tripLog) or as a flat array (history) - so the same safe
+// union-by-id merge applies, just looped per vehicle-type key for tripLog.
+function mergeTtData(local, cloud) {
+    const localTt = local || { tripLog: {}, history: [] };
+    const cloudTt = cloud || { tripLog: {}, history: [] };
+    const tripKls = new Set([...Object.keys(localTt.tripLog || {}), ...Object.keys(cloudTt.tripLog || {})]);
+    const mergedTripLog = {};
+    tripKls.forEach((kl) => { mergedTripLog[kl] = mergeArraysById(localTt.tripLog[kl], cloudTt.tripLog[kl]); });
+    const mergedHistory = mergeArraysById(localTt.history, cloudTt.history);
+    return { tripLog: mergedTripLog, history: mergedHistory };
+}
+// Bank Reconciliation's per-bank-and-type state previously merged as a whole object like advance
+// used to, which risked losing a status change (a tally, an ignore, a successful auto-match) if a
+// push's timing lost the whole-object timestamp comparison. This merges each bank+type key's state
+// individually: entries unioned by id (never dropping a parsed bank entry, and never un-consuming
+// one that was successfully matched on either side), statuses unioned by book-entry id (preferring
+// a deliberate "confirmed"/"ignored" decision over an unresolved "flagged"/"approx" auto-state from
+// the other side), and lastSucceeded kept as whichever side has progressed further.
+function mergeBankRecon(local, cloud) {
+    const localBr = local || {};
+    const cloudBr = cloud || {};
+    const allKeys = new Set([...Object.keys(localBr), ...Object.keys(cloudBr)]);
+    const RESOLVED = new Set(['confirmed', 'ignored']);
+    const merged = {};
+    allKeys.forEach((stateKey) => {
+        const l = localBr[stateKey] || { entries: [], statuses: {}, proposals: [], lastSucceeded: null, notes: {} };
+        const c = cloudBr[stateKey] || { entries: [], statuses: {}, proposals: [], lastSucceeded: null, notes: {} };
+        const entryMap = {};
+        [...(l.entries || []), ...(c.entries || [])].forEach((e) => {
+            const existing = entryMap[e.id];
+            if (!existing)
+                entryMap[e.id] = e;
+            else
+                entryMap[e.id] = (e.consumed || existing.consumed) ? Object.assign(Object.assign({}, e), { consumed: true }) : e;
+        });
+        const statuses = Object.assign(Object.assign({}, l.statuses), c.statuses);
+        Object.keys(l.statuses || {}).forEach((k) => {
+            const lv = l.statuses[k], cv = c.statuses[k];
+            if (lv && cv && lv !== cv)
+                statuses[k] = RESOLVED.has(lv) ? lv : cv;
+        });
+        const notes = Object.assign(Object.assign({}, l.notes), c.notes);
+        const proposals = (c.proposals || []).length >= (l.proposals || []).length ? c.proposals : l.proposals;
+        const lastSucceeded = (l.lastSucceeded && c.lastSucceeded) ? (l.lastSucceeded > c.lastSucceeded ? l.lastSucceeded : c.lastSucceeded) : (l.lastSucceeded || c.lastSucceeded || null);
+        merged[stateKey] = { entries: Object.values(entryMap), statuses, proposals, lastSucceeded, notes };
+    });
+    return merged;
+}
 const GOOGLE_CLIENT_ID = '510184910102-9gd9iudnjq2260okdc301qilm9p71qv1.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FILE_NAME = 'fuel_station_backup.json';
@@ -931,19 +979,19 @@ function App() {
                 const mergedDayClosing = mergeByDateKey(s.dayClosing, cloudData.dayClosing, cloudIsNewer);
                 const mergedMsReadings = mergeByDateKey(s.msReadings, cloudData.msReadings, cloudIsNewer);
                 const mergedMsDrafts = mergeByDateKey(s.msDrafts, cloudData.msDrafts, cloudIsNewer);
-                // Config/Advance/Salary/Bank/DSR/TT aren't simple date-unions, so these still use whichever
-                // side changed more recently as a whole \u2014 a smaller, lower-risk gap than daily records,
-                // but worth knowing: a genuine simultaneous edit to these on two devices could still conflict.
+                // Config is the only remaining whole-object comparison \u2014 it's rarely edited on two
+                // devices at once, and every other category above now merges safely at the entry or
+                // key level, so a mistimed sync can no longer silently discard real data from any of them.
                 const mergedPayload = {
                     version: 2, savedAt: new Date().toISOString(),
                     config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: mergeBankSettings(cloudData.config.bankSettings) }) : s.config,
                     msReadings: mergedMsReadings, msDrafts: mergedMsDrafts, msLog: mergedMsLog,
                     dieselData: mergedDieselData, dieselLog: mergedDieselLog, dayClosing: mergedDayClosing,
                     advance: (function () { const mergedLog = mergeAdvanceLog(s.advance && s.advance.log, cloudData.advance && cloudData.advance.log); return { log: mergedLog, balances: recomputeAdvanceBalances(mergedLog) }; })(),
-                    salaryRuns: cloudIsNewer && cloudData.salaryRuns ? cloudData.salaryRuns : s.salaryRuns,
-                    bankRecon: cloudIsNewer && cloudData.bankRecon ? cloudData.bankRecon : s.bankRecon,
-                    dsrData: cloudIsNewer && cloudData.dsrData ? cloudData.dsrData : s.dsrData,
-                    ttData: cloudIsNewer && cloudData.ttData ? cloudData.ttData : s.ttData,
+                    salaryRuns: mergeByDateKey(s.salaryRuns, cloudData.salaryRuns, cloudIsNewer),
+                    bankRecon: mergeBankRecon(s.bankRecon, cloudData.bankRecon),
+                    dsrData: mergeByDateKey(s.dsrData, cloudData.dsrData, cloudIsNewer),
+                    ttData: mergeTtData(s.ttData, cloudData.ttData),
                 };
                 suppressPushRef.current = true;
                 persistConfig(mergedPayload.config);
