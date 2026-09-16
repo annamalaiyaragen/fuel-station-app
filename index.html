@@ -295,6 +295,38 @@ function mergeByDateKey(localObj, cloudObj, preferCloudOnTie) {
     });
     return merged;
 }
+// A composite key identifying a distinct advance/recovery entry, for safe union-merging (no
+// stable id field exists on these entries across the several places they get created).
+function advanceEntryKey(e) {
+    return [e.name, e.type, e.amount, e.date, e.desc || '', e.dieselExpenseAdvanceFor || '', e.dayClosingCashDiffFor || '', e.monthKey || ''].join('|');
+}
+// Union the two logs by that key, keeping every distinct entry from either side \u2014 same safety
+// principle as mergeArraysById above, applied here because advance previously merged as a single
+// whole object based only on which side's timestamp looked newer, which could silently discard a
+// genuinely newer local entry if a push's timing lost that comparison despite the cloud missing it.
+function mergeAdvanceLog(localLog, cloudLog) {
+    const seen = new Set();
+    const merged = [];
+    [...(localLog || []), ...(cloudLog || [])].forEach((e) => {
+        const key = advanceEntryKey(e);
+        if (seen.has(key))
+            return;
+        seen.add(key);
+        merged.push(e);
+    });
+    return merged;
+}
+// Balances are a straight sum (Advance adds, Recovery subtracts), which is order-independent \u2014
+// so recomputing directly from the merged log guarantees balances always match what the log
+// actually contains, rather than trusting a balances object from whichever side "won".
+function recomputeAdvanceBalances(log) {
+    const balances = {};
+    (log || []).forEach((e) => {
+        const delta = e.type === 'Advance' ? Number(e.amount) : -Number(e.amount);
+        balances[e.name] = round2((balances[e.name] || 0) + delta);
+    });
+    return balances;
+}
 /* ---------- Google Drive setup ---------- */
 const GOOGLE_CLIENT_ID = '510184910102-9gd9iudnjq2260okdc301qilm9p71qv1.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
@@ -907,7 +939,7 @@ function App() {
                     config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: mergeBankSettings(cloudData.config.bankSettings) }) : s.config,
                     msReadings: mergedMsReadings, msDrafts: mergedMsDrafts, msLog: mergedMsLog,
                     dieselData: mergedDieselData, dieselLog: mergedDieselLog, dayClosing: mergedDayClosing,
-                    advance: cloudIsNewer && cloudData.advance ? cloudData.advance : s.advance,
+                    advance: (function () { const mergedLog = mergeAdvanceLog(s.advance && s.advance.log, cloudData.advance && cloudData.advance.log); return { log: mergedLog, balances: recomputeAdvanceBalances(mergedLog) }; })(),
                     salaryRuns: cloudIsNewer && cloudData.salaryRuns ? cloudData.salaryRuns : s.salaryRuns,
                     bankRecon: cloudIsNewer && cloudData.bankRecon ? cloudData.bankRecon : s.bankRecon,
                     dsrData: cloudIsNewer && cloudData.dsrData ? cloudData.dsrData : s.dsrData,
