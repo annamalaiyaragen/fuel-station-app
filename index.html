@@ -430,6 +430,34 @@ async function driveUpdate(token, fileId, content) {
         throw new Error('drive_update_failed_' + res.status);
     return res.json();
 }
+// If a cached Drive file id goes stale (the file was deleted, moved, or trashed directly in
+// Drive), driveUpdate fails with a 404 that would otherwise leave sync permanently stuck in an
+// error state until a full page reload happened to clear the cached id. This detects that
+// specific case, clears the stale id, and retries once by re-finding (or creating) the file \u2014
+// self-healing instead of a dead end. Any other error (network failure, auth issue, etc.) is
+// left alone and propagates normally, since retrying wouldn't fix those and could mask them.
+async function driveUpdateWithRecovery(token, fileIdRef, payload, fileName) {
+    if (fileIdRef.current) {
+        try {
+            await driveUpdate(token, fileIdRef.current, payload);
+            return;
+        }
+        catch (e) {
+            if (!(e && e.message && e.message.includes('drive_update_failed_404')))
+                throw e;
+            fileIdRef.current = null;
+        }
+    }
+    const found = await driveFindFile(token, fileName);
+    if (found) {
+        fileIdRef.current = found.id;
+        await driveUpdate(token, found.id, payload);
+    }
+    else {
+        const created = await driveCreate(token, payload, fileName);
+        fileIdRef.current = created.id;
+    }
+}
 /* ---------- generic helpers ---------- */
 const uid = (p = 'id') => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -1021,6 +1049,7 @@ function App() {
             setLastSyncedAt(new Date());
         }
         catch (e) {
+            console.error('[Drive sync error]', e);
             setSyncStatus('error');
         }
     }
@@ -1078,12 +1107,7 @@ function App() {
             // actually expired, avoiding a popup/flash on every background save
             const token = await getCachedOrFreshToken();
             const payload = buildPayload();
-            if (driveFileIdRef.current)
-                await driveUpdate(token, driveFileIdRef.current, payload);
-            else {
-                const created = await driveCreate(token, payload);
-                driveFileIdRef.current = created.id;
-            }
+            await driveUpdateWithRecovery(token, driveFileIdRef, payload, DRIVE_FILE_NAME);
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
             setSyncStatus('synced');
             setLastSyncedAt(new Date());
@@ -1138,20 +1162,11 @@ function App() {
         try {
             const token = await getCachedOrFreshToken();
             const payload = { version: 1, savedAt: new Date().toISOString(), bankStatements: latestStateRef.current.bankStatements };
-            if (!bankStatementsDriveFileIdRef.current) {
-                const existing = await driveFindFile(token, DRIVE_BANK_STATEMENTS_FILE_NAME);
-                if (existing)
-                    bankStatementsDriveFileIdRef.current = existing.id;
-            }
-            if (bankStatementsDriveFileIdRef.current) {
-                await driveUpdate(token, bankStatementsDriveFileIdRef.current, payload);
-            }
-            else {
-                const created = await driveCreate(token, payload, DRIVE_BANK_STATEMENTS_FILE_NAME);
-                bankStatementsDriveFileIdRef.current = created.id;
-            }
+            await driveUpdateWithRecovery(token, bankStatementsDriveFileIdRef, payload, DRIVE_BANK_STATEMENTS_FILE_NAME);
         }
-        catch (e) { }
+        catch (e) {
+            console.error('[Bank Statements push error]', e);
+        }
         finally {
             bankStatementsSyncInFlightRef.current = false;
         }
@@ -1201,7 +1216,9 @@ function App() {
                 });
                 persistBankStatements(mergedStatements);
             }
-            catch (e) { }
+            catch (e) {
+                console.error('[Bank Statements pull error]', e);
+            }
         })();
         // eslint-disable-next-line
     }, [driveConnected]);
@@ -3625,9 +3642,9 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const [filters, setFilters] = useState(() => {
         if (entries.length > 0) {
             const latest = entries[entries.length - 1].date;
-            return { dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' };
+            return { dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' };
         }
-        return { dateFrom: '', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' };
+        return { dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' };
     });
     const availableMonths = React.useMemo(() => {
         const months = new Set(entries.map((e) => e.date.slice(0, 7)));
@@ -3641,7 +3658,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     };
     const updFilter = (field, value) => setFilters((f) => Object.assign(Object.assign({}, f), { [field]: value }));
     const updFilter2 = (patch) => setFilters((f) => Object.assign(Object.assign({}, f), patch));
-    const clearFilters = () => setFilters({ dateFrom: '', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' });
+    const clearFilters = () => setFilters({ dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' });
 
     const entryMatchesFilters = (e, f) => {
         if (f.dateFrom && e.date < f.dateFrom)
@@ -3650,7 +3667,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
             return false;
         if (f.desc && !e.desc.toLowerCase().includes(f.desc.toLowerCase()))
             return false;
-        if (f.creditMin && e.credit < Number(f.creditMin))
+        if (f.credit && !String(e.credit).includes(f.credit))
             return false;
         if (f.party && !(e.party || '').toLowerCase().includes(f.party.toLowerCase()))
             return false;
@@ -3705,10 +3722,10 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         const newEntries = bankStatements[newBank] || [];
         if (newEntries.length > 0) {
             const latest = newEntries[newEntries.length - 1].date;
-            setFilters({ dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' });
+            setFilters({ dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' });
         }
         else {
-            setFilters({ dateFrom: '', dateTo: '', desc: '', creditMin: '', party: '', paymentMonth: '' });
+            setFilters({ dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' });
         }
         setBank(newBank);
     };
@@ -3732,7 +3749,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const filterRow = React.createElement("tr", null,
         React.createElement("td", null, React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 4 } }, React.createElement(CalendarDatePicker, { value: filters.dateFrom, onChange: (v) => updFilter('dateFrom', v) }), React.createElement(CalendarDatePicker, { value: filters.dateTo, onChange: (v) => updFilter('dateTo', v) }))),
         React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.desc, onChange: (e) => updFilter('desc', e.target.value), placeholder: "Search description" })),
-        React.createElement("td", null, React.createElement(NumInput, { value: filters.creditMin, onChange: (v) => updFilter('creditMin', v), placeholder: "Credit \u2265" })),
+        React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.credit, onChange: (e) => updFilter('credit', e.target.value), placeholder: "Search amount" })),
         showPartyFields ? React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: filters.party, onChange: (e) => updFilter('party', e.target.value), placeholder: "Search party" })) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null);
