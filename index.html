@@ -331,11 +331,13 @@ function recomputeAdvanceBalances(log) {
 // nested one level under vehicle type (tripLog) or as a flat array (history) - so the same safe
 // union-by-id merge applies, just looped per vehicle-type key for tripLog.
 function mergeTtData(local, cloud) {
-    const localTt = local || { tripLog: {}, history: [] };
-    const cloudTt = cloud || { tripLog: {}, history: [] };
-    const tripKls = new Set([...Object.keys(localTt.tripLog || {}), ...Object.keys(cloudTt.tripLog || {})]);
+    const localTt = (local && typeof local === 'object') ? local : {};
+    const cloudTt = (cloud && typeof cloud === 'object') ? cloud : {};
+    const localTripLog = (localTt.tripLog && typeof localTt.tripLog === 'object') ? localTt.tripLog : {};
+    const cloudTripLog = (cloudTt.tripLog && typeof cloudTt.tripLog === 'object') ? cloudTt.tripLog : {};
+    const tripKls = new Set([...Object.keys(localTripLog), ...Object.keys(cloudTripLog)]);
     const mergedTripLog = {};
-    tripKls.forEach((kl) => { mergedTripLog[kl] = mergeArraysById(localTt.tripLog[kl], cloudTt.tripLog[kl]); });
+    tripKls.forEach((kl) => { mergedTripLog[kl] = mergeArraysById(localTripLog[kl], cloudTripLog[kl]); });
     const mergedHistory = mergeArraysById(localTt.history, cloudTt.history);
     return { tripLog: mergedTripLog, history: mergedHistory };
 }
@@ -834,7 +836,7 @@ function App() {
     const [bankRecon, setBankRecon] = useState({});
     const [bankStatements, setBankStatements] = useState({ TMB: [], BOB: [] });
     const [dsrData, setDsrData] = useState({});
-    const [ttData, setTtData] = useState({ history: [] });
+    const [ttData, setTtData] = useState({ tripLog: { '12': [], '20': [] }, history: [] });
     const [tab, setTab] = useState('dashboard');
     const [workingDate, setWorkingDate] = useState(yesterdayStr());
     const [theme, setTheme] = useState(() => { try {
@@ -888,7 +890,7 @@ function App() {
                 storageGet(K.CONFIG, defaultConfig), storageGet(K.MS_READINGS, {}), storageGet(K.MS_DRAFTS, {}), storageGet(K.MS_LOG, []),
                 storageGet(K.DIESEL_DATA, {}), storageGet(K.DIESEL_LOG, []), storageGet(K.DAY_CLOSING, {}),
                 storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, {}), storageGet(K.BANK_STATEMENTS, { TMB: [], BOB: [] }),
-                storageGet(K.DSR_DATA, {}), storageGet(K.TT_DATA, { history: [] }),
+                storageGet(K.DSR_DATA, {}), storageGet(K.TT_DATA, { tripLog: { '12': [], '20': [] }, history: [] }),
             ]);
             setConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: mergeBankSettings(c.bankSettings) }));
             setMsReadings(mr);
