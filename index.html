@@ -1855,7 +1855,9 @@ function computeLubeChainUpTo(dieselData, lube, targetDate) {
         godown = Number(latest.godown) || 0;
         batches = [];
         held = [];
-        godownPrice = null;
+        godownPrice = (latest.godownInvoicePrice !== undefined && latest.godownInvoicePrice !== null && latest.godownInvoicePrice !== '')
+            ? { invoicePrice: Number(latest.godownInvoicePrice), mrp: Number(latest.godownMrp) || Number(latest.godownInvoicePrice) }
+            : null;
         startAfter = latest.date;
     }
     const dates = Object.keys(dieselData).filter((d) => d < targetDate && (startAfter === null || d > startAfter)).sort();
@@ -2284,11 +2286,15 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
         setPriceLubeId(null);
         showToast('Price change saved \u2014 remember to click Save at the top for it to take effect.');
     };
-    const [correctionDraft, setCorrectionDraft] = useState({ date: todayStr(), base: '', godown: '' });
-    const openCorrection = (lubeId) => { setCorrectingLubeId(lubeId); setCorrectionDraft({ date: todayStr(), base: '', godown: '' }); };
+    const [correctionDraft, setCorrectionDraft] = useState({ date: todayStr(), base: '', godown: '', godownInvoicePrice: '', godownMrp: '' });
+    const openCorrection = (lubeId) => { setCorrectingLubeId(lubeId); setCorrectionDraft({ date: todayStr(), base: '', godown: '', godownInvoicePrice: '', godownMrp: '' }); };
     const saveCorrection = (idx) => {
         const l = local.lubes[idx];
         const newCorrection = { date: correctionDraft.date, base: Number(correctionDraft.base) || 0, godown: Number(correctionDraft.godown) || 0 };
+        if (correctionDraft.godownInvoicePrice !== '' && correctionDraft.godownInvoicePrice !== undefined) {
+            newCorrection.godownInvoicePrice = Number(correctionDraft.godownInvoicePrice);
+            newCorrection.godownMrp = Number(correctionDraft.godownMrp) || Number(correctionDraft.godownInvoicePrice);
+        }
         const nextCorrections = [...(l.corrections || []).filter((c) => c.date !== newCorrection.date), newCorrection];
         updLube(idx, { corrections: nextCorrections });
         setCorrectingLubeId(null);
@@ -2333,7 +2339,9 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
       local.lubes.filter((l) => !l.msOnly || l.id === 'l_pktoil').map((l) => React.createElement("option", { key: l.id, value: l.id }, l.name)))),
     correctingLubeId && React.createElement(Field, { label: "As of date" }, React.createElement(CalendarDatePicker, { value: correctionDraft.date, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { date: v })), maxDate: todayStr() })),
     correctingLubeId && React.createElement(Field, { label: "Correct Display qty" }, React.createElement(NumInput, { value: correctionDraft.base, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { base: v })) })),
-    correctingLubeId && React.createElement(Field, { label: "Correct Godown qty" }, React.createElement(NumInput, { value: correctionDraft.godown, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { godown: v })) }))),
+    correctingLubeId && React.createElement(Field, { label: "Correct Godown qty" }, React.createElement(NumInput, { value: correctionDraft.godown, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { godown: v })) })),
+    correctingLubeId && React.createElement(Field, { label: "Godown invoice price (optional \u2014 only if this godown stock is at a different price than the lube's regular price; leave blank otherwise)" }, React.createElement(NumInput, { value: correctionDraft.godownInvoicePrice, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { godownInvoicePrice: v })) })),
+    correctingLubeId && React.createElement(Field, { label: "Godown MRP (optional, only used with the price above)" }, React.createElement(NumInput, { value: correctionDraft.godownMrp, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { godownMrp: v })) }))),
   correctingLubeId && React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } },
     React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => saveCorrection(local.lubes.findIndex((l) => l.id === correctingLubeId)) }, "Save correction"),
     React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setCorrectingLubeId(null) }, "Cancel")))
