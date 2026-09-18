@@ -811,6 +811,7 @@ const defaultConfig = {
     tanks: [],
     allowPreDatedChanges: false,
     bankTypeMapping: { deposit: 'BOB', paytm: 'TMB', phonepe: 'TMB', hppay: 'SBI' },
+    lockUpdatedBankEntries: true,
     ttMaintenance: { '12': [], '20': [] },
     bankSettings: defaultBankSettings(),
     oilPrice: 320, pktPrice: 23,
@@ -1752,7 +1753,13 @@ function getEffectivePrice(lube, dateStr) {
     const latest = history[history.length - 1];
     return { invoicePrice: Number(latest.invoicePrice) || 0, mrp: Number(latest.mrp) || 0 };
 }
-function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, dateStr) {
+// The godown/holding split below only applies to receipts dated on or after this cutover -
+// since stock is a fully-derived chain replayed from the opening balance through every historical
+// day, applying the new logic to every past receipt would retroactively reprocess and shift
+// months of already-settled history. Anything before this date keeps computing exactly as it
+// always did (receipts going straight to display); only today and forward use the new behavior.
+const LUBE_THREE_TIER_CUTOVER = '2026-09-18';
+function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, dateStr, heldOpening, godownPriceOpening) {
     const effective = getEffectivePrice(lube, dateStr);
     const lubeInvoicePrice = effective.invoicePrice;
     const lubeMrp = effective.mrp;
@@ -1764,18 +1771,44 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
     const batchMrp = (entry === null || entry === void 0 ? void 0 : entry.batchMrp) !== undefined && (entry === null || entry === void 0 ? void 0 : entry.batchMrp) !== '' ? Number(entry.batchMrp) : lubeMrp;
     const isNewPriceTier = receiptActive && receiptQty > 0 && (batchInvoicePrice !== lubeInvoicePrice || batchMrp !== lubeMrp);
     let batches = (batchesOpening || []).map((b) => (Object.assign({}, b)));
+    let held = (heldOpening || []).map((b) => (Object.assign({}, b)));
     let base = baseOpening;
+    let godown = godownOpening;
+    let godownPrice = godownPriceOpening || { invoicePrice: lubeInvoicePrice, mrp: lubeMrp };
+    // A new lot at the SAME price as the current lube price goes straight to godown (not display) -
+    // it's stock that's arrived but not yet moved to the shelf. A DIFFERENT price is held separately
+    // rather than mixed into godown, since godown only tracks one price at a time; it's only released
+    // once both godown and display are fully sold through, so the older/cheaper stock always sells first.
+    const useNewLubeLogic = dateStr >= LUBE_THREE_TIER_CUTOVER;
     if (receiptActive && receiptQty > 0) {
-        if (isNewPriceTier)
-            batches = [...batches, { qty: receiptQty, invoicePrice: batchInvoicePrice, mrp: batchMrp }];
-        else
-            base += receiptQty;
+        if (useNewLubeLogic) {
+            if (isNewPriceTier)
+                held = [...held, { qty: receiptQty, invoicePrice: batchInvoicePrice, mrp: batchMrp }];
+            else
+                godown += receiptQty;
+        }
+        else {
+            // Pre-cutover: exact original behavior - receipts go straight to display.
+            if (isNewPriceTier)
+                batches = [...batches, { qty: receiptQty, invoicePrice: batchInvoicePrice, mrp: batchMrp }];
+            else
+                base += receiptQty;
+        }
     }
     const manualClicks = Number(entry === null || entry === void 0 ? void 0 : entry.manualReplenishCount) || 0;
     const requestedReplenish = manualClicks * lubeReplenishQty;
-    const replenished = Math.min(requestedReplenish, godownOpening);
-    const godown = godownOpening - replenished;
-    base += replenished;
+    const replenished = Math.min(requestedReplenish, godown);
+    godown -= replenished;
+    if (replenished > 0) {
+        // If godown's current stock is priced differently from the lube's regular price (because it
+        // was released from a held batch), replenishing creates a new batch tier instead of merging
+        // into base, so that price distinction carries through to display/sale correctly.
+        const godownIsCurrentPrice = godownPrice.invoicePrice === lubeInvoicePrice && godownPrice.mrp === lubeMrp;
+        if (godownIsCurrentPrice)
+            base += replenished;
+        else
+            batches = [...batches, { qty: replenished, invoicePrice: godownPrice.invoicePrice, mrp: godownPrice.mrp }];
+    }
     let remainingSale = sale;
     const baseSold = Math.min(Math.max(base, 0), remainingSale);
     base -= baseSold;
@@ -1794,16 +1827,26 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
         base -= remainingSale;
         remainingSale = 0;
     }
+    // Once godown and display are both fully sold through, the oldest held (differently-priced) lot
+    // automatically becomes the new godown stock, at its own price - ready for the usual replenish.
+    if (useNewLubeLogic && godown <= 0.0001 && base <= 0.0001 && batches.length === 0 && held.length > 0) {
+        const released = held[0];
+        godown += released.qty;
+        godownPrice = { invoicePrice: released.invoicePrice, mrp: released.mrp };
+        held = held.slice(1);
+    }
     const baseSaleQty = sale - batchBreakdown.reduce((s, x) => s + x.qty, 0);
     let priceTotal = baseSaleQty * (lubeMrp || lubeInvoicePrice || 0);
     batchBreakdown.forEach((x) => { priceTotal += x.qty * x.mrp; });
-    return { opening: baseOpening, openingGodown: godownOpening, openingBatches: batchesOpening, sale, receipt: receiptQty, receiptActive,
-        closingBalance: base, closingGodown: godown, closingBatches: batches, batchBreakdown, baseSaleQty, isNewPriceTier, replenished, priceTotal: round2(priceTotal) };
+    return { opening: baseOpening, openingGodown: godownOpening, openingBatches: batchesOpening, openingHeld: heldOpening, sale, receipt: receiptQty, receiptActive,
+        closingBalance: base, closingGodown: godown, closingBatches: batches, closingHeld: held, closingGodownPrice: godownPrice, batchBreakdown, baseSaleQty, isNewPriceTier, replenished, priceTotal: round2(priceTotal) };
 }
 function computeLubeChainUpTo(dieselData, lube, targetDate) {
     let base = Number(lube.openingBalance) || 0;
     let godown = Number(lube.godownStock) || 0;
     let batches = [];
+    let held = [];
+    let godownPrice = null;
     let startAfter = null;
     const corrections = (lube.corrections || []).filter((c) => c.date < targetDate).sort((a, b) => a.date.localeCompare(b.date));
     if (corrections.length > 0) {
@@ -1811,6 +1854,8 @@ function computeLubeChainUpTo(dieselData, lube, targetDate) {
         base = Number(latest.base) || 0;
         godown = Number(latest.godown) || 0;
         batches = [];
+        held = [];
+        godownPrice = null;
         startAfter = latest.date;
     }
     const dates = Object.keys(dieselData).filter((d) => d < targetDate && (startAfter === null || d > startAfter)).sort();
@@ -1818,16 +1863,18 @@ function computeLubeChainUpTo(dieselData, lube, targetDate) {
         const entry = (dieselData[d].lubeEntries || {})[lube.id];
         if (!entry)
             return;
-        const line = lubeLineCore(lube, entry, base, godown, batches, d);
+        const line = lubeLineCore(lube, entry, base, godown, batches, d, held, godownPrice);
         base = line.closingBalance;
         godown = line.closingGodown;
         batches = line.closingBatches;
+        held = line.closingHeld;
+        godownPrice = line.closingGodownPrice;
     });
-    return { base, godown, batches };
+    return { base, godown, batches, held, godownPrice };
 }
 function lubeLine(config, dieselData, dateStr, lube, entry) {
     const chain = computeLubeChainUpTo(dieselData, lube, dateStr);
-    return lubeLineCore(lube, entry, chain.base, chain.godown, chain.batches, dateStr);
+    return lubeLineCore(lube, entry, chain.base, chain.godown, chain.batches, dateStr, chain.held, chain.godownPrice);
 }
 function computeDieselFinance(config, dieselData, dateStr, rec, msLog) {
     var _a, _b;
@@ -2055,9 +2102,10 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         const line = fin.lubeLines[l.id];
         const entry = ((_a = rec.lubeEntries) === null || _a === void 0 ? void 0 : _a[l.id]) || {};
         const batchSummary = line.openingBatches.length === 0 ? '\u2014' : line.openingBatches.map((b) => `${fmtNum(b.qty)} @ ${fmt(b.mrp)}`).join(', ');
+        const heldSummary = (line.closingHeld && line.closingHeld.length > 0) ? line.closingHeld.map((b) => `${fmtNum(b.qty)} @ ${fmt(b.mrp)}`).join(', ') : null;
         const receiptToday = entry.receiptOn && (Number(entry.receipt) || 0) > 0;
         const needsRestock = line.closingBalance <= 0 && line.closingGodown > 0;
-        return React.createElement("tr", { key: l.id }, React.createElement("td", null, l.name, receiptToday && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(entry.receipt)} received @ ${fmt((_b = entry.batchInvoicePrice) !== null && _b !== void 0 ? _b : l.invoicePrice)}`, React.createElement("button", { className: "icon-btn", title: "Undo this receipt", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => updateRec({ lubeEntries: Object.assign(Object.assign({}, rec.lubeEntries), { [l.id]: Object.assign(Object.assign({}, rec.lubeEntries[l.id]), { receiptOn: false, receipt: '', batchInvoicePrice: undefined, batchMrp: undefined }) }) }) }, "\u2715")), line.replenished > 0 && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(line.replenished)} restocked from godown`, React.createElement("button", { className: "icon-btn", title: "Undo last restock", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => setLubeEntry(l.id, 'manualReplenishCount', Math.max(0, (Number(entry.manualReplenishCount) || 0) - 1)) }, "\u2715")), l.feedsMsLubeId && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 }, onClick: () => setBarrelModal({ lubeId: l.id }) }, "Barrel used"))), React.createElement("td", { className: "mono" }, fmtNum(line.closingGodown)), React.createElement("td", { className: "mono" }, fmtNum(line.opening), " ", React.createElement("span", { style: { color: 'var(--text-muted)', fontSize: 11 } }, `(base @ ${fmt(l.mrp || l.invoicePrice)})`)), React.createElement("td", { style: { fontSize: 12, color: 'var(--text-secondary)' } }, batchSummary), React.createElement("td", null, React.createElement(NumInput, { value: (_c = entry.saleQty) !== null && _c !== void 0 ? _c : '', onChange: (v) => setLubeEntry(l.id, 'saleQty', v) })), React.createElement("td", { className: "mono" }, fmtNum(line.closingBalance), needsRestock && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 },
+        return React.createElement("tr", { key: l.id }, React.createElement("td", null, l.name, heldSummary && React.createElement("div", { style: { fontSize: 11, color: 'var(--text-muted)', marginTop: 2 } }, `Holding (different price, waiting): ${heldSummary}`), receiptToday && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(entry.receipt)} received @ ${fmt((_b = entry.batchInvoicePrice) !== null && _b !== void 0 ? _b : l.invoicePrice)}`, React.createElement("button", { className: "icon-btn", title: "Undo this receipt", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => updateRec({ lubeEntries: Object.assign(Object.assign({}, rec.lubeEntries), { [l.id]: Object.assign(Object.assign({}, rec.lubeEntries[l.id]), { receiptOn: false, receipt: '', batchInvoicePrice: undefined, batchMrp: undefined }) }) }) }, "\u2715")), line.replenished > 0 && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(line.replenished)} restocked from godown`, React.createElement("button", { className: "icon-btn", title: "Undo last restock", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => setLubeEntry(l.id, 'manualReplenishCount', Math.max(0, (Number(entry.manualReplenishCount) || 0) - 1)) }, "\u2715")), l.feedsMsLubeId && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 }, onClick: () => setBarrelModal({ lubeId: l.id }) }, "Barrel used"))), React.createElement("td", { className: "mono" }, fmtNum(line.closingGodown)), React.createElement("td", { className: "mono" }, fmtNum(line.opening), " ", React.createElement("span", { style: { color: 'var(--text-muted)', fontSize: 11 } }, `(base @ ${fmt(l.mrp || l.invoicePrice)})`)), React.createElement("td", { style: { fontSize: 12, color: 'var(--text-secondary)' } }, batchSummary), React.createElement("td", null, React.createElement(NumInput, { value: (_c = entry.saleQty) !== null && _c !== void 0 ? _c : '', onChange: (v) => setLubeEntry(l.id, 'saleQty', v) })), React.createElement("td", { className: "mono" }, fmtNum(line.closingBalance), needsRestock && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 },
             onClick: () => setLubeEntry(l.id, 'manualReplenishCount', (Number(entry.manualReplenishCount) || 0) + 1) }, `Restock +${fmtNum(l.replenishQty)}`))), React.createElement("td", { className: "mono" }, fmt(line.priceTotal)));
     })))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Lubes grand total"), React.createElement("span", null, fmt(fin.lubeAmt)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "denom-total-row", style: { marginBottom: 10 } }, React.createElement("span", null, "Combined grand total (diesel + lubes)"), React.createElement("span", null, fmt(fin.combinedTotal))), React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cash reconciliation & shift details"), React.createElement(Pill, { tone: rec.saved ? 'green' : 'muted' }, rec.saved ? 'Saved' : 'Not saved')), React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier name", value: rec.cashier, onChange: (v) => updateRec({ cashier: v }), employees: config.employees, fieldKey: 'diesel_cashier', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy name", value: rec.pumpBoy, onChange: (v) => updateRec({ pumpBoy: v }), employees: config.employees, fieldKey: 'diesel_pumpboy', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Credit sales" }, React.createElement(NumInput, { value: rec.creditSales, onChange: (v) => updateRec({ creditSales: v }) })), React.createElement(Field, { label: "Credit recovery" }, React.createElement(NumInput, { value: rec.creditRecovery, onChange: (v) => updateRec({ creditRecovery: v }) })), React.createElement(Field, { label: "PhonePe" }, React.createElement(PhonepeButton, { detail: rec.phonepeDetail, onSave: (d) => updateRec({ phonepeDetail: d }), type: "phonepe", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate, context: "diesel" })), React.createElement(Field, { label: "Paytm (all terminals)" }, React.createElement(MultiTerminalButton, { detailsMap: rec.paytmDetails, onSave: (d) => updateRec({ paytmDetails: d }), type: "paytm", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "HP Pay / DTPlus" }, React.createElement(NumInput, { value: rec.hpPay, onChange: (v) => updateRec({ hpPay: v }) }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.personShiftChangeOn, onChange: (e) => updateRec({ personShiftChangeOn: e.target.checked }) }), " Shift change (person changed mid-day) \u2014 splits day pay between two people"), rec.personShiftChangeOn && React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier 2 (2nd half)", value: rec.cashier2, onChange: (v) => updateRec({ cashier2: v }), employees: config.employees, fieldKey: 'diesel_cashier2', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy 2 (2nd half)", value: rec.pumpBoy2, onChange: (v) => updateRec({ pumpBoy2: v }), employees: config.employees, fieldKey: 'diesel_pumpboy2', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Split (% to 1st person)", hint: "Default 50/50 \u2014 adjust for a half-shift vs. a different split" }, React.createElement(NumInput, { value: (_d = rec.shiftSplitPercent) !== null && _d !== void 0 ? _d : '', onChange: (v) => updateRec({ shiftSplitPercent: v }), placeholder: "50" }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.airmanShiftChangeOn, onChange: (e) => updateRec({ airmanShiftChangeOn: e.target.checked }) }), " Air duty shift change (multiple air-men today) \u2014 splits attendance between two people"), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Airman" }, React.createElement("select", { className: "select-input", value: rec.airman || '', onChange: (e) => updateRec({ airman: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), config.employees.filter((emp) => emp.airOn).map((emp) => React.createElement("option", { key: emp.id, value: emp.name }, emp.name)))), rec.airmanShiftChangeOn && React.createElement(Field, { label: "Airman 2" }, React.createElement("select", { className: "select-input", value: rec.airman2 || '', onChange: (e) => updateRec({ airman2: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), config.employees.filter((emp) => emp.airOn).map((emp) => React.createElement("option", { key: emp.id, value: emp.name }, emp.name)))), rec.airmanShiftChangeOn && React.createElement(Field, { label: "Split (% to 1st air-man)", hint: "Default 50/50" }, React.createElement(NumInput, { value: rec.airmanShiftSplitPercent !== undefined && rec.airmanShiftSplitPercent !== null ? rec.airmanShiftSplitPercent : '', onChange: (v) => updateRec({ airmanShiftSplitPercent: v }), placeholder: "50" }))), React.createElement("div", { className: "card-head" }, React.createElement("h4", null, "Expenses"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addExpense }, React.createElement(IconPlus, { size: 14 }), " Add expense")), (rec.expenses || []).map((e, idx) => { const expType = e.type || 'misc'; const filteredLubes = fin.shopLubes.filter((l) => /waste|dist/i.test(l.name)); const lubeOptions = filteredLubes.length > 0 ? filteredLubes : fin.shopLubes; return React.createElement("div", { key: idx, className: "form-grid", style: { alignItems: 'flex-end' } },
   React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: expType, onChange: (ev) => updExpense(idx, { type: ev.target.value, employeeName: '', lubeId: '' }) },
@@ -3267,11 +3315,12 @@ function computeInventoryForMonth(config, msLog, dieselLog, dieselData, dayClosi
             return { name: l.name, opening: openingPkt, purchases: round2(purchasesPkt), recordedSales: round2(recordedSalesPkt), expectedClosing: expectedClosingPkt, closing: closingPkt, variance: variancePkt, varianceValue: round2(variancePkt * (effectivePricePkt.invoicePrice || 0)), rate: effectivePricePkt.invoicePrice || 0, tiers: tiersPkt, closingValueTotal: round2(closingValueTotalPkt) };
         }
         const firstDate = monthDates[0];
-        const openingChain = firstDate ? computeLubeChainUpTo(dieselData, l, firstDate) : { base: l.openingBalance || 0, godown: l.godownStock || 0 };
+        const openingChain = firstDate ? computeLubeChainUpTo(dieselData, l, firstDate) : { base: l.openingBalance || 0, godown: l.godownStock || 0, held: [] };
         const openingDisplay = openingChain.base;
         const openingGodown = openingChain.godown;
         const openingBatchQty = (openingChain.batches || []).reduce((s, b) => s + (Number(b.qty) || 0), 0);
-        const opening = round2(openingDisplay + openingGodown + openingBatchQty);
+        const openingHeldQty = (openingChain.held || []).reduce((s, b) => s + (Number(b.qty) || 0), 0);
+        const opening = round2(openingDisplay + openingGodown + openingBatchQty + openingHeldQty);
         let purchases = 0, recordedSales = 0;
         let baseSalesQty = 0, baseSalesRevenue = 0;
         const batchSalesMap = {};
@@ -3298,12 +3347,13 @@ function computeInventoryForMonth(config, msLog, dieselLog, dieselData, dayClosi
         });
         const lastDate = monthDates[monthDates.length - 1];
         const dayAfterLastDate = lastDate ? shiftDateStr(lastDate, 1) : null;
-        const closingChain = lastDate ? computeLubeChainUpTo(dieselData, l, dayAfterLastDate) : { base: openingDisplay, godown: openingGodown, batches: [] };
+        const closingChain = lastDate ? computeLubeChainUpTo(dieselData, l, dayAfterLastDate) : { base: openingDisplay, godown: openingGodown, batches: [], held: [] };
         const closingDisplay = closingChain.base;
         const closingGodown = closingChain.godown;
         const closingBatches = closingChain.batches;
         const closingBatchQty = closingBatches.reduce((s, b) => s + (Number(b.qty) || 0), 0);
-        const closing = round2(closingDisplay + closingGodown + closingBatchQty);
+        const closingHeldQty = (closingChain.held || []).reduce((s, b) => s + (Number(b.qty) || 0), 0);
+        const closing = round2(closingDisplay + closingGodown + closingBatchQty + closingHeldQty);
         const expectedClosing = opening + purchases - recordedSales;
         const variance = closing - expectedClosing;
         const [invY, invM] = monthKey.split('-');
@@ -3661,7 +3711,7 @@ function MonthMultiSelectModal({ selected, monthOptions, onSave, onClose }) {
             React.createElement("button", { className: "btn btn-primary", onClick: () => onSave(draft) }, "Done")));
     return ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, modalBox), document.body);
 }
-function BankStatementTab({ bankStatements, persistBankStatements, showToast }) {
+function BankStatementTab({ config, bankStatements, persistBankStatements, showToast }) {
     const [bank, setBank] = useState('TMB');
     const entries = bankStatements[bank] || [];
     const showPartyFields = bank === 'TMB';
@@ -3722,7 +3772,9 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const filteredEntries = React.useMemo(() => entries.filter((e) => entryMatchesFilters(e, filters)), [entries, filters]);
 
     const updateEntry = (id, patch) => {
-        const next = entries.map((e) => e.id === id ? Object.assign(Object.assign({}, e), patch) : e);
+        const touchesData = 'party' in patch || 'paymentMonths' in patch;
+        const finalPatch = touchesData ? Object.assign(Object.assign({}, patch), { updatedInCreditSoftware: false }) : patch;
+        const next = entries.map((e) => e.id === id ? Object.assign(Object.assign({}, e), finalPatch) : e);
         persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: next }));
     };
 
@@ -3800,8 +3852,10 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
 
     const descCellStyle = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const statusBg = { green: 'var(--green-bg)', yellow: 'var(--amber-dim)', none: 'transparent' };
+    const lockEnabled = config.lockUpdatedBankEntries !== false;
     const tableRows = filteredEntries.map((e) => {
         const status = rowStatus(e);
+        const locked = lockEnabled && status === 'green';
         const rowStyle = { background: statusBg[status] };
         const months = getMonths(e);
         const cells = [
@@ -3809,9 +3863,9 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
             React.createElement("td", { className: "mono" }, e.credit > 0 ? fmt(e.credit) : '\u2014'),
         ];
         if (showPartyFields) {
-            cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: e.party || '', onChange: (ev) => updateEntry(e.id, { party: ev.target.value }), placeholder: "Party name" })));
-            cells.push(React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", style: { width: '100%', textAlign: 'left' }, onClick: () => setMonthModalFor(e.id) }, months.length > 0 ? months.join(', ') : '\u2014 Select \u2014')));
-            cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
+            cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: e.party || '', disabled: locked, onChange: (ev) => updateEntry(e.id, { party: ev.target.value }), placeholder: "Party name" })));
+            cells.push(React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", disabled: locked, style: { width: '100%', textAlign: 'left' }, onClick: () => setMonthModalFor(e.id) }, months.length > 0 ? months.join(', ') : '\u2014 Select \u2014')));
+            cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, disabled: locked, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
         }
         return React.createElement("tr", { key: e.id, style: rowStyle }, ...cells);
     });
@@ -4138,8 +4192,9 @@ function BankSettingsPane({ config, persistConfig }) {
     useEffect(() => { setMapping(config.bankTypeMapping || {}); }, [config.bankTypeMapping]);
     const upd = (bank, type, field, value) => setLocal((c) => (Object.assign(Object.assign({}, c), { [bank]: Object.assign(Object.assign({}, c[bank]), { [type]: Object.assign(Object.assign({}, c[bank][type]), { [field]: value }) }) })));
     const updMapping = (type, bankValue) => setMapping((m) => Object.assign(Object.assign({}, m), { [type]: bankValue }));
-    const dirty = JSON.stringify(local) !== JSON.stringify(config.bankSettings) || JSON.stringify(mapping) !== JSON.stringify(config.bankTypeMapping || {});
-    const save = () => persistConfig(Object.assign(Object.assign({}, config), { bankSettings: local, bankTypeMapping: mapping }));
+    const [lockSetting, setLockSetting] = useState(config.lockUpdatedBankEntries !== false);
+    const dirty = JSON.stringify(local) !== JSON.stringify(config.bankSettings) || JSON.stringify(mapping) !== JSON.stringify(config.bankTypeMapping || {}) || lockSetting !== (config.lockUpdatedBankEntries !== false);
+    const save = () => persistConfig(Object.assign(Object.assign({}, config), { bankSettings: local, bankTypeMapping: mapping, lockUpdatedBankEntries: lockSetting }));
     const [testLine, setTestLine] = useState({});
 
     const mappingFields = BANK_TXN_TYPES.map((t) => React.createElement(Field, { key: t.key, label: t.label }, React.createElement("select", { className: "select-input", value: mapping[t.key] || 'SBI', onChange: (e) => updMapping(t.key, e.target.value) }, ['SBI', 'BOB', 'TMB'].map((b) => React.createElement("option", { key: b, value: b }, b)))));
@@ -4147,6 +4202,11 @@ function BankSettingsPane({ config, persistConfig }) {
         React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Which bank handles each type")),
         React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set this once \u2014 Bank Reconciliation then uses the right bank automatically for each type, no need to pick it every time."),
         React.createElement("div", { className: "form-grid" }, ...mappingFields));
+
+    const lockSection = React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement \u2014 lock updated entries")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on, Party/Month/checkbox become read-only for any row already marked green (updated into your credit software) \u2014 preventing accidental edits or duplicate entries. Turn off temporarily to correct a mistake; editing an unlocked green row sends it back to yellow, waiting to be updated again."),
+        React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8 } }, React.createElement("input", { type: "checkbox", checked: lockSetting, onChange: (e) => setLockSetting(e.target.checked) }), "Lock updated (green) Bank Statement entries"));
 
     const typeSections = BANK_TXN_TYPES.map((t) => {
         const bankForType = mapping[t.key] || 'SBI';
@@ -4163,7 +4223,7 @@ function BankSettingsPane({ config, persistConfig }) {
         return React.createElement("div", { key: t.key, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, `${t.label} (${bankForType})`), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Delimiter" }, React.createElement("select", { className: "select-input", value: cfg.delimiter, onChange: (e) => upd(bankForType, t.key, 'delimiter', e.target.value) }, React.createElement("option", { value: "tab" }, "Tab"), React.createElement("option", { value: "comma" }, "Comma"), React.createElement("option", { value: "pipe" }, "Pipe |"))), React.createElement(Field, { label: "Date column #" }, React.createElement(NumInput, { value: cfg.dateCol, onChange: (v) => upd(bankForType, t.key, 'dateCol', v) })), React.createElement(Field, { label: "Amount column #" }, React.createElement(NumInput, { value: cfg.amountCol, onChange: (v) => upd(bankForType, t.key, 'amountCol', v) })), React.createElement(Field, { label: "Keyword filter (used when importing from Bank Statement \u2014 only descriptions containing this text are pulled in)" }, React.createElement("input", { className: "text-input", value: cfg.keyword, onChange: (e) => upd(bankForType, t.key, 'keyword', e.target.value) }))), React.createElement(Field, { label: "Test parse \u2014 paste a sample line" }, React.createElement("input", { className: "text-input", style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: tl, onChange: (e) => setTestLine(Object.assign(Object.assign({}, testLine), { [tkey]: e.target.value })) })), preview && React.createElement("div", { style: { fontSize: 13 } }, preview));
     });
 
-    return React.createElement(React.Fragment, null, mappingSection, React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save settings") }), dirty && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)', marginBottom: 12 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "You have unsaved changes. The Test parse preview below reflects them, but the Reconcile page will keep using the last saved settings until you click \"Save settings\" above.")), ...typeSections));
+    return React.createElement(React.Fragment, null, mappingSection, lockSection, React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save settings") }), dirty && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)', marginBottom: 12 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "You have unsaved changes. The Test parse preview below reflects them, but the Reconcile page will keep using the last saved settings until you click \"Save settings\" above.")), ...typeSections));
 }
 function SettingsGate(props) {
     const [unlocked, setUnlocked] = useState(false);
