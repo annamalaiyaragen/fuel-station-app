@@ -267,8 +267,8 @@ async function storageSet(key, value) {
 // was saved more recently. Records that only exist on one side are always kept \u2014 never discarded.
 function mergeArraysById(localArr, cloudArr) {
     const map = {};
-    (cloudArr || []).forEach((r) => { if (r && r.id) map[r.id] = r; });
-    (localArr || []).forEach((r) => {
+    (Array.isArray(cloudArr) ? cloudArr : []).forEach((r) => { if (r && r.id) map[r.id] = r; });
+    (Array.isArray(localArr) ? localArr : []).forEach((r) => {
         if (!r || !r.id) return;
         const existing = map[r.id];
         if (!existing || (r.savedAt || '') >= (existing.savedAt || '')) map[r.id] = r;
@@ -307,7 +307,7 @@ function advanceEntryKey(e) {
 function mergeAdvanceLog(localLog, cloudLog) {
     const seen = new Set();
     const merged = [];
-    [...(localLog || []), ...(cloudLog || [])].forEach((e) => {
+    [...(Array.isArray(localLog) ? localLog : []), ...(Array.isArray(cloudLog) ? cloudLog : [])].forEach((e) => {
         const key = advanceEntryKey(e);
         if (seen.has(key))
             return;
@@ -353,24 +353,38 @@ function mergeBankRecon(local, cloud) {
     const RESOLVED = new Set(['confirmed', 'ignored']);
     const merged = {};
     allKeys.forEach((stateKey) => {
-        const l = localBr[stateKey] || { entries: [], statuses: {}, proposals: [], lastSucceeded: null, notes: {} };
-        const c = cloudBr[stateKey] || { entries: [], statuses: {}, proposals: [], lastSucceeded: null, notes: {} };
+        const lRaw = localBr[stateKey];
+        const cRaw = cloudBr[stateKey];
+        // Defends against any malformed or legacy-shaped value landing here (e.g. an array from
+        // an old pre-refactor default) rather than assuming every key holds the expected object shape.
+        const l = (lRaw && typeof lRaw === 'object' && !Array.isArray(lRaw)) ? lRaw : {};
+        const c = (cRaw && typeof cRaw === 'object' && !Array.isArray(cRaw)) ? cRaw : {};
+        const lEntries = Array.isArray(l.entries) ? l.entries : [];
+        const cEntries = Array.isArray(c.entries) ? c.entries : [];
         const entryMap = {};
-        [...(l.entries || []), ...(c.entries || [])].forEach((e) => {
+        [...lEntries, ...cEntries].forEach((e) => {
+            if (!e || !e.id)
+                return;
             const existing = entryMap[e.id];
             if (!existing)
                 entryMap[e.id] = e;
             else
                 entryMap[e.id] = (e.consumed || existing.consumed) ? Object.assign(Object.assign({}, e), { consumed: true }) : e;
         });
-        const statuses = Object.assign(Object.assign({}, l.statuses), c.statuses);
-        Object.keys(l.statuses || {}).forEach((k) => {
-            const lv = l.statuses[k], cv = c.statuses[k];
+        const lStatuses = (l.statuses && typeof l.statuses === 'object') ? l.statuses : {};
+        const cStatuses = (c.statuses && typeof c.statuses === 'object') ? c.statuses : {};
+        const statuses = Object.assign(Object.assign({}, lStatuses), cStatuses);
+        Object.keys(lStatuses).forEach((k) => {
+            const lv = lStatuses[k], cv = cStatuses[k];
             if (lv && cv && lv !== cv)
                 statuses[k] = RESOLVED.has(lv) ? lv : cv;
         });
-        const notes = Object.assign(Object.assign({}, l.notes), c.notes);
-        const proposals = (c.proposals || []).length >= (l.proposals || []).length ? c.proposals : l.proposals;
+        const lNotes = (l.notes && typeof l.notes === 'object') ? l.notes : {};
+        const cNotes = (c.notes && typeof c.notes === 'object') ? c.notes : {};
+        const notes = Object.assign(Object.assign({}, lNotes), cNotes);
+        const lProposals = Array.isArray(l.proposals) ? l.proposals : [];
+        const cProposals = Array.isArray(c.proposals) ? c.proposals : [];
+        const proposals = cProposals.length >= lProposals.length ? cProposals : lProposals;
         const lastSucceeded = (l.lastSucceeded && c.lastSucceeded) ? (l.lastSucceeded > c.lastSucceeded ? l.lastSucceeded : c.lastSucceeded) : (l.lastSucceeded || c.lastSucceeded || null);
         merged[stateKey] = { entries: Object.values(entryMap), statuses, proposals, lastSucceeded, notes };
     });
@@ -816,7 +830,7 @@ function App() {
     const [dayClosing, setDayClosing] = useState({});
     const [advance, setAdvance] = useState({ balances: {}, log: [] });
     const [salaryRuns, setSalaryRuns] = useState({});
-    const [bankRecon, setBankRecon] = useState({ book: [], entries: [], proposals: [], lastSucceeded: {} });
+    const [bankRecon, setBankRecon] = useState({});
     const [bankStatements, setBankStatements] = useState({ TMB: [], BOB: [] });
     const [dsrData, setDsrData] = useState({});
     const [ttData, setTtData] = useState({ history: [] });
@@ -872,7 +886,7 @@ function App() {
             const [c, mr, md, ml, dd, dl, dc, av, sr, br, bs, dsr, tt] = await Promise.all([
                 storageGet(K.CONFIG, defaultConfig), storageGet(K.MS_READINGS, {}), storageGet(K.MS_DRAFTS, {}), storageGet(K.MS_LOG, []),
                 storageGet(K.DIESEL_DATA, {}), storageGet(K.DIESEL_LOG, []), storageGet(K.DAY_CLOSING, {}),
-                storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, { book: [], entries: [], proposals: [], lastSucceeded: {} }), storageGet(K.BANK_STATEMENTS, { TMB: [], BOB: [] }),
+                storageGet(K.ADVANCE, { balances: {}, log: [] }), storageGet(K.SALARY_RUNS, {}), storageGet(K.BANK_RECON, {}), storageGet(K.BANK_STATEMENTS, { TMB: [], BOB: [] }),
                 storageGet(K.DSR_DATA, {}), storageGet(K.TT_DATA, { history: [] }),
             ]);
             setConfig(Object.assign(Object.assign(Object.assign({}, defaultConfig), c), { bankSettings: mergeBankSettings(c.bankSettings) }));
@@ -4130,7 +4144,7 @@ function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts
         persistDayClosing({});
         persistAdvance({ balances: {}, log: [] });
         persistSalaryRuns({});
-        persistBankRecon({ book: [], entries: [], proposals: [], lastSucceeded: {} });
+        persistBankRecon({});
         setConfirmingReset(false);
         setConfirmText('');
         showToast('Everything has been wiped \u2014 starting from a clean slate.');
