@@ -3668,7 +3668,17 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const [monthModalFor, setMonthModalFor] = useState(null);
 
     const getMonths = (e) => Array.isArray(e.paymentMonths) ? e.paymentMonths : (e.paymentMonth ? [e.paymentMonth] : []);
-    const rowStatus = (e) => e.updatedInCreditSoftware ? 'green' : 'yellow';
+    const rowStatus = (e) => {
+        const hasParty = !!(e.party && e.party.trim());
+        const hasMonth = getMonths(e).length > 0;
+        if (!hasParty && !hasMonth)
+            return 'none';
+        if (e.updatedInCreditSoftware)
+            return 'green';
+        if (hasParty && hasMonth)
+            return 'yellow';
+        return 'none';
+    };
 
     const [filters, setFilters] = useState(() => {
         if (entries.length > 0) {
@@ -3785,11 +3795,11 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.credit, onChange: (e) => updFilter('credit', e.target.value), placeholder: "Search amount" })),
         showPartyFields ? React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: filters.party, onChange: (e) => updFilter('party', e.target.value), placeholder: "Search party" })) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
-        showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.status, onChange: (e) => updFilter('status', e.target.value) }, React.createElement("option", { value: "" }, "Any"), React.createElement("option", { value: "green" }, "Green"), React.createElement("option", { value: "yellow" }, "Yellow"))) : null,
+        showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.status, onChange: (e) => updFilter('status', e.target.value) }, React.createElement("option", { value: "" }, "Any"), React.createElement("option", { value: "green" }, "Green"), React.createElement("option", { value: "yellow" }, "Yellow"), React.createElement("option", { value: "none" }, "No status"))) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null);
 
     const descCellStyle = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
-    const statusBg = { green: 'var(--green-bg)', yellow: 'var(--amber-dim)' };
+    const statusBg = { green: 'var(--green-bg)', yellow: 'var(--amber-dim)', none: 'transparent' };
     const tableRows = filteredEntries.map((e) => {
         const status = rowStatus(e);
         const rowStyle = { background: statusBg[status] };
