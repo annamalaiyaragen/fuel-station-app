@@ -3648,17 +3648,34 @@ function parseLegacyTabularLines(rawLines) {
     });
     return { records, errors };
 }
+function MonthMultiSelectModal({ selected, monthOptions, onSave, onClose }) {
+    const [draft, setDraft] = useState(selected || []);
+    const toggle = (m) => setDraft((d) => d.includes(m) ? d.filter((x) => x !== m) : [...d, m]);
+    const rows = monthOptions.map((m) => React.createElement("label", { key: m, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' } },
+        React.createElement("input", { type: "checkbox", checked: draft.includes(m), onChange: () => toggle(m) }), m));
+    const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 280, maxHeight: '70vh', overflowY: 'auto' } },
+        React.createElement("h3", null, "Select month(s)"),
+        React.createElement("div", null, ...rows),
+        React.createElement("div", { className: "modal-actions" },
+            React.createElement("button", { className: "btn btn-ghost", onClick: onClose }, "Cancel"),
+            React.createElement("button", { className: "btn btn-primary", onClick: () => onSave(draft) }, "Done")));
+    return ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, modalBox), document.body);
+}
 function BankStatementTab({ bankStatements, persistBankStatements, showToast }) {
     const [bank, setBank] = useState('TMB');
     const entries = bankStatements[bank] || [];
     const showPartyFields = bank === 'TMB';
+    const [monthModalFor, setMonthModalFor] = useState(null);
+
+    const getMonths = (e) => Array.isArray(e.paymentMonths) ? e.paymentMonths : (e.paymentMonth ? [e.paymentMonth] : []);
+    const rowStatus = (e) => e.updatedInCreditSoftware ? 'green' : 'yellow';
 
     const [filters, setFilters] = useState(() => {
         if (entries.length > 0) {
             const latest = entries[entries.length - 1].date;
-            return { dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' };
+            return { dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '', status: '' };
         }
-        return { dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' };
+        return { dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '', status: '' };
     });
     const availableMonths = React.useMemo(() => {
         const months = new Set(entries.map((e) => e.date.slice(0, 7)));
@@ -3672,7 +3689,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     };
     const updFilter = (field, value) => setFilters((f) => Object.assign(Object.assign({}, f), { [field]: value }));
     const updFilter2 = (patch) => setFilters((f) => Object.assign(Object.assign({}, f), patch));
-    const clearFilters = () => setFilters({ dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' });
+    const clearFilters = () => setFilters({ dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '', status: '' });
 
     const entryMatchesFilters = (e, f) => {
         if (f.dateFrom && e.date < f.dateFrom)
@@ -3685,7 +3702,9 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
             return false;
         if (f.party && !(e.party || '').toLowerCase().includes(f.party.toLowerCase()))
             return false;
-        if (f.paymentMonth && e.paymentMonth !== f.paymentMonth)
+        if (f.paymentMonth && !getMonths(e).includes(f.paymentMonth))
+            return false;
+        if (f.status && rowStatus(e) !== f.status)
             return false;
         return true;
     };
@@ -3718,7 +3737,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         const headers = ['Date', 'Description', 'Credit', 'Party', 'Month'];
         const csvLines = [headers.join(',')];
         checked.forEach((e) => {
-            csvLines.push([fmtDate(e.date), e.desc, e.credit, e.party || '', e.paymentMonth || ''].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+            csvLines.push([fmtDate(e.date), e.desc, e.credit, e.party || '', getMonths(e).join('; ')].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
         });
         const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
@@ -3729,6 +3748,9 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const checkedIds = new Set(checked.map((e) => e.id));
+        const next = entries.map((e) => checkedIds.has(e.id) ? Object.assign(Object.assign({}, e), { updatedInCreditSoftware: true }) : e);
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: next }));
         showToast(`${checked.length} entr${checked.length === 1 ? 'y' : 'ies'} marked and downloaded.`);
     };
 
@@ -3736,10 +3758,10 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         const newEntries = bankStatements[newBank] || [];
         if (newEntries.length > 0) {
             const latest = newEntries[newEntries.length - 1].date;
-            setFilters({ dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' });
+            setFilters({ dateFrom: latest.slice(0, 8) + '01', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '', status: '' });
         }
         else {
-            setFilters({ dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '' });
+            setFilters({ dateFrom: '', dateTo: '', desc: '', credit: '', party: '', paymentMonth: '', status: '' });
         }
         setBank(newBank);
     };
@@ -3752,11 +3774,8 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
     const datalistId = 'bs-party-suggestions';
     const partyDatalist = showPartyFields ? React.createElement("datalist", { id: datalistId }, knownParties.map((p) => React.createElement("option", { key: p, value: p }))) : null;
 
-    // Explicit column widths reclaim space from Description (which truncates with an ellipsis
-    // rather than eating the row's width) and give Party/Month room to actually be readable and
-    // usable, instead of every column just splitting whatever space happens to be left over.
     const colWidths = showPartyFields
-        ? [150, 220, 100, 220, 100, 130]
+        ? [150, 200, 100, 190, 140, 90, 110]
         : [150, 320, 110];
     const colGroup = React.createElement("colgroup", null, colWidths.map((w, i) => React.createElement("col", { key: i, style: { width: w } })));
 
@@ -3766,19 +3785,22 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
         React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.credit, onChange: (e) => updFilter('credit', e.target.value), placeholder: "Search amount" })),
         showPartyFields ? React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: filters.party, onChange: (e) => updFilter('party', e.target.value), placeholder: "Search party" })) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
+        showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.status, onChange: (e) => updFilter('status', e.target.value) }, React.createElement("option", { value: "" }, "Any"), React.createElement("option", { value: "green" }, "Green"), React.createElement("option", { value: "yellow" }, "Yellow"))) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null);
 
     const descCellStyle = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
+    const statusBg = { green: 'var(--green-bg)', yellow: 'var(--amber-dim)' };
     const tableRows = filteredEntries.map((e) => {
-        const hasParty = !!(e.party && e.party.trim());
-        const rowStyle = e.enteredInCreditSoftware ? { background: 'var(--amber-dim)' } : hasParty ? { background: 'var(--green-bg)' } : {};
+        const status = rowStatus(e);
+        const rowStyle = { background: statusBg[status] };
+        const months = getMonths(e);
         const cells = [
             React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { style: descCellStyle, title: e.desc }, e.desc),
             React.createElement("td", { className: "mono" }, e.credit > 0 ? fmt(e.credit) : '\u2014'),
         ];
         if (showPartyFields) {
             cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: e.party || '', onChange: (ev) => updateEntry(e.id, { party: ev.target.value }), placeholder: "Party name" })));
-            cells.push(React.createElement("td", null, React.createElement("select", { className: "select-input", value: e.paymentMonth || '', onChange: (ev) => updateEntry(e.id, { paymentMonth: ev.target.value }) }, React.createElement("option", { value: "" }, "\u2014"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))));
+            cells.push(React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", style: { width: '100%', textAlign: 'left' }, onClick: () => setMonthModalFor(e.id) }, months.length > 0 ? months.join(', ') : '\u2014 Select \u2014')));
             cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
         }
         return React.createElement("tr", { key: e.id, style: rowStyle }, ...cells);
@@ -3786,7 +3808,7 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
 
     const headerCells = ["Date", "Description", "Credit"];
     if (showPartyFields)
-        headerCells.push("Party", "Month", "In credit software");
+        headerCells.push("Party", "Month", "Status", "In credit software");
 
     const table = React.createElement("div", { style: { overflowX: 'auto', maxWidth: '100%' } }, React.createElement("table", { className: "data-table", style: { tableLayout: 'fixed' } },
         colGroup,
@@ -3795,13 +3817,21 @@ function BankStatementTab({ bankStatements, persistBankStatements, showToast }) 
 
     const emptyMsg = filteredEntries.length === 0 ? React.createElement("div", { className: "empty-hint" }, entries.length === 0 ? `No ${bank} statement entries stored yet \u2014 go to Data Parsing to add some.` : `No entries match the current filters.`) : null;
 
+    const activeMonthEntry = entries.find((e) => e.id === monthModalFor);
+    const monthModal = monthModalFor && activeMonthEntry ? React.createElement(MonthMultiSelectModal, {
+        selected: getMonths(activeMonthEntry), monthOptions,
+        onSave: (months) => { updateEntry(monthModalFor, { paymentMonths: months }); setMonthModalFor(null); },
+        onClose: () => setMonthModalFor(null),
+    }) : null;
+
     return React.createElement("div", { className: "page" },
         React.createElement(PageHeader, { title: "Bank Statement", action: headerActions }),
         partyDatalist,
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Stored ${bank} statement \u2014 ${entries.length} entries total, ${filteredEntries.length} shown`)),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a permanent record \u2014 entries are added from the Data Parsing tab; there's no way to clear them from this screen. Use the Reconciliation page to check these against your books."),
-            emptyMsg, table));
+            emptyMsg, table),
+        monthModal);
 }
 function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
     const [bank, setBank] = useState('TMB');
@@ -3983,7 +4013,8 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
     const importFromBankStatement = () => {
         const stmtEntries = (bankStatements && bankStatements[bank]) || [];
         const startAfter = st.lastSucceeded || '';
-        const relevant = stmtEntries.filter((e) => e.date > startAfter);
+        const keyword = ((config.bankSettings[bank] || {})[type] || {}).keyword || '';
+        const relevant = stmtEntries.filter((e) => e.date > startAfter && (!keyword || e.desc.toUpperCase().includes(keyword.toUpperCase())));
         const existingKeys = new Set(st.entries.map((e) => e.date + '|' + e.amount));
         const newEntries = [];
         relevant.forEach((e) => {
@@ -3997,7 +4028,7 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
             newEntries.push({ id: uid('k'), date: e.date, amount: amt, consumed: false });
         });
         updSt({ entries: [...st.entries, ...newEntries] });
-        setParseMsg(`Imported ${newEntries.length} entr${newEntries.length === 1 ? 'y' : 'ies'} from ${bank}'s stored Bank Statement` + (startAfter ? ` (dated after ${fmtDate(startAfter)}).` : '.'));
+        setParseMsg(`Imported ${newEntries.length} entr${newEntries.length === 1 ? 'y' : 'ies'} from ${bank}'s stored Bank Statement` + (startAfter ? ` (dated after ${fmtDate(startAfter)}` : ' (') + (keyword ? `, description contains "${keyword}").` : ').'));
     };
     const runReconciliation = () => {
         const startAfter = st.lastSucceeded || '';
@@ -4119,7 +4150,7 @@ function BankSettingsPane({ config, persistConfig }) {
                 ? React.createElement("span", { style: { color: 'var(--green)' } }, `Parsed \u2014 date: ${result.date}, amount: ${fmt(result.amount)}`)
                 : React.createElement("span", { style: { color: 'var(--red)' } }, result.reason);
         }
-        return React.createElement("div", { key: t.key, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, `${t.label} (${bankForType})`), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Delimiter" }, React.createElement("select", { className: "select-input", value: cfg.delimiter, onChange: (e) => upd(bankForType, t.key, 'delimiter', e.target.value) }, React.createElement("option", { value: "tab" }, "Tab"), React.createElement("option", { value: "comma" }, "Comma"), React.createElement("option", { value: "pipe" }, "Pipe |"))), React.createElement(Field, { label: "Date column #" }, React.createElement(NumInput, { value: cfg.dateCol, onChange: (v) => upd(bankForType, t.key, 'dateCol', v) })), React.createElement(Field, { label: "Amount column #" }, React.createElement(NumInput, { value: cfg.amountCol, onChange: (v) => upd(bankForType, t.key, 'amountCol', v) })), React.createElement(Field, { label: "Keyword filter" }, React.createElement("input", { className: "text-input", value: cfg.keyword, onChange: (e) => upd(bankForType, t.key, 'keyword', e.target.value) }))), React.createElement(Field, { label: "Test parse \u2014 paste a sample line" }, React.createElement("input", { className: "text-input", style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: tl, onChange: (e) => setTestLine(Object.assign(Object.assign({}, testLine), { [tkey]: e.target.value })) })), preview && React.createElement("div", { style: { fontSize: 13 } }, preview));
+        return React.createElement("div", { key: t.key, className: "slot-config" }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, `${t.label} (${bankForType})`), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Delimiter" }, React.createElement("select", { className: "select-input", value: cfg.delimiter, onChange: (e) => upd(bankForType, t.key, 'delimiter', e.target.value) }, React.createElement("option", { value: "tab" }, "Tab"), React.createElement("option", { value: "comma" }, "Comma"), React.createElement("option", { value: "pipe" }, "Pipe |"))), React.createElement(Field, { label: "Date column #" }, React.createElement(NumInput, { value: cfg.dateCol, onChange: (v) => upd(bankForType, t.key, 'dateCol', v) })), React.createElement(Field, { label: "Amount column #" }, React.createElement(NumInput, { value: cfg.amountCol, onChange: (v) => upd(bankForType, t.key, 'amountCol', v) })), React.createElement(Field, { label: "Keyword filter (used when importing from Bank Statement \u2014 only descriptions containing this text are pulled in)" }, React.createElement("input", { className: "text-input", value: cfg.keyword, onChange: (e) => upd(bankForType, t.key, 'keyword', e.target.value) }))), React.createElement(Field, { label: "Test parse \u2014 paste a sample line" }, React.createElement("input", { className: "text-input", style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: tl, onChange: (e) => setTestLine(Object.assign(Object.assign({}, testLine), { [tkey]: e.target.value })) })), preview && React.createElement("div", { style: { fontSize: 13 } }, preview));
     });
 
     return React.createElement(React.Fragment, null, mappingSection, React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save settings") }), dirty && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)', marginBottom: 12 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "You have unsaved changes. The Test parse preview below reflects them, but the Reconcile page will keep using the last saved settings until you click \"Save settings\" above.")), ...typeSections));
