@@ -3765,7 +3765,7 @@ function parseRawBankStatementLines(rawLines) {
             errors.push((!debitR.ok && debitR.reason) || (!creditR.ok && creditR.reason) || (!balR.ok && balR.reason));
             break; // matches VBA: a bad amount halts parsing entirely, doesn't silently skip
         }
-        records.push({ date: dateNorm, desc, credit: creditR.value });
+        records.push({ date: dateNorm, desc, credit: creditR.value, balance: balR.value });
     }
     records.reverse(); // bank lists newest-first; internal order should be old\u2192new
     return { records, errors };
@@ -3801,7 +3801,7 @@ function parseLegacyTabularLines(rawLines) {
         // reference. Present as-is if the row has them; left blank otherwise for later manual entry.
         const party = cols.length > 6 ? cols[6] : '';
         const paymentMonth = cols.length > 7 ? cols[7] : '';
-        records.push({ date: dateNorm, desc, credit: creditR.value, party, paymentMonth, enteredInCreditSoftware: false });
+        records.push({ date: dateNorm, desc, credit: creditR.value, balance: balR.value, party, paymentMonth, enteredInCreditSoftware: false });
     });
     return { records, errors };
 }
@@ -3885,6 +3885,14 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: next }));
     };
 
+    const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+    const deleteEntry = (id) => {
+        const next = entries.filter((e) => e.id !== id);
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: next }));
+        setConfirmDeleteId(null);
+        showToast('Entry deleted.');
+    };
+
     const knownParties = React.useMemo(() => [...new Set(entries.map((e) => e.party).filter(Boolean))].sort(), [entries]);
     const monthOptions = React.useMemo(() => {
         const opts = [];
@@ -3944,8 +3952,8 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
     const partyDatalist = showPartyFields ? React.createElement("datalist", { id: datalistId }, knownParties.map((p) => React.createElement("option", { key: p, value: p }))) : null;
 
     const colWidths = showPartyFields
-        ? [150, 200, 100, 190, 140, 90, 110]
-        : [150, 320, 110];
+        ? [150, 190, 100, 180, 130, 85, 100, 60]
+        : [150, 300, 100, 60];
     const colGroup = React.createElement("colgroup", null, colWidths.map((w, i) => React.createElement("col", { key: i, style: { width: w } })));
 
     const filterRow = React.createElement("tr", null,
@@ -3955,7 +3963,8 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         showPartyFields ? React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: filters.party, onChange: (e) => updFilter('party', e.target.value), placeholder: "Search party" })) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.status, onChange: (e) => updFilter('status', e.target.value) }, React.createElement("option", { value: "" }, "Any"), React.createElement("option", { value: "green" }, "Green"), React.createElement("option", { value: "yellow" }, "Yellow"), React.createElement("option", { value: "none" }, "No status"))) : null,
-        showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null);
+        showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null,
+        React.createElement("td", null));
 
     const descCellStyle = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const statusBg = { green: 'var(--green-bg)', yellow: 'var(--amber-dim)', none: 'transparent' };
@@ -3974,12 +3983,16 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
             cells.push(React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", disabled: locked, style: { width: '100%', textAlign: 'left' }, onClick: () => setMonthModalFor(e.id) }, months.length > 0 ? months.join(', ') : '\u2014 Select \u2014')));
             cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, disabled: locked, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
         }
+        cells.push(React.createElement("td", null, confirmDeleteId === e.id
+            ? React.createElement("div", { style: { display: 'flex', gap: 4 } }, React.createElement("button", { className: "btn btn-danger btn-xs", onClick: () => deleteEntry(e.id) }, "Confirm"), React.createElement("button", { className: "btn btn-ghost btn-xs", onClick: () => setConfirmDeleteId(null) }, "Cancel"))
+            : React.createElement("button", { className: "icon-btn", title: "Delete this entry", onClick: () => setConfirmDeleteId(e.id) }, React.createElement(IconTrash, { size: 14 }))));
         return React.createElement("tr", { key: e.id, style: rowStyle }, ...cells);
     });
 
     const headerCells = ["Date", "Description", "Credit"];
     if (showPartyFields)
         headerCells.push("Party", "Month", "Status", "In credit software");
+    headerCells.push("");
 
     const table = React.createElement("div", { style: { overflowX: 'auto', maxWidth: '100%' } }, React.createElement("table", { className: "data-table", style: { tableLayout: 'fixed' } },
         colGroup,
