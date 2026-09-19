@@ -3770,6 +3770,127 @@ function parseRawBankStatementLines(rawLines) {
     records.reverse(); // bank lists newest-first; internal order should be old\u2192new
     return { records, errors };
 }
+// BOB (Bank of Baroda) statements are pasted one transaction per LINE, e.g.
+//   19-09-2026 19-09-2026 BY CASH 516805 1070884.54Cr
+// i.e. Txn date, Value date, Description, Amount, Balance with a Cr/Dr suffix - unlike TMB's
+// one-value-per-line layout. Handles both tab-separated and space-separated pastes. When the row
+// shows only ONE amount, credit vs debit comes from the description prefix (BY = credit,
+// TO = debit) or, failing that, from how the running balance moved versus the neighbouring row.
+// Every row is also cross-checked against its neighbour's balance, and a summary warning is
+// returned if any don't reconcile - so a wrong layout guess shows up immediately, not silently.
+function parseBobLines(rawLines) {
+    const errors = [];
+    const DATE_RE = /^(\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}|\d{1,2}[-\/ ][A-Za-z]{3,9}[-\/ ]\d{2,4})/;
+    const NUM_RE = /^-?[\d,]+(\.\d+)?$/;
+    const BAL_RE = /^(.*?)\s+(-?[\d,]+(?:\.\d+)?)\s*(Cr|Dr)\.?\s*$/i;
+    const num = (t) => parseFloat(String(t).replace(/,/g, ''));
+    const lines = rawLines.map((l) => l.replace(/\u00a0/g, ' ').trim()).filter(Boolean);
+    const parsed = [];
+    let skipped = 0;
+    lines.forEach((line, idx) => {
+        const m1 = line.match(DATE_RE);
+        if (!m1) {
+            skipped += 1;
+            // A pasted column-header row is ignored silently; anything else is reported.
+            if (!/balance|description|particulars|narration/i.test(line) && errors.length < 3) errors.push(`Line ${idx + 1} skipped (doesn't start with a date): "${line.slice(0, 60)}"`);
+            return;
+        }
+        const date = parseDateFlexible(m1[0]);
+        let rest = line.slice(m1[0].length).trim();
+        const m2 = rest.match(DATE_RE); // value date - same as txn date in BOB's layout; skip it
+        if (m2) rest = rest.slice(m2[0].length).trim();
+        let desc = '', amount = null, dir = null, balance = null, bad = null;
+        if (line.indexOf('\t') !== -1) {
+            // Tab-separated: keep blank cells so Debit/Credit positions are preserved.
+            const cols = line.split('\t').map((c) => c.trim());
+            let k = 1;
+            if (cols[k] && DATE_RE.test(cols[k])) k += 1;
+            desc = cols[k] || '';
+            const tail = cols.slice(k + 1);
+            let bi = tail.length - 1;
+            while (bi >= 0 && tail[bi] === '') bi -= 1;
+            const bm = bi >= 0 ? tail[bi].match(/^(-?[\d,]+(?:\.\d+)?)\s*(Cr|Dr)?\.?$/i) : null;
+            if (!bm) bad = 'no balance found';
+            else {
+                balance = num(bm[1]) * ((bm[2] || '').toLowerCase() === 'dr' ? -1 : 1);
+                const cells = tail.slice(0, bi);
+                const val = (c) => (c !== undefined && NUM_RE.test(c) ? num(c) : 0);
+                if (cells.length >= 2) {
+                    const deb = val(cells[cells.length - 2]), cre = val(cells[cells.length - 1]);
+                    if (cre > 0) { amount = cre; dir = 'credit'; }
+                    else if (deb > 0) { amount = deb; dir = 'debit'; }
+                    else { amount = 0; dir = 'credit'; }
+                }
+                else if (cells.length === 1 && NUM_RE.test(cells[0])) amount = num(cells[0]);
+                else bad = 'no amount found';
+            }
+        }
+        else {
+            const bm = rest.match(BAL_RE);
+            if (!bm) bad = 'no balance with Cr/Dr found at the end of the line';
+            else {
+                balance = num(bm[2]) * (bm[3].toLowerCase() === 'dr' ? -1 : 1);
+                const tokens = bm[1].split(/\s+/).filter(Boolean);
+                const amtTokens = [];
+                while (tokens.length > 1 && NUM_RE.test(tokens[tokens.length - 1]) && amtTokens.length < 2)
+                    amtTokens.unshift(tokens.pop());
+                const amts = amtTokens.map(num);
+                desc = tokens.join(' ');
+                if (amts.length === 0) bad = 'no amount found';
+                else if (amts.length === 1) amount = amts[0];
+                else if (amts[0] === 0) { amount = amts[1]; dir = 'credit'; }       // "0.00  5000.00"
+                else if (amts[1] === 0) { amount = amts[0]; dir = 'debit'; }        // "5000.00  0.00"
+                else { amount = amts[1]; desc = (desc + ' ' + amtTokens[0]).trim(); } // ref/cheque no. + amount: keep the ref in the description
+            }
+        }
+        if (bad || isNaN(balance) || amount === null || isNaN(amount)) {
+            skipped += 1;
+            if (errors.length < 3) errors.push(`Line ${idx + 1} skipped (${bad || 'unreadable amount'}): "${line.slice(0, 60)}"`);
+            return;
+        }
+        if (!dir) {
+            if (/^\s*(BY|CR|CREDIT)\b/i.test(desc)) dir = 'credit';
+            else if (/^\s*(TO|DR|DEBIT)\b/i.test(desc)) dir = 'debit';
+        }
+        parsed.push({ date, desc, amount: round2(amount), dir, balance: round2(balance), line: idx + 1 });
+    });
+    // Bank sites list newest-first, but the stored/output order must be OLDEST -> NEWEST. The order is
+    // worked out from the dates; when every row is on the same day (dates can't tell), both orders are
+    // tried and the one whose running balances reconcile best wins (a tie -> assume newest-first).
+    const countMismatches = (chrono) => {
+        let bad = 0;
+        chrono.forEach((r, i) => {
+            if (i === 0) return;
+            const delta = round2(r.balance - chrono[i - 1].balance);
+            const d = r.dir || (r.amount > 0 ? (delta > 0 ? 'credit' : 'debit') : null);
+            const signOk = d === 'credit' ? delta >= 0 : d === 'debit' ? delta <= 0 : true;
+            if (Math.abs(Math.abs(delta) - r.amount) > 0.05 || !signOk) bad += 1;
+        });
+        return bad;
+    };
+    const asListed = parsed.slice();
+    const reversed = parsed.slice().reverse();
+    let chrono;
+    if (parsed.length < 2) chrono = asListed;
+    else if (parsed[0].date > parsed[parsed.length - 1].date) chrono = reversed;
+    else if (parsed[0].date < parsed[parsed.length - 1].date) chrono = asListed;
+    else chrono = countMismatches(reversed) <= countMismatches(asListed) ? reversed : asListed;
+    let mismatches = 0, unknownDir = 0;
+    chrono.forEach((r, i) => {
+        const prev = chrono[i - 1]; // chronologically earlier neighbour
+        if (prev) {
+            const delta = round2(r.balance - prev.balance);
+            if (!r.dir && r.amount > 0) r.dir = delta > 0 ? 'credit' : 'debit';
+            const signOk = r.dir === 'credit' ? delta >= 0 : r.dir === 'debit' ? delta <= 0 : true;
+            if (Math.abs(Math.abs(delta) - r.amount) > 0.05 || !signOk) mismatches += 1;
+        }
+        if (!r.dir && r.amount > 0) unknownDir += 1;
+    });
+    if (unknownDir > 0) errors.push(`${unknownDir} row(s) had only one amount and no BY/TO prefix, and had no neighbouring row to compare - treated as debits (not stored as credits). Please check them.`);
+    if (mismatches > 0) errors.push(`Balance check: ${mismatches} of ${parsed.length} row(s) don't reconcile with the neighbouring row's balance (amount or credit/debit reading may be off, or rows are missing/out of order). Please review before relying on them.`);
+    const records = chrono.map((r) => ({ date: r.date, desc: r.desc, credit: r.dir === 'credit' ? r.amount : 0, balance: r.balance }));
+    return { records, errors };
+}
 // For data that's already tabular (e.g. from a spreadsheet/macro export), one transaction per line,
 // tab-separated: Date, (blank), Description, Debit, Credit, Balance \u2014 matching the same column
 // layout as the raw parser's output, just skipping the repeating-pattern detection since this data
@@ -3821,11 +3942,16 @@ function MonthMultiSelectModal({ selected, monthOptions, onSave, onClose }) {
 function BankStatementTab({ config, bankStatements, persistBankStatements, showToast }) {
     const [bank, setBank] = useState('TMB');
     const entries = bankStatements[bank] || [];
-    const showPartyFields = bank === 'TMB';
+    // Party + Month tagging is available for every bank. The "Update" workflow (green/yellow status,
+    // "In credit software" checkbox, locking, Update CSV export) is TMB-only - BOB has no Update option.
+    const showPartyFields = true;
+    const showUpdateFeatures = bank === 'TMB';
     const [monthModalFor, setMonthModalFor] = useState(null);
 
     const getMonths = (e) => Array.isArray(e.paymentMonths) ? e.paymentMonths : (e.paymentMonth ? [e.paymentMonth] : []);
     const rowStatus = (e) => {
+        if (!showUpdateFeatures)
+            return 'none';
         const hasParty = !!(e.party && e.party.trim());
         const hasMonth = getMonths(e).length > 0;
         if (!hasParty && !hasMonth)
@@ -3907,7 +4033,8 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         showToast(`Marked ${yellowCount} entr${yellowCount === 1 ? 'y' : 'ies'} as already updated.`);
     };
 
-    const knownParties = React.useMemo(() => [...new Set(entries.map((e) => e.party).filter(Boolean))].sort(), [entries]);
+    // Party suggestions are shared across banks, so a name typed once for TMB is offered for BOB too.
+    const knownParties = React.useMemo(() => [...new Set([...(bankStatements.TMB || []), ...(bankStatements.BOB || [])].map((e) => e.party).filter(Boolean))].sort(), [bankStatements]);
     const monthOptions = React.useMemo(() => {
         const opts = [];
         const now = new Date();
@@ -3960,15 +4087,17 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
     const headerActions = React.createElement("div", { style: { display: 'flex', gap: 10, alignItems: 'center' } },
         React.createElement("select", { className: "select-input", value: "", onChange: (e) => jumpToMonth(e.target.value) }, React.createElement("option", { value: "" }, "Jump to month\u2026"), availableMonths.map((m) => React.createElement("option", { key: m, value: m }, monthLabel(m)))),
         React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => switchBank(b) }, b))),
-        showPartyFields && yellowCount > 0 && React.createElement("button", { className: "btn btn-secondary", onClick: () => setConfirmMarkAll(true) }, `Mark ${yellowCount} old entr${yellowCount === 1 ? 'y' : 'ies'} as updated`),
-        showPartyFields && React.createElement("button", { className: "btn btn-primary", onClick: runUpdate }, "Update"));
+        showUpdateFeatures && yellowCount > 0 && React.createElement("button", { className: "btn btn-secondary", onClick: () => setConfirmMarkAll(true) }, `Mark ${yellowCount} old entr${yellowCount === 1 ? 'y' : 'ies'} as updated`),
+        showUpdateFeatures && React.createElement("button", { className: "btn btn-primary", onClick: runUpdate }, "Update"));
 
     const datalistId = 'bs-party-suggestions';
     const partyDatalist = showPartyFields ? React.createElement("datalist", { id: datalistId }, knownParties.map((p) => React.createElement("option", { key: p, value: p }))) : null;
 
-    const colWidths = showPartyFields
-        ? [150, 190, 100, 180, 130, 85, 100, 60]
-        : [150, 300, 100, 60];
+    // Column order (TMB): Date, Description, Credit, Party, Month, Note, In credit software, delete.
+    // BOB has no "In credit software" column. Header, filter row and body rows all use this same order.
+    const colWidths = showUpdateFeatures
+        ? [140, 190, 100, 170, 130, 180, 100, 60]
+        : [140, 260, 100, 170, 140, 180, 80];
     const colGroup = React.createElement("colgroup", null, colWidths.map((w, i) => React.createElement("col", { key: i, style: { width: w } })));
 
     const filterRow = React.createElement("tr", null,
@@ -3977,9 +4106,10 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         React.createElement("td", null, React.createElement("input", { className: "text-input", value: filters.credit, onChange: (e) => updFilter('credit', e.target.value), placeholder: "Search amount" })),
         showPartyFields ? React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: filters.party, onChange: (e) => updFilter('party', e.target.value), placeholder: "Search party" })) : null,
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
-        showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.status, onChange: (e) => updFilter('status', e.target.value) }, React.createElement("option", { value: "" }, "Any"), React.createElement("option", { value: "green" }, "Green"), React.createElement("option", { value: "yellow" }, "Yellow"), React.createElement("option", { value: "none" }, "No status"))) : null,
-        showPartyFields ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null,
-        React.createElement("td", null));
+        // Status is only a FILTER now (row colour already shows it) - it sits above the Note column.
+        React.createElement("td", null, showUpdateFeatures ? React.createElement("select", { className: "select-input", value: filters.status, onChange: (e) => updFilter('status', e.target.value) }, React.createElement("option", { value: "" }, "Status: any"), React.createElement("option", { value: "green" }, "Status: Green"), React.createElement("option", { value: "yellow" }, "Status: Yellow"), React.createElement("option", { value: "none" }, "Status: none")) : null),
+        showUpdateFeatures ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null,
+        React.createElement("td", null, !showUpdateFeatures ? React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear") : null));
 
     const descCellStyle = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const statusBg = { green: 'var(--green-bg)', yellow: 'var(--amber-dim)', none: 'transparent' };
@@ -3996,7 +4126,10 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         if (showPartyFields) {
             cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: e.party || '', disabled: locked, onChange: (ev) => updateEntry(e.id, { party: ev.target.value }), placeholder: "Party name" })));
             cells.push(React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", disabled: locked, style: { width: '100%', textAlign: 'left' }, onClick: () => setMonthModalFor(e.id) }, months.length > 0 ? months.join(', ') : '\u2014 Select \u2014')));
-            cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, disabled: locked, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
+            // Free-text note per entry (never locked, and doesn't affect green/yellow status).
+            cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", value: e.note || '', placeholder: "Description / note", onChange: (ev) => updateEntry(e.id, { note: ev.target.value }) })));
+            if (showUpdateFeatures)
+                cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, disabled: locked, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
         }
         cells.push(React.createElement("td", null, confirmDeleteId === e.id
             ? React.createElement("div", { style: { display: 'flex', gap: 4 } }, React.createElement("button", { className: "btn btn-danger btn-xs", onClick: () => deleteEntry(e.id) }, "Confirm"), React.createElement("button", { className: "btn btn-ghost btn-xs", onClick: () => setConfirmDeleteId(null) }, "Cancel"))
@@ -4005,8 +4138,10 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
     });
 
     const headerCells = ["Date", "Description", "Credit"];
-    if (showPartyFields)
-        headerCells.push("Party", "Month", "Status", "In credit software");
+    if (showUpdateFeatures)
+        headerCells.push("Party", "Month", "Note", "In credit software");
+    else if (showPartyFields)
+        headerCells.push("Party", "Month", "Note");
     headerCells.push("");
 
     const table = React.createElement("div", { style: { overflowX: 'auto', maxWidth: '100%' } }, React.createElement("table", { className: "data-table", style: { tableLayout: 'fixed' } },
@@ -4059,7 +4194,8 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
 
     const parseAndAppend = () => {
         const lines = pasteText.split('\n');
-        const { records, errors } = parseRawBankStatementLines(lines);
+        // BOB pastes one transaction per line; TMB pastes one value per line - different parsers.
+        const { records, errors } = (bank === 'BOB' ? parseBobLines : parseRawBankStatementLines)(lines);
         const added = appendRecords(records, 'Raw paste');
         setParseErrors(errors);
         if (added > 0 || errors.length === 0)
@@ -4077,7 +4213,7 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
 
     const headerActions = React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => setBank(b) }, b)));
 
-    const rawErrorNote = parseErrors.length > 0 ? React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, parseErrors[0]) : null;
+    const rawErrorNote = parseErrors.length > 0 ? React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, parseErrors.slice(0, 4).map((e, i) => React.createElement("div", { key: i, style: { marginTop: i ? 4 : 0 } }, e))) : null;
     const legacyErrorList = legacyErrors.length > 0 ? React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } },
         React.createElement("div", null, `${legacyErrors.length} line(s) couldn't be read. Showing up to 3 examples:`),
         legacyErrors.slice(0, 3).map((e, i) => React.createElement("div", { key: i, style: { marginTop: 4 } }, e))) : null;
@@ -4086,7 +4222,9 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
         React.createElement(PageHeader, { title: "Data Parsing", action: headerActions }),
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 paste raw statement text")),
-            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Paste exactly as copied from the bank site \u2014 one value per line, repeating: Date, Description, (date again if shown), Debit, Credit, Balance, (Raise Dispute if shown). Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + description + balance) are skipped automatically."),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, bank === 'BOB'
+                ? "Paste exactly as copied from the BOB site \u2014 one transaction per line, e.g. \"19-09-2026 19-09-2026 BY CASH 516805 1070884.54Cr\" (Txn date, Value date, Description, Amount, Balance with Cr/Dr). Each row is checked against the neighbouring row's balance, and a warning appears if anything doesn't reconcile. Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + description + balance) are skipped automatically."
+                : "Paste exactly as copied from the bank site \u2014 one value per line, repeating: Date, Description, (date again if shown), Debit, Credit, Balance, (Raise Dispute if shown). Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + description + balance) are skipped automatically."),
             React.createElement("textarea", { className: "text-input", rows: 10, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste raw statement text here, one value per line" }),
             rawErrorNote,
             React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: parseAndAppend }, "Parse and append"))),
