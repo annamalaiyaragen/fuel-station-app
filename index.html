@@ -3893,6 +3893,20 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         showToast('Entry deleted.');
     };
 
+    // One-time cleanup for entries that were completed before green/yellow tracking existed - they
+    // have Party and Month filled in (so they're genuinely done) but never got the update flag set,
+    // showing as yellow even though nothing further needs doing. This only touches rows that are
+    // currently yellow under the normal rules above; it changes no ongoing logic for new entries.
+    const [confirmMarkAll, setConfirmMarkAll] = useState(false);
+    const yellowCount = React.useMemo(() => filteredEntries.filter((e) => rowStatus(e) === 'yellow').length, [filteredEntries]);
+    const markAllYellowAsUpdated = () => {
+        const filteredIds = new Set(filteredEntries.filter((e) => rowStatus(e) === 'yellow').map((e) => e.id));
+        const next = entries.map((e) => filteredIds.has(e.id) ? Object.assign(Object.assign({}, e), { updatedInCreditSoftware: true }) : e);
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: next }));
+        setConfirmMarkAll(false);
+        showToast(`Marked ${yellowCount} entr${yellowCount === 1 ? 'y' : 'ies'} as already updated.`);
+    };
+
     const knownParties = React.useMemo(() => [...new Set(entries.map((e) => e.party).filter(Boolean))].sort(), [entries]);
     const monthOptions = React.useMemo(() => {
         const opts = [];
@@ -3946,6 +3960,7 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
     const headerActions = React.createElement("div", { style: { display: 'flex', gap: 10, alignItems: 'center' } },
         React.createElement("select", { className: "select-input", value: "", onChange: (e) => jumpToMonth(e.target.value) }, React.createElement("option", { value: "" }, "Jump to month\u2026"), availableMonths.map((m) => React.createElement("option", { key: m, value: m }, monthLabel(m)))),
         React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => switchBank(b) }, b))),
+        showPartyFields && yellowCount > 0 && React.createElement("button", { className: "btn btn-secondary", onClick: () => setConfirmMarkAll(true) }, `Mark ${yellowCount} old entr${yellowCount === 1 ? 'y' : 'ies'} as updated`),
         showPartyFields && React.createElement("button", { className: "btn btn-primary", onClick: runUpdate }, "Update"));
 
     const datalistId = 'bs-party-suggestions';
@@ -4010,6 +4025,7 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
 
     return React.createElement("div", { className: "page" },
         React.createElement(PageHeader, { title: "Bank Statement", action: headerActions }),
+        confirmMarkAll && React.createElement(ConfirmBar, { message: `Mark all ${yellowCount} currently-yellow entr${yellowCount === 1 ? 'y' : 'ies'} shown below as already updated? They'll turn green and lock (if locking is on in Settings). This only affects entries that are yellow right now \u2014 new entries still follow the usual Party+Month \u2192 Update flow.`, confirmLabel: "Mark as updated", onConfirm: markAllYellowAsUpdated, onCancel: () => setConfirmMarkAll(false) }),
         partyDatalist,
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Stored ${bank} statement \u2014 ${entries.length} entries total, ${filteredEntries.length} shown`)),
