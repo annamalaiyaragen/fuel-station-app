@@ -873,8 +873,10 @@ function App() {
     const [toast, setToast] = useState(null);
     const [driveReady, setDriveReady] = useState(false);
     const [driveConnected, setDriveConnected] = useState(false);
-    const [syncStatus, setSyncStatus] = useState('idle');
-    const [lastSyncedAt, setLastSyncedAt] = useState(null);
+    const [uploadStatus, setUploadStatus] = useState('idle');
+    const [downloadStatus, setDownloadStatus] = useState('idle');
+    const [lastUploadAt, setLastUploadAt] = useState(null);
+    const [lastDownloadAt, setLastDownloadAt] = useState(null);
     const tokenClientRef = useRef(null);
     const cachedTokenRef = useRef({ token: null, expiresAt: 0 });
     const driveFileIdRef = useRef(null);
@@ -1007,12 +1009,16 @@ function App() {
     async function handleConnected(token, silent) {
         setDriveConnected(true);
         window.localStorage.setItem(LS_DRIVE_FLAG, '1');
-        setSyncStatus('syncing');
+        setDownloadStatus('syncing');
+        let downloadSucceeded = false;
         try {
             const file = await driveFindFile(token);
             if (file) {
                 driveFileIdRef.current = file.id;
                 const cloudData = await driveDownload(token, file.id);
+                downloadSucceeded = true;
+                setDownloadStatus('synced');
+                setLastDownloadAt(new Date());
                 const lastLocalChange = window.localStorage.getItem(LS_LAST_LOCAL_CHANGE);
                 const s = latestStateRef.current;
                 const cloudIsNewer = cloudData.savedAt && (!lastLocalChange || cloudData.savedAt > lastLocalChange);
@@ -1051,23 +1057,32 @@ function App() {
                 persistBankRecon(mergedPayload.bankRecon);
                 persistDsrData(mergedPayload.dsrData);
                 persistTtData(mergedPayload.ttData);
+                setUploadStatus('syncing');
                 await driveUpdate(token, file.id, mergedPayload);
                 window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, mergedPayload.savedAt);
+                setUploadStatus('synced');
+                setLastUploadAt(new Date());
                 if (!silent)
                     showToast('Synced \u2014 merged with Google Drive (no dates were discarded from either side)');
             }
             else {
+                downloadSucceeded = true; // nothing on Drive yet, but the check itself succeeded
+                setDownloadStatus('synced');
+                setLastDownloadAt(new Date());
+                setUploadStatus('syncing');
                 const payload = buildPayload();
                 const created = await driveCreate(token, payload);
                 driveFileIdRef.current = created.id;
                 window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
+                setUploadStatus('synced');
+                setLastUploadAt(new Date());
             }
-            setSyncStatus('synced');
-            setLastSyncedAt(new Date());
         }
         catch (e) {
             console.error('[Drive sync error]', e);
-            setSyncStatus('error');
+            if (!downloadSucceeded)
+                setDownloadStatus('error');
+            setUploadStatus('error');
         }
     }
     const connectDrive = async () => {
@@ -1113,12 +1128,12 @@ function App() {
         };
         reader.readAsText(file);
     };
-    const disconnectDrive = () => { setDriveConnected(false); driveFileIdRef.current = null; setSyncStatus('idle'); window.localStorage.removeItem(LS_DRIVE_FLAG); showToast('Disconnected from Google Drive'); };
+    const disconnectDrive = () => { setDriveConnected(false); driveFileIdRef.current = null; setUploadStatus('idle'); setDownloadStatus('idle'); window.localStorage.removeItem(LS_DRIVE_FLAG); showToast('Disconnected from Google Drive'); };
     const pushNow = useCallback(async () => {
         if (!driveConnected || driveSyncInFlightRef.current)
             return;
         driveSyncInFlightRef.current = true;
-        setSyncStatus('syncing');
+        setUploadStatus('syncing');
         try {
             // reuses a cached token when still valid \u2014 only asks Google for a fresh one when it's
             // actually expired, avoiding a popup/flash on every background save
@@ -1126,11 +1141,11 @@ function App() {
             const payload = buildPayload();
             await driveUpdateWithRecovery(token, driveFileIdRef, payload, DRIVE_FILE_NAME);
             window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
-            setSyncStatus('synced');
-            setLastSyncedAt(new Date());
+            setUploadStatus('synced');
+            setLastUploadAt(new Date());
         }
         catch (e) {
-            setSyncStatus(navigator.onLine ? 'error' : 'offline');
+            setUploadStatus(navigator.onLine ? 'error' : 'offline');
         }
         finally {
             driveSyncInFlightRef.current = false;
@@ -1176,13 +1191,17 @@ function App() {
         if (!driveConnected || bankStatementsSyncInFlightRef.current)
             return;
         bankStatementsSyncInFlightRef.current = true;
+        setUploadStatus('syncing');
         try {
             const token = await getCachedOrFreshToken();
             const payload = { version: 1, savedAt: new Date().toISOString(), bankStatements: latestStateRef.current.bankStatements };
             await driveUpdateWithRecovery(token, bankStatementsDriveFileIdRef, payload, DRIVE_BANK_STATEMENTS_FILE_NAME);
+            setUploadStatus('synced');
+            setLastUploadAt(new Date());
         }
         catch (e) {
             console.error('[Bank Statements push error]', e);
+            setUploadStatus(navigator.onLine ? 'error' : 'offline');
         }
         finally {
             bankStatementsSyncInFlightRef.current = false;
@@ -1204,11 +1223,14 @@ function App() {
         if (!driveConnected)
             return;
         (async () => {
+            setDownloadStatus('syncing');
             try {
                 const token = await getCachedOrFreshToken();
                 const file = await driveFindFile(token, DRIVE_BANK_STATEMENTS_FILE_NAME);
                 if (!file) {
                     bankStatementsDriveFileIdRef.current = null;
+                    setDownloadStatus('synced');
+                    setLastDownloadAt(new Date());
                     return;
                 }
                 bankStatementsDriveFileIdRef.current = file.id;
@@ -1232,9 +1254,12 @@ function App() {
                     mergedStatements[bankKey] = merged;
                 });
                 persistBankStatements(mergedStatements);
+                setDownloadStatus('synced');
+                setLastDownloadAt(new Date());
             }
             catch (e) {
                 console.error('[Bank Statements pull error]', e);
+                setDownloadStatus(navigator.onLine ? 'error' : 'offline');
             }
         })();
         // eslint-disable-next-line
@@ -1349,7 +1374,7 @@ function App() {
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
     }
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, syncStatus, lastSyncedAt, checkForUpdates }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }));
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }));
 }
 function CheckUpdatesDialog({ state, onUpdate, onClose }) {
     if (!state)
@@ -1379,7 +1404,7 @@ function CheckUpdatesDialog({ state, onUpdate, onClose }) {
         React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: onClose }, "Close")));
     return ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, modalBox), document.body);
 }
-function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyncedAt, checkForUpdates }) {
+function Sidebar({ tab, setTab, stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates }) {
     const items = [
         { id: 'dashboard', label: 'Dashboard', Icon: IconDash },
         { id: 'ms', label: 'MS Daily', Icon: IconClip },
@@ -1395,9 +1420,24 @@ function Sidebar({ tab, setTab, stationName, driveConnected, syncStatus, lastSyn
         { id: 'master', label: 'Master Data', Icon: IconWallet },
         { id: 'settings', label: 'Settings', Icon: IconSettings },
     ];
-    const syncLabel = !driveConnected ? 'Local only' : syncStatus === 'syncing' ? 'Syncing\u2026' : syncStatus === 'error' ? 'Sync error' : syncStatus === 'offline' ? 'Offline \u2014 will retry' : lastSyncedAt ? `Synced ${lastSyncedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : 'Connected';
-    const syncTone = !driveConnected ? 'muted' : syncStatus === 'synced' ? 'green' : syncStatus === 'syncing' ? 'amber' : 'red';
-    return React.createElement("nav", { className: "sidebar no-print" }, React.createElement("div", { className: "brand" }, React.createElement("div", { className: "brand-mark" }, React.createElement(IconFuel, { size: 20 })), React.createElement("div", { className: "brand-text" }, React.createElement("div", { className: "brand-name" }, stationName), React.createElement("div", { className: "brand-sub" }, "Station Management"))), React.createElement("div", { className: "nav-items" }, items.map((it) => React.createElement("button", { key: it.id, className: `nav-item ${tab === it.id ? 'active' : ''}`, onClick: () => setTab(it.id) }, React.createElement(it.Icon, { size: 17 }), React.createElement("span", null, it.label)))), React.createElement("div", { className: "sync-indicator", onClick: checkForUpdates, title: "Check for updates" }, React.createElement("span", { className: `sync-dot sync-dot-${syncTone}` }), syncLabel), React.createElement("div", { className: "sidebar-foot" }, "Runs fully offline in this browser.", React.createElement("br"), "Your data stays under your control."));
+    const statusLabel = (status, lastAt, prefix) => {
+        if (!driveConnected) return prefix + ': Local only';
+        if (status === 'syncing') return prefix + ': Syncing\u2026';
+        if (status === 'error') return prefix + ': Error';
+        if (status === 'offline') return prefix + ': Offline \u2014 will retry';
+        if (lastAt) return prefix + ': ' + lastAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+        return prefix + ': Connected';
+    };
+    const statusTone = (status) => {
+        if (!driveConnected) return 'muted';
+        if (status === 'synced') return 'green';
+        if (status === 'syncing') return 'amber';
+        return 'red';
+    };
+    return React.createElement("nav", { className: "sidebar no-print" }, React.createElement("div", { className: "brand" }, React.createElement("div", { className: "brand-mark" }, React.createElement(IconFuel, { size: 20 })), React.createElement("div", { className: "brand-text" }, React.createElement("div", { className: "brand-name" }, stationName), React.createElement("div", { className: "brand-sub" }, "Station Management"))), React.createElement("div", { className: "nav-items" }, items.map((it) => React.createElement("button", { key: it.id, className: `nav-item ${tab === it.id ? 'active' : ''}`, onClick: () => setTab(it.id) }, React.createElement(it.Icon, { size: 17 }), React.createElement("span", null, it.label)))),
+        React.createElement("div", { className: "sync-indicator", onClick: checkForUpdates, title: "Check for updates", style: { marginBottom: 0, paddingBottom: 2 } }, React.createElement("span", { className: `sync-dot sync-dot-${statusTone(uploadStatus)}` }), statusLabel(uploadStatus, lastUploadAt, 'Upload')),
+        React.createElement("div", { className: "sync-indicator", onClick: checkForUpdates, title: "Check for updates", style: { borderTop: 'none', marginTop: 0, paddingTop: 0 } }, React.createElement("span", { className: `sync-dot sync-dot-${statusTone(downloadStatus)}` }), statusLabel(downloadStatus, lastDownloadAt, 'Download')),
+        React.createElement("div", { className: "sidebar-foot" }, "Runs fully offline in this browser.", React.createElement("br"), "Your data stays under your control."));
 }
 function Dashboard({ config, msLog, dieselLog, dieselData, dayClosing, advance, showToast, setTab }) {
     const [viewDate, setViewDate] = useState(yesterdayStr());
@@ -1767,6 +1807,8 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
     const lubeMrp = effective.mrp;
     const lubeReplenishQty = Number(lube.replenishQty) || 0;
     const sale = Number(entry === null || entry === void 0 ? void 0 : entry.saleQty) || 0;
+    const internalUse = Number(entry === null || entry === void 0 ? void 0 : entry.internalUseQty) || 0;
+    const bypassGodown = !!(entry === null || entry === void 0 ? void 0 : entry.bypassGodown);
     const receiptActive = !!(entry === null || entry === void 0 ? void 0 : entry.receiptOn);
     const receiptQty = receiptActive ? (Number(entry === null || entry === void 0 ? void 0 : entry.receipt) || 0) : 0;
     const batchInvoicePrice = (entry === null || entry === void 0 ? void 0 : entry.batchInvoicePrice) !== undefined && (entry === null || entry === void 0 ? void 0 : entry.batchInvoicePrice) !== '' ? Number(entry.batchInvoicePrice) : lubeInvoicePrice;
@@ -1783,7 +1825,13 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
     // once both godown and display are fully sold through, so the older/cheaper stock always sells first.
     const useNewLubeLogic = dateStr >= LUBE_THREE_TIER_CUTOVER;
     if (receiptActive && receiptQty > 0) {
-        if (useNewLubeLogic) {
+        if (bypassGodown) {
+            // A byproduct of internal use (e.g. an empty barrel returned) isn't a purchased lot
+            // with its own price tier to protect - it should just show up as available immediately,
+            // the same way it always did before the godown/holding split existed.
+            base += receiptQty;
+        }
+        else if (useNewLubeLogic) {
             if (isNewPriceTier)
                 held = [...held, { qty: receiptQty, invoicePrice: batchInvoicePrice, mrp: batchMrp }];
             else
@@ -1810,6 +1858,24 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
             base += replenished;
         else
             batches = [...batches, { qty: replenished, invoicePrice: godownPrice.invoicePrice, mrp: godownPrice.mrp }];
+    }
+    // Internal use (e.g. a barrel consumed for the station's own use, not sold to a customer) depletes
+    // stock the same way a sale would, but is deliberately kept separate from priceTotal below - its
+    // price exists only for audit/valuation purposes, not as Diesel Daily revenue.
+    let remainingInternal = internalUse;
+    const baseInternalTaken = Math.min(Math.max(base, 0), remainingInternal);
+    base -= baseInternalTaken;
+    remainingInternal -= baseInternalTaken;
+    for (let i = 0; i < batches.length && remainingInternal > 0; i++) {
+        const b = batches[i];
+        const take = Math.min(b.qty, remainingInternal);
+        b.qty -= take;
+        remainingInternal -= take;
+    }
+    batches = batches.filter((b) => b.qty > 0.0001);
+    if (remainingInternal > 0) {
+        base -= remainingInternal;
+        remainingInternal = 0;
     }
     let remainingSale = sale;
     const baseSold = Math.min(Math.max(base, 0), remainingSale);
@@ -1995,11 +2061,12 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         const barrelLube = config.lubes.find((l) => l.id === lubeId);
         const emptyId = barrelLube === null || barrelLube === void 0 ? void 0 : barrelLube.emptyBarrelLubeId;
         const current = ((_a = rec.lubeEntries) === null || _a === void 0 ? void 0 : _a[lubeId]) || {};
-        const nextSaleQty = (Number(current.saleQty) || 0) + 1;
-        let nextLubeEntries = Object.assign(Object.assign({}, rec.lubeEntries), { [lubeId]: Object.assign(Object.assign({}, current), { saleQty: nextSaleQty }) });
+        const nextInternalUseQty = (Number(current.internalUseQty) || 0) + 1;
+        const nextEvents = [...(current.barrelUseEvents || []), { litres, msLubeId }];
+        let nextLubeEntries = Object.assign(Object.assign({}, rec.lubeEntries), { [lubeId]: Object.assign(Object.assign({}, current), { internalUseQty: nextInternalUseQty, barrelUseEvents: nextEvents }) });
         if (emptyId) {
             const emptyCurrent = ((_b = rec.lubeEntries) === null || _b === void 0 ? void 0 : _b[emptyId]) || {};
-            nextLubeEntries = Object.assign(Object.assign({}, nextLubeEntries), { [emptyId]: Object.assign(Object.assign({}, emptyCurrent), { receiptOn: true, receipt: (Number(emptyCurrent.receipt) || 0) + 1 }) });
+            nextLubeEntries = Object.assign(Object.assign({}, nextLubeEntries), { [emptyId]: Object.assign(Object.assign({}, emptyCurrent), { receiptOn: true, receipt: (Number(emptyCurrent.receipt) || 0) + 1, bypassGodown: true }) });
         }
         updateRec({
             lubeEntries: nextLubeEntries,
@@ -2007,6 +2074,32 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         });
         const emptyLube = emptyId ? config.lubes.find((l) => l.id === emptyId) : null;
         showToast(`1 barrel deducted \u2014 ${fmtNum(litres)}L added to MS godown${emptyLube ? `, 1 added to ${emptyLube.name} stock` : ''}. Click Save below for this to reach Day Closing.`);
+    };
+    const undoLastBarrelUse = (lubeId) => {
+        var _a, _b, _c, _d;
+        const barrelLube = config.lubes.find((l) => l.id === lubeId);
+        const emptyId = barrelLube === null || barrelLube === void 0 ? void 0 : barrelLube.emptyBarrelLubeId;
+        const current = ((_a = rec.lubeEntries) === null || _a === void 0 ? void 0 : _a[lubeId]) || {};
+        const events = current.barrelUseEvents || [];
+        if (events.length === 0) {
+            showToast('No barrel use recorded today for this item to undo.', 'red');
+            return;
+        }
+        const last = events[events.length - 1];
+        const nextEvents = events.slice(0, -1);
+        const nextInternalUseQty = Math.max(0, (Number(current.internalUseQty) || 0) - 1);
+        let nextLubeEntries = Object.assign(Object.assign({}, rec.lubeEntries), { [lubeId]: Object.assign(Object.assign({}, current), { internalUseQty: nextInternalUseQty, barrelUseEvents: nextEvents }) });
+        if (emptyId) {
+            const emptyCurrent = ((_b = rec.lubeEntries) === null || _b === void 0 ? void 0 : _b[emptyId]) || {};
+            const nextReceipt = Math.max(0, (Number(emptyCurrent.receipt) || 0) - 1);
+            nextLubeEntries = Object.assign(Object.assign({}, nextLubeEntries), { [emptyId]: Object.assign(Object.assign({}, emptyCurrent), { receipt: nextReceipt, receiptOn: nextReceipt > 0 }) });
+        }
+        updateRec({
+            lubeEntries: nextLubeEntries,
+            msGodownTransfers: Object.assign(Object.assign({}, rec.msGodownTransfers), { [last.msLubeId]: Math.max(0, (Number((_c = rec.msGodownTransfers) === null || _c === void 0 ? void 0 : _c[last.msLubeId]) || 0) - last.litres) })
+        });
+        const emptyLube = emptyId ? config.lubes.find((l) => l.id === emptyId) : null;
+        showToast(`Undone \u2014 ${fmtNum(last.litres)}L removed from MS godown${emptyLube ? `, 1 removed from ${emptyLube.name} stock` : ''}. Click Save below for this to reach Day Closing.`);
     };
     const doSave = () => {
         var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
@@ -2108,8 +2201,9 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         const batchSummary = line.openingBatches.length === 0 ? '\u2014' : line.openingBatches.map((b) => `${fmtNum(b.qty)} @ ${fmt(b.mrp)}`).join(', ');
         const heldSummary = (line.closingHeld && line.closingHeld.length > 0) ? line.closingHeld.map((b) => `${fmtNum(b.qty)} @ ${fmt(b.mrp)}`).join(', ') : null;
         const receiptToday = entry.receiptOn && (Number(entry.receipt) || 0) > 0;
+        const internalUseToday = (Number(entry.internalUseQty) || 0) > 0;
         const needsRestock = line.closingBalance <= 0 && line.closingGodown > 0;
-        return React.createElement("tr", { key: l.id }, React.createElement("td", null, l.name, heldSummary && React.createElement("div", { style: { fontSize: 11, color: 'var(--text-muted)', marginTop: 2 } }, `Holding (different price, waiting): ${heldSummary}`), receiptToday && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(entry.receipt)} received @ ${fmt((_b = entry.batchInvoicePrice) !== null && _b !== void 0 ? _b : l.invoicePrice)}`, React.createElement("button", { className: "icon-btn", title: "Undo this receipt", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => updateRec({ lubeEntries: Object.assign(Object.assign({}, rec.lubeEntries), { [l.id]: Object.assign(Object.assign({}, rec.lubeEntries[l.id]), { receiptOn: false, receipt: '', batchInvoicePrice: undefined, batchMrp: undefined }) }) }) }, "\u2715")), line.replenished > 0 && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(line.replenished)} restocked from godown`, React.createElement("button", { className: "icon-btn", title: "Undo last restock", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => setLubeEntry(l.id, 'manualReplenishCount', Math.max(0, (Number(entry.manualReplenishCount) || 0) - 1)) }, "\u2715")), l.feedsMsLubeId && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 }, onClick: () => setBarrelModal({ lubeId: l.id }) }, "Barrel used"))), React.createElement("td", { className: "mono" }, fmtNum(line.closingGodown)), React.createElement("td", { className: "mono" }, fmtNum(line.opening), " ", React.createElement("span", { style: { color: 'var(--text-muted)', fontSize: 11 } }, `(base @ ${fmt(l.mrp || l.invoicePrice)})`)), React.createElement("td", { style: { fontSize: 12, color: 'var(--text-secondary)' } }, batchSummary), React.createElement("td", null, React.createElement(NumInput, { value: (_c = entry.saleQty) !== null && _c !== void 0 ? _c : '', onChange: (v) => setLubeEntry(l.id, 'saleQty', v) })), React.createElement("td", { className: "mono" }, fmtNum(line.closingBalance), needsRestock && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 },
+        return React.createElement("tr", { key: l.id }, React.createElement("td", null, l.name, heldSummary && React.createElement("div", { style: { fontSize: 11, color: 'var(--text-muted)', marginTop: 2 } }, `Holding (different price, waiting): ${heldSummary}`), receiptToday && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(entry.receipt)} received @ ${fmt((_b = entry.batchInvoicePrice) !== null && _b !== void 0 ? _b : l.invoicePrice)}`, React.createElement("button", { className: "icon-btn", title: "Undo this receipt", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => updateRec({ lubeEntries: Object.assign(Object.assign({}, rec.lubeEntries), { [l.id]: Object.assign(Object.assign({}, rec.lubeEntries[l.id]), { receiptOn: false, receipt: '', batchInvoicePrice: undefined, batchMrp: undefined }) }) }) }, "\u2715")), internalUseToday && React.createElement(Pill, { tone: "muted" }, `\u2212${fmtNum(entry.internalUseQty)} used internally (not a sale)`, React.createElement("button", { className: "icon-btn", title: "Undo last barrel use", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => undoLastBarrelUse(l.id) }, "\u2715")), line.replenished > 0 && React.createElement(Pill, { tone: "amber" }, `+${fmtNum(line.replenished)} restocked from godown`, React.createElement("button", { className: "icon-btn", title: "Undo last restock", style: { marginLeft: 6, padding: '0 4px' }, onClick: () => setLubeEntry(l.id, 'manualReplenishCount', Math.max(0, (Number(entry.manualReplenishCount) || 0) - 1)) }, "\u2715")), l.feedsMsLubeId && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 }, onClick: () => setBarrelModal({ lubeId: l.id }) }, "Barrel used"))), React.createElement("td", { className: "mono" }, fmtNum(line.closingGodown)), React.createElement("td", { className: "mono" }, fmtNum(line.opening), " ", React.createElement("span", { style: { color: 'var(--text-muted)', fontSize: 11 } }, `(base @ ${fmt(l.mrp || l.invoicePrice)})`)), React.createElement("td", { style: { fontSize: 12, color: 'var(--text-secondary)' } }, batchSummary), React.createElement("td", null, React.createElement(NumInput, { value: (_c = entry.saleQty) !== null && _c !== void 0 ? _c : '', onChange: (v) => setLubeEntry(l.id, 'saleQty', v) })), React.createElement("td", { className: "mono" }, fmtNum(line.closingBalance), needsRestock && React.createElement("div", null, React.createElement("button", { className: "btn btn-secondary btn-xs", style: { marginTop: 4 },
             onClick: () => setLubeEntry(l.id, 'manualReplenishCount', (Number(entry.manualReplenishCount) || 0) + 1) }, `Restock +${fmtNum(l.replenishQty)}`))), React.createElement("td", { className: "mono" }, fmt(line.priceTotal)));
     })))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Lubes grand total"), React.createElement("span", null, fmt(fin.lubeAmt)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "denom-total-row", style: { marginBottom: 10 } }, React.createElement("span", null, "Combined grand total (diesel + lubes)"), React.createElement("span", null, fmt(fin.combinedTotal))), React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cash reconciliation & shift details"), React.createElement(Pill, { tone: rec.saved ? 'green' : 'muted' }, rec.saved ? 'Saved' : 'Not saved')), React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier name", value: rec.cashier, onChange: (v) => updateRec({ cashier: v }), employees: config.employees, fieldKey: 'diesel_cashier', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy name", value: rec.pumpBoy, onChange: (v) => updateRec({ pumpBoy: v }), employees: config.employees, fieldKey: 'diesel_pumpboy', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Credit sales" }, React.createElement(NumInput, { value: rec.creditSales, onChange: (v) => updateRec({ creditSales: v }) })), React.createElement(Field, { label: "Credit recovery" }, React.createElement(NumInput, { value: rec.creditRecovery, onChange: (v) => updateRec({ creditRecovery: v }) })), React.createElement(Field, { label: "PhonePe" }, React.createElement(PhonepeButton, { detail: rec.phonepeDetail, onSave: (d) => updateRec({ phonepeDetail: d }), type: "phonepe", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate, context: "diesel" })), React.createElement(Field, { label: "Paytm (all terminals)" }, React.createElement(MultiTerminalButton, { detailsMap: rec.paytmDetails, onSave: (d) => updateRec({ paytmDetails: d }), type: "paytm", terminals: config.terminals, msLog, dieselLog, currentDate: entryDate })), React.createElement(Field, { label: "HP Pay / DTPlus" }, React.createElement(NumInput, { value: rec.hpPay, onChange: (v) => updateRec({ hpPay: v }) }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.personShiftChangeOn, onChange: (e) => updateRec({ personShiftChangeOn: e.target.checked }) }), " Shift change (person changed mid-day) \u2014 splits day pay between two people"), rec.personShiftChangeOn && React.createElement("div", { className: "form-grid" }, React.createElement(NameAutocomplete, { label: "Cashier 2 (2nd half)", value: rec.cashier2, onChange: (v) => updateRec({ cashier2: v }), employees: config.employees, fieldKey: 'diesel_cashier2', suggestFor, setSuggestFor }), React.createElement(NameAutocomplete, { label: "Pump boy 2 (2nd half)", value: rec.pumpBoy2, onChange: (v) => updateRec({ pumpBoy2: v }), employees: config.employees, fieldKey: 'diesel_pumpboy2', suggestFor, setSuggestFor }), React.createElement(Field, { label: "Split (% to 1st person)", hint: "Default 50/50 \u2014 adjust for a half-shift vs. a different split" }, React.createElement(NumInput, { value: (_d = rec.shiftSplitPercent) !== null && _d !== void 0 ? _d : '', onChange: (v) => updateRec({ shiftSplitPercent: v }), placeholder: "50" }))), React.createElement("label", { className: "toggle", style: { margin: '4px 0 10px' } }, React.createElement("input", { type: "checkbox", checked: !!rec.airmanShiftChangeOn, onChange: (e) => updateRec({ airmanShiftChangeOn: e.target.checked }) }), " Air duty shift change (multiple air-men today) \u2014 splits attendance between two people"), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Airman" }, React.createElement("select", { className: "select-input", value: rec.airman || '', onChange: (e) => updateRec({ airman: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), config.employees.filter((emp) => emp.airOn).map((emp) => React.createElement("option", { key: emp.id, value: emp.name }, emp.name)))), rec.airmanShiftChangeOn && React.createElement(Field, { label: "Airman 2" }, React.createElement("select", { className: "select-input", value: rec.airman2 || '', onChange: (e) => updateRec({ airman2: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), config.employees.filter((emp) => emp.airOn).map((emp) => React.createElement("option", { key: emp.id, value: emp.name }, emp.name)))), rec.airmanShiftChangeOn && React.createElement(Field, { label: "Split (% to 1st air-man)", hint: "Default 50/50" }, React.createElement(NumInput, { value: rec.airmanShiftSplitPercent !== undefined && rec.airmanShiftSplitPercent !== null ? rec.airmanShiftSplitPercent : '', onChange: (v) => updateRec({ airmanShiftSplitPercent: v }), placeholder: "50" }))), React.createElement("div", { className: "card-head" }, React.createElement("h4", null, "Expenses"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addExpense }, React.createElement(IconPlus, { size: 14 }), " Add expense")), (rec.expenses || []).map((e, idx) => { const expType = e.type || 'misc'; const filteredLubes = fin.shopLubes.filter((l) => /waste|dist/i.test(l.name)); const lubeOptions = filteredLubes.length > 0 ? filteredLubes : fin.shopLubes; return React.createElement("div", { key: idx, className: "form-grid", style: { alignItems: 'flex-end' } },
   React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: expType, onChange: (ev) => updExpense(idx, { type: ev.target.value, employeeName: '', lubeId: '' }) },
@@ -2177,7 +2271,7 @@ function DieselDenomBlock({ denom, onSave }) {
     useEffect(() => { setTmp(denom || Object.assign({}, emptyDenom)); }, [open]);
     return React.createElement(React.Fragment, null, React.createElement("button", { className: "btn btn-secondary", onClick: () => setOpen(true) }, denomEntered(denom) ? 'Edit diesel denomination' : 'Enter diesel denomination'), open && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, "Diesel denomination"), React.createElement("div", { className: "denom-grid" }, DENOM_ROWS.map(([key, lbl]) => React.createElement(Field, { key, label: lbl }, React.createElement(NumInput, { value: tmp[key], onChange: (v) => setTmp(Object.assign(Object.assign({}, tmp), { [key]: v })) })))), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setOpen(false) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: () => { onSave(tmp); setOpen(false); } }, "Save")))));
 }
-function CloudBackupPanel({ configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }) {
+function CloudBackupPanel({ configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }) {
     if (!configuredClientId)
         return React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cloud Backup (Google Drive)")), React.createElement("div", { className: "empty-hint" }, "Not set up yet \u2014 paste your Google OAuth Client ID into GOOGLE_CLIENT_ID near the top of the script."));
     const localBreakdown = perCategoryLatestDates({ msLog, dieselLog, dayClosing, advance, salaryRuns });
@@ -2195,9 +2289,14 @@ function CloudBackupPanel({ configuredClientId, driveReady, driveConnected, sync
             React.createElement("thead", null, React.createElement("tr", null, ["Category", "This device", "Cloud"].map((h) => React.createElement("th", { key: h }, h)))),
             React.createElement("tbody", null, ...detailRows)),
         !cloudBreakdown && React.createElement("div", { className: "empty-hint" }, "Click \"Check for updates\" to compare against what's on Drive.")) : null;
-    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cloud Backup (Google Drive)"), driveConnected && React.createElement(Pill, { tone: syncStatus === 'synced' ? 'green' : syncStatus === 'syncing' ? 'amber' : 'red' }, syncStatus === 'synced' ? 'Synced' : syncStatus === 'syncing' ? 'Syncing\u2026' : syncStatus === 'offline' ? 'Offline' : 'Error')), !driveConnected
+    const pillTone = (status) => status === 'synced' ? 'green' : status === 'syncing' ? 'amber' : 'red';
+    const pillLabel = (status) => status === 'synced' ? 'Synced' : status === 'syncing' ? 'Syncing\u2026' : status === 'offline' ? 'Offline' : 'Error';
+    const statusPills = driveConnected && React.createElement("div", { style: { display: 'flex', gap: 6 } },
+        React.createElement(Pill, { tone: pillTone(uploadStatus) }, "Upload: " + pillLabel(uploadStatus)),
+        React.createElement(Pill, { tone: pillTone(downloadStatus) }, "Download: " + pillLabel(downloadStatus)));
+    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Cloud Backup (Google Drive)"), statusPills), !driveConnected
         ? React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, "Connect Google Drive to back up automatically and sync across devices."), React.createElement("button", { className: "btn btn-primary", disabled: !driveReady, onClick: connectDrive }, "Connect Google Drive"))
-        : React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, lastSyncedAt ? `Last backed up ${lastSyncedAt.toLocaleString('en-IN')}.` : 'Not backed up yet.'), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-secondary", onClick: pushNow }, React.createElement(IconSave, { size: 14 }), " Backup Now"), React.createElement("button", { className: "btn btn-ghost", onClick: disconnectDrive }, "Disconnect"))), syncDetailsSection);
+        : React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, lastUploadAt ? `Last uploaded ${lastUploadAt.toLocaleString('en-IN')}.` : 'Not uploaded yet.'), React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, lastDownloadAt ? `Last downloaded ${lastDownloadAt.toLocaleString('en-IN')}.` : 'Not downloaded yet.'), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-secondary", onClick: pushNow }, React.createElement(IconSave, { size: 14 }), " Backup Now"), React.createElement("button", { className: "btn btn-ghost", onClick: disconnectDrive }, "Disconnect"))), syncDetailsSection);
 }
 function MasterDataGate(props) {
     const [unlocked, setUnlocked] = useState(false);
@@ -2331,8 +2430,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     }), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => addTerminal('paytm') }, React.createElement(IconPlus, { size: 14 }), " Add Paytm terminal")), sub === 'tanks' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Tanks"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addTank }, React.createElement(IconPlus, { size: 14 }), " Add Tank")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Group nozzles (meters/diesel points) into the physical tank they draw from \u2014 this feeds the Daily Stock Register report. Two tanks can hold the same grade (e.g. MS1 and MS2)."), (local.tanks || []).map((t, idx) => {
         const nozzleOptions = t.productId === 'p_diesel' ? local.dieselPoints.map((p) => ({ id: p.id, label: p.label })) : local.meters.filter((m) => m.productId === t.productId).map((m) => ({ id: m.id, label: m.label }));
         return React.createElement("div", { key: t.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: t.name, onChange: (e) => updTank(idx, { name: e.target.value }) }), React.createElement("select", { className: "select-input", style: { width: 140 }, value: t.productId, onChange: (e) => updTank(idx, { productId: e.target.value, nozzleIds: [] }) }, local.products.map((p) => React.createElement("option", { key: p.id, value: p.id }, p.name))), React.createElement("button", { className: "icon-btn", onClick: () => removeTank(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { style: { fontSize: 12, color: 'var(--text-muted)', margin: '6px 0 4px' } }, "Nozzles feeding this tank:"), React.createElement("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, nozzleOptions.map((n) => React.createElement("label", { key: n.id, className: "toggle" }, React.createElement("input", { type: "checkbox", checked: (t.nozzleIds || []).includes(n.id), onChange: () => toggleTankNozzle(idx, n.id) }), " ", n.label))));
-    })), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across. \"Empty barrel item\" adds 1 to that item's stock automatically whenever Barrel Used is clicked for this lube."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Show in Inventory report", "Feeds MS item", "Avg. barrel volume", "Empty barrel item", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: l.includeInInventory !== false, onChange: (e) => updLube(idx, { includeInInventory: e.target.checked }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, l.feedsMsLubeId ? React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.emptyBarrelLubeId || '', onChange: (e) => updLube(idx, { emptyBarrelLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.id !== l.id && !x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name))) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 }))))
-, React.createElement("div", { className: "card" },
+    })), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across. \"Empty barrel item\" adds 1 to that item's stock automatically whenever Barrel Used is clicked for this lube."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Show in Inventory report", "Feeds MS item", "Avg. barrel volume", "Empty barrel item", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: l.includeInInventory !== false, onChange: (e) => updLube(idx, { includeInInventory: e.target.checked }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, l.feedsMsLubeId ? React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.emptyBarrelLubeId || '', onChange: (e) => updLube(idx, { emptyBarrelLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.id !== l.id && !x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name))) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 })))))))), React.createElement("div", { className: "card" },
   React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Correct lube stock")),
   React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set the correct Display and Godown quantities as of a specific date \u2014 everything after that date recalculates automatically, with no need to revisit each day in between."),
   React.createElement("div", { className: "form-grid" },
@@ -2346,8 +2444,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     correctingLubeId && React.createElement(Field, { label: "Godown MRP (optional, only used with the price above)" }, React.createElement(NumInput, { value: correctionDraft.godownMrp, onChange: (v) => setCorrectionDraft(Object.assign(Object.assign({}, correctionDraft), { godownMrp: v })) }))),
   correctingLubeId && React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } },
     React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => saveCorrection(local.lubes.findIndex((l) => l.id === correctingLubeId)) }, "Save correction"),
-    React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setCorrectingLubeId(null) }, "Cancel")))
-, React.createElement("div", { className: "card" },
+    React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setCorrectingLubeId(null) }, "Cancel"))), React.createElement("div", { className: "card" },
   React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Price changes")),
   React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set a new Invoice price / MRP effective from a specific date \u2014 sales before that date keep using whichever price was active at the time; sales from that date onward use the new price."),
   React.createElement("div", { className: "form-grid" },
@@ -2361,7 +2458,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     "Existing price changes: ", (local.lubes.find((l) => l.id === priceLubeId).priceHistory || []).map((p) => `${p.effectiveFrom} \u2192 Rs.${p.invoicePrice}/Rs.${p.mrp}`).join(', ')),
   priceLubeId && React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } },
     React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => savePriceChange(local.lubes.findIndex((l) => l.id === priceLubeId)) }, "Save price change"),
-    React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setPriceLubeId(null) }, "Cancel")))))))), sub === 'opening' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Opening Readings (first-time setup)")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Only used when a meter or diesel point has no previous day's reading yet \u2014 set these once when you start using the app."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "MS / Power meters"), React.createElement("div", { className: "form-grid", style: { marginBottom: 14 } }, local.meters.map((m) => {
+    React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setPriceLubeId(null) }, "Cancel")))), sub === 'opening' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Opening Readings (first-time setup)")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Only used when a meter or diesel point has no previous day's reading yet \u2014 set these once when you start using the app."), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "MS / Power meters"), React.createElement("div", { className: "form-grid", style: { marginBottom: 14 } }, local.meters.map((m) => {
         var _a, _b;
         return React.createElement(Field, { key: m.id, label: m.label }, React.createElement(NumInput, { value: (_b = (_a = local.meterOpeningReadings) === null || _a === void 0 ? void 0 : _a[m.id]) !== null && _b !== void 0 ? _b : '', onChange: (v) => setLocal((c) => (Object.assign(Object.assign({}, c), { meterOpeningReadings: Object.assign(Object.assign({}, c.meterOpeningReadings), { [m.id]: v }) }))) }));
     })), React.createElement("div", { style: { fontWeight: 500, marginBottom: 8 } }, "Diesel points"), React.createElement("div", { className: "form-grid" }, local.dieselPoints.map((p) => {
@@ -3339,7 +3436,7 @@ function computeInventoryForMonth(config, msLog, dieselLog, dieselData, dayClosi
             const e = (_b = (_a = dieselData[d]) === null || _a === void 0 ? void 0 : _a.lubeEntries) === null || _b === void 0 ? void 0 : _b[l.id];
             if (e) {
                 purchases += Number(e.receipt) || 0;
-                recordedSales += Number(e.saleQty) || 0;
+                recordedSales += (Number(e.saleQty) || 0) + (Number(e.internalUseQty) || 0);
             }
             const dlog = dieselLog.find((r) => r.date === d);
             const detail = (_c = dlog === null || dlog === void 0 ? void 0 : dlog.lubeBatchDetail) === null || _c === void 0 ? void 0 : _c[l.id];
@@ -4241,7 +4338,7 @@ function SettingsGate(props) {
         return React.createElement("div", { className: "page" }, React.createElement("div", { style: { margin: 'auto', maxWidth: 380 } }, React.createElement(PasswordGate, { onUnlock: () => setUnlocked(true) })));
     return React.createElement(SettingsTab, props);
 }
-function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts, persistMsLog, persistDieselData, persistDieselLog, persistDayClosing, persistAdvance, persistSalaryRuns, persistBankRecon, showToast, configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns, exportData, importData, theme, setTheme }) {
+function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts, persistMsLog, persistDieselData, persistDieselLog, persistDayClosing, persistAdvance, persistSalaryRuns, persistBankRecon, showToast, configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns, exportData, importData, theme, setTheme }) {
     const [confirmingReset, setConfirmingReset] = useState(false);
     const [confirmText, setConfirmText] = useState('');
     const fileInputRef = useRef(null);
@@ -4260,7 +4357,7 @@ function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts
         setConfirmText('');
         showToast('Everything has been wiped \u2014 starting from a clean slate.');
     };
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, syncStatus, lastSyncedAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
         onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { allowPreDatedChanges: e.target.checked })) }), " Allow pre-dated changes")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Move data to a new device or hosted copy")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Since your data lives only in this browser, moving to a new hosted copy (like GitHub Pages) or a different device won't bring it along automatically. Export a backup here, then Import it on the new copy \u2014 do this once, and Google Drive will keep them in sync from then on."), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-primary", onClick: exportData }, React.createElement(IconDownload, { size: 15 }), " Export backup (.json)"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { var _a; return (_a = fileInputRef.current) === null || _a === void 0 ? void 0 : _a.click(); } }, "Import backup (.json)"), React.createElement("input", { ref: fileInputRef, type: "file", accept: "application/json", style: { display: 'none' },
         onChange: (e) => { var _a; const f = (_a = e.target.files) === null || _a === void 0 ? void 0 : _a[0]; if (f)
             importData(f); e.target.value = ''; } }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Master reset")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This permanently wipes every MS Daily, Diesel Daily, Day Closing, Salary, Advance, and Bank Reconciliation entry you've saved, and resets Master Data (employees, pumps, products, lubes, opening readings, bank parsing settings) back to the built-in defaults. There is no undo \u2014 make sure any data you care about is backed up (Google Drive, or otherwise) before doing this."), !confirmingReset && React.createElement("button", { className: "btn btn-danger", onClick: () => setConfirmingReset(true) }, "Wipe all data and master data"), confirmingReset && React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "confirm-bar" }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "Type RESET below to confirm \u2014 this cannot be undone.")), React.createElement("input", { className: "text-input", style: { maxWidth: 200 }, value: confirmText, onChange: (e) => setConfirmText(e.target.value), placeholder: "Type RESET" }), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-danger", disabled: confirmText !== 'RESET', onClick: doMasterReset }, "Confirm wipe"), React.createElement("button", { className: "btn btn-ghost", onClick: () => { setConfirmingReset(false); setConfirmText(''); } }, "Cancel")))));
