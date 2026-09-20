@@ -4403,10 +4403,12 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
             showToast('No rows are checked.', 'red');
             return;
         }
-        const headers = ['Date', 'Description', 'Credit', 'Party', 'Month'];
+        // The bank's own transaction description is deliberately NOT exported \u2014 the Petrosoft
+        // receipt's Description is built from Date + Month + this Note instead.
+        const headers = ['Date', 'Credit', 'Party', 'Month', 'Note'];
         const csvLines = [headers.join(',')];
         checked.forEach((e) => {
-            csvLines.push([fmtDate(e.date), e.desc, e.credit, e.party || '', getMonths(e).join('; ')].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
+            csvLines.push([fmtDate(e.date), e.credit, e.party || '', getMonths(e).join('; '), e.note || ''].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','));
         });
         const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
