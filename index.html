@@ -417,16 +417,30 @@ function perCategoryLatestDates(data) {
         salary: pick(salaryMonths),
     };
 }
-async function driveFindFile(token, fileName) {
+// Lists EVERY non-trashed copy of a named file, newest-modified first. Previously this returned only
+// whichever copy Drive happened to list first (no ordering), so if two copies of the backup ever
+// existed (e.g. two devices creating the file at the same moment on first connect), different
+// devices could silently read/write different copies and never see each other's data.
+async function driveListFiles(token, fileName) {
     const q = encodeURIComponent(`name='${fileName || DRIVE_FILE_NAME}' and trashed=false`);
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name,modifiedTime)`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&orderBy=modifiedTime%20desc&pageSize=20&fields=files(id,name,modifiedTime,size)`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
     if (!res.ok)
         throw new Error('drive_find_failed_' + res.status);
     const data = await res.json();
-    return (data.files && data.files[0]) || null;
+    return Array.isArray(data.files) ? data.files : [];
+}
+async function driveFindFile(token, fileName) {
+    const files = await driveListFiles(token, fileName);
+    return files[0] || null;
+}
+async function driveGetMeta(token, fileId) {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,modifiedTime,size,trashed`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+    if (!res.ok)
+        throw new Error('drive_meta_failed_' + res.status);
+    return res.json();
 }
 async function driveDownload(token, fileId) {
-    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
     if (!res.ok)
         throw new Error('drive_download_failed_' + res.status);
     return res.json();
@@ -435,44 +449,209 @@ async function driveCreate(token, content, fileName) {
     const boundary = 'fuelstation314159265';
     const metadata = { name: fileName || DRIVE_FILE_NAME, mimeType: 'application/json' };
     const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(content)}\r\n--${boundary}--`;
-    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
     if (!res.ok)
         throw new Error('drive_create_failed_' + res.status);
     return res.json();
 }
 async function driveUpdate(token, fileId, content) {
-    const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(content) });
+    const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,modifiedTime`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(content) });
     if (!res.ok)
         throw new Error('drive_update_failed_' + res.status);
     return res.json();
 }
-// If a cached Drive file id goes stale (the file was deleted, moved, or trashed directly in
-// Drive), driveUpdate fails with a 404 that would otherwise leave sync permanently stuck in an
-// error state until a full page reload happened to clear the cached id. This detects that
-// specific case, clears the stale id, and retries once by re-finding (or creating) the file \u2014
-// self-healing instead of a dead end. Any other error (network failure, auth issue, etc.) is
-// left alone and propagates normally, since retrying wouldn't fix those and could mask them.
-async function driveUpdateWithRecovery(token, fileIdRef, payload, fileName) {
-    if (fileIdRef.current) {
+// Merges a device's local state with a Drive copy of the main backup. Pure function (no React, no
+// localStorage) so the same logic serves connect-time sync, "Sync now", and the pre-push safety
+// merge. `local` and `cloud` only need the payload field names; anything missing/malformed on either
+// side is tolerated (a brand-new device, or an older backup file, must never crash the merge).
+// `cloudConfigWins` decides the one whole-object field (config); `cloudIsNewer` decides ties on
+// same-date drafts. Every other category is unioned so no entry is ever discarded.
+function mergeLocalWithCloud(local, cloud, cloudIsNewer, cloudConfigWins) {
+    const s = local || {};
+    const c = cloud || {};
+    const chosenConfig = (cloudConfigWins && c.config) ? c.config : (s.config || c.config || {});
+    const mergedAdvanceLog = mergeAdvanceLog(s.advance && s.advance.log, c.advance && c.advance.log);
+    return {
+        version: 2, savedAt: new Date().toISOString(),
+        config: Object.assign({}, defaultConfig, chosenConfig, { bankSettings: mergeBankSettings(chosenConfig.bankSettings) }),
+        msReadings: mergeByDateKey(s.msReadings, c.msReadings, cloudIsNewer),
+        msDrafts: mergeByDateKey(s.msDrafts, c.msDrafts, cloudIsNewer),
+        msLog: mergeArraysById(s.msLog, c.msLog),
+        dieselData: mergeByDateKey(s.dieselData, c.dieselData, cloudIsNewer),
+        dieselLog: mergeArraysById(s.dieselLog, c.dieselLog),
+        dayClosing: mergeByDateKey(s.dayClosing, c.dayClosing, cloudIsNewer),
+        advance: { log: mergedAdvanceLog, balances: recomputeAdvanceBalances(mergedAdvanceLog) },
+        salaryRuns: mergeByDateKey(s.salaryRuns, c.salaryRuns, cloudIsNewer),
+        bankRecon: mergeBankRecon(s.bankRecon, c.bankRecon),
+        dsrData: mergeByDateKey(s.dsrData, c.dsrData, cloudIsNewer),
+        ttData: mergeTtData(s.ttData, c.ttData),
+    };
+}
+// Bank statements merge: union by date|desc|balance. When the same entry exists on both sides, keep
+// this side's version but fill any field that is blank here and filled on the other side (a party,
+// month or note typed on another device must not be lost just because this device saw the row first).
+function mergeBankStatementsData(local, cloud) {
+    const l = (local && local.bankStatements) || {};
+    const c = (cloud && cloud.bankStatements) || {};
+    const out = {};
+    ['TMB', 'BOB'].forEach((bankKey) => {
+        const localList = Array.isArray(l[bankKey]) ? l[bankKey] : [];
+        const cloudList = Array.isArray(c[bankKey]) ? c[bankKey] : [];
+        const byKey = new Map();
+        const order = [];
+        [...localList, ...cloudList].forEach((e) => {
+            if (!e || typeof e.date !== 'string')
+                return;
+            const key = e.date + '|' + e.desc + '|' + e.balance;
+            const existing = byKey.get(key);
+            if (!existing) {
+                byKey.set(key, Object.assign({}, e));
+                order.push(key);
+                return;
+            }
+            ['party', 'note'].forEach((f) => { if (!existing[f] && e[f])
+                existing[f] = e[f]; });
+            if ((!existing.paymentMonths || existing.paymentMonths.length === 0) && e.paymentMonths && e.paymentMonths.length)
+                existing.paymentMonths = e.paymentMonths;
+            ['updatedInCreditSoftware', 'enteredInCreditSoftware'].forEach((f) => { if (!existing[f] && e[f])
+                existing[f] = e[f]; });
+        });
+        const merged = order.map((k) => byKey.get(k));
+        merged.sort((a, b) => a.date.localeCompare(b.date));
+        out[bankKey] = merged;
+    });
+    return { version: 1, savedAt: new Date().toISOString(), bankStatements: out };
+}
+// Compares what this device has against a Drive copy, for the "Check for updates" dialog: how many
+// entries exist only on one side, or exist on both but are newer on one side.
+function diffSyncData(local, cloud) {
+    const l = local || {}, c = cloud || {};
+    const byId = (a, b) => {
+        const A = {}, B = {};
+        (Array.isArray(a) ? a : []).forEach((r) => { if (r && r.id) A[r.id] = r; });
+        (Array.isArray(b) ? b : []).forEach((r) => { if (r && r.id) B[r.id] = r; });
+        let cloudOnly = 0, localOnly = 0, cloudNewer = 0, localNewer = 0;
+        Object.keys(B).forEach((id) => { if (!A[id])
+            cloudOnly++;
+        else if ((B[id].savedAt || '') > (A[id].savedAt || ''))
+            cloudNewer++; });
+        Object.keys(A).forEach((id) => { if (!B[id])
+            localOnly++;
+        else if ((A[id].savedAt || '') > (B[id].savedAt || ''))
+            localNewer++; });
+        return { cloudOnly, localOnly, cloudNewer, localNewer };
+    };
+    const byKeySet = (a, b) => {
+        const A = new Set(a), B = new Set(b);
+        let cloudOnly = 0, localOnly = 0;
+        B.forEach((k) => { if (!A.has(k))
+            cloudOnly++; });
+        A.forEach((k) => { if (!B.has(k))
+            localOnly++; });
+        return { cloudOnly, localOnly, cloudNewer: 0, localNewer: 0 };
+    };
+    const doneDates = (o) => Object.keys(o && typeof o === 'object' ? o : {}).filter((d) => o[d] && (o[d].submitted || o[d].saved));
+    const advKeys = (x) => (Array.isArray(x && x.log) ? x.log : []).map(advanceEntryKey);
+    return {
+        msLog: byId(l.msLog, c.msLog),
+        dieselLog: byId(l.dieselLog, c.dieselLog),
+        dayClosing: byKeySet(doneDates(l.dayClosing), doneDates(c.dayClosing)),
+        advance: byKeySet(advKeys(l.advance), advKeys(c.advance)),
+        salaryRuns: byKeySet(doneDates(l.salaryRuns), doneDates(c.salaryRuns)),
+    };
+}
+// The safe-sync engine used for BOTH Drive files. The old code pushed with a blind overwrite: a
+// device whose data was behind (e.g. its copy hadn't finished pulling yet, or another device had
+// saved in the meantime) would replace the Drive file with its older data, silently erasing whatever
+// the other device had entered. This engine never overwrites a Drive file it hasn't seen:
+//   - it remembers the modifiedTime of the Drive file as of this device's last download/upload;
+//   - before writing, it asks Drive for the file's current modifiedTime; if it differs (someone else
+//     wrote in between) or is unknown, it downloads, merges with local, applies the merge locally,
+//     and uploads the merged result instead;
+//   - if more than one copy of the file exists, every copy is downloaded and merged, and the merged
+//     result is written back to all of them so the copies converge.
+// o: { fileName, idRef, knownRef, getLocal(), merge(local, cloud, mode), mergeCopies(a, b), apply(merged),
+//      buildPayload(), force }   — `force` merges even if Drive looks unchanged (used on connect / Sync now).
+async function driveSyncFile(token, o, depth) {
+    depth = depth || 0;
+    let needMerge = !!o.force;
+    let files = null;
+    if (o.idRef.current) {
         try {
-            await driveUpdate(token, fileIdRef.current, payload);
-            return;
+            const meta = await driveGetMeta(token, o.idRef.current);
+            if (meta.trashed)
+                o.idRef.current = null;
+            else if (!o.knownRef.current || meta.modifiedTime !== o.knownRef.current)
+                needMerge = true;
         }
         catch (e) {
-            if (!(e && e.message && e.message.includes('drive_update_failed_404')))
+            if (e && e.message && e.message.includes('_404'))
+                o.idRef.current = null;
+            else
                 throw e;
-            fileIdRef.current = null;
         }
     }
-    const found = await driveFindFile(token, fileName);
-    if (found) {
-        fileIdRef.current = found.id;
-        await driveUpdate(token, found.id, payload);
+    if (!o.idRef.current || needMerge) {
+        files = await driveListFiles(token, o.fileName);
+        if (files.length > 0 && !o.idRef.current)
+            needMerge = true;
+        // Drive's file listing can lag behind reality for a short while; always include the copy this
+        // device already knows about so a stale listing can never make it skip merging with it.
+        if (o.idRef.current && !files.some((f) => f.id === o.idRef.current))
+            files.push({ id: o.idRef.current });
     }
-    else {
-        const created = await driveCreate(token, payload, fileName);
-        fileIdRef.current = created.id;
+    if (files && files.length > 0 && needMerge) {
+        o.idRef.current = files[0].id;
+        let cloud = null;
+        for (let i = 0; i < files.length; i++) {
+            let copy;
+            try {
+                copy = await driveDownload(token, files[i].id);
+            }
+            catch (e) {
+                if (i === 0)
+                    throw e; // the newest copy must be readable, otherwise don't risk overwriting anything
+                console.warn('[Drive sync] skipping unreadable duplicate copy', files[i].id, e);
+                continue;
+            }
+            cloud = cloud ? o.mergeCopies(cloud, copy) : copy;
+        }
+        const merged = o.merge(o.getLocal(), cloud, o.force ? 'connect' : 'push');
+        o.apply(merged);
+        let written = null;
+        for (let i = files.length - 1; i >= 0; i--) { // oldest first, so the newest copy stays newest
+            try {
+                written = await driveUpdate(token, files[i].id, merged);
+            }
+            catch (e) {
+                if (i === 0)
+                    throw e;
+                console.warn('[Drive sync] could not update duplicate copy', files[i].id, e);
+            }
+        }
+        o.knownRef.current = written && written.modifiedTime;
+        return { kind: 'merged', payload: merged, cloud, fileCount: files.length };
     }
+    if (!o.idRef.current) {
+        const payload = o.buildPayload();
+        const created = await driveCreate(token, payload, o.fileName);
+        o.idRef.current = created.id;
+        o.knownRef.current = created.modifiedTime;
+        return { kind: 'created', payload, cloud: null, fileCount: 1 };
+    }
+    const payload = o.buildPayload();
+    try {
+        const written = await driveUpdate(token, o.idRef.current, payload);
+        o.knownRef.current = written.modifiedTime;
+    }
+    catch (e) {
+        if (depth < 1 && e && e.message && e.message.includes('_404')) {
+            o.idRef.current = null; // stale id (file deleted/moved in Drive) — re-find or re-create
+            return driveSyncFile(token, o, depth + 1);
+        }
+        throw e;
+    }
+    return { kind: 'pushed', payload, cloud: null, fileCount: 1 };
 }
 /* ---------- generic helpers ---------- */
 const uid = (p = 'id') => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -884,6 +1063,17 @@ function App() {
     const suppressPushRef = useRef(false);
     const pushTimerRef = useRef(null);
     const driveSyncInFlightRef = useRef(false);
+    // Drive's modifiedTime for each file as of this device's last download/upload of it. If Drive's
+    // current modifiedTime differs at push time, somebody else wrote in between — merge first.
+    const driveKnownModifiedRef = useRef(null);
+    const bankKnownModifiedRef = useRef(null);
+    // JSON of the config as of the last sync — lets a push tell "config unchanged on this device
+    // (so take the other device's newer config)" from "I edited the config here (so mine wins)".
+    const syncedConfigJsonRef = useRef(null);
+    // A push requested while another sync was running used to be silently dropped (nothing retried it
+    // until the next edit). This remembers it and re-runs it as soon as the running sync finishes.
+    const pendingPushRef = useRef(false);
+    const pushNowRef = useRef(null);
     const initialLoadStampSkippedRef = useRef(false);
     const configuredClientId = GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('PASTE_');
     useEffect(() => {
@@ -1006,77 +1196,83 @@ function App() {
         if (data.ttData)
             persistTtData(data.ttData);
     }
+    // Writes a merged payload into this device's own state (and localStorage). The push effect is told
+    // to skip its next run, because the caller uploads the merged result itself.
+    function applyMerged(m) {
+        suppressPushRef.current = true;
+        persistConfig(m.config);
+        persistMsReadings(m.msReadings);
+        persistMsDrafts(m.msDrafts);
+        persistMsLog(m.msLog);
+        persistDieselData(m.dieselData);
+        persistDieselLog(m.dieselLog);
+        persistDayClosing(m.dayClosing);
+        persistAdvance(m.advance);
+        persistSalaryRuns(m.salaryRuns);
+        persistBankRecon(m.bankRecon);
+        persistDsrData(m.dsrData);
+        persistTtData(m.ttData);
+    }
+    function isCloudNewerByStamp(cloudData) {
+        let last = null;
+        try { last = window.localStorage.getItem(LS_LAST_LOCAL_CHANGE); } catch (e) { }
+        return !!(cloudData && cloudData.savedAt && (!last || cloudData.savedAt > last));
+    }
+    function mainSyncOptions(force) {
+        return {
+            fileName: DRIVE_FILE_NAME, idRef: driveFileIdRef, knownRef: driveKnownModifiedRef, force: !!force,
+            getLocal: () => latestStateRef.current,
+            // 'connect' (page load / Sync now): nothing is being typed here, so the stamp comparison decides ties.
+            // 'push' (about to upload): what this device has right now wins ties, except config which is
+            // taken from the other device when it hasn't been touched on this one since the last sync.
+            merge: (local, cloud, mode) => {
+                if (mode === 'connect')
+                    return mergeLocalWithCloud(local, cloud, isCloudNewerByStamp(cloud), isCloudNewerByStamp(cloud));
+                const configUntouchedHere = syncedConfigJsonRef.current !== null && JSON.stringify(local.config) === syncedConfigJsonRef.current;
+                return mergeLocalWithCloud(local, cloud, false, configUntouchedHere);
+            },
+            mergeCopies: (a, b) => mergeLocalWithCloud(a, b, false, false),
+            apply: applyMerged,
+            buildPayload,
+        };
+    }
+    // Runs fn while holding the single "a sync is running" lock. Returns false if a sync was already
+    // running. When the lock is released, any push that arrived meanwhile is re-run (never dropped).
+    async function withSyncLock(fn) {
+        if (driveSyncInFlightRef.current)
+            return false;
+        driveSyncInFlightRef.current = true;
+        try {
+            await fn();
+        }
+        finally {
+            driveSyncInFlightRef.current = false;
+            if (pendingPushRef.current) {
+                pendingPushRef.current = false;
+                setTimeout(() => { if (pushNowRef.current) pushNowRef.current(); }, 800);
+            }
+        }
+        return true;
+    }
+    // Full two-way sync of the main backup file: download every copy on Drive, merge with this device,
+    // apply the merge locally, upload the merged result. Callers must hold the sync lock.
     async function handleConnected(token, silent) {
         setDriveConnected(true);
         window.localStorage.setItem(LS_DRIVE_FLAG, '1');
         setDownloadStatus('syncing');
+        setUploadStatus('syncing');
         let downloadSucceeded = false;
         try {
-            const file = await driveFindFile(token);
-            if (file) {
-                driveFileIdRef.current = file.id;
-                const cloudData = await driveDownload(token, file.id);
-                downloadSucceeded = true;
-                setDownloadStatus('synced');
-                setLastDownloadAt(new Date());
-                const lastLocalChange = window.localStorage.getItem(LS_LAST_LOCAL_CHANGE);
-                const s = latestStateRef.current;
-                const cloudIsNewer = cloudData.savedAt && (!lastLocalChange || cloudData.savedAt > lastLocalChange);
-                // Merge the daily transaction records (never discard a date that only exists on one side) \u2014
-                // this is what protects against exactly the scenario where two devices go out of sync.
-                const mergedMsLog = mergeArraysById(s.msLog, cloudData.msLog);
-                const mergedDieselLog = mergeArraysById(s.dieselLog, cloudData.dieselLog);
-                const mergedDieselData = mergeByDateKey(s.dieselData, cloudData.dieselData, cloudIsNewer);
-                const mergedDayClosing = mergeByDateKey(s.dayClosing, cloudData.dayClosing, cloudIsNewer);
-                const mergedMsReadings = mergeByDateKey(s.msReadings, cloudData.msReadings, cloudIsNewer);
-                const mergedMsDrafts = mergeByDateKey(s.msDrafts, cloudData.msDrafts, cloudIsNewer);
-                // Config is the only remaining whole-object comparison \u2014 it's rarely edited on two
-                // devices at once, and every other category above now merges safely at the entry or
-                // key level, so a mistimed sync can no longer silently discard real data from any of them.
-                const mergedPayload = {
-                    version: 2, savedAt: new Date().toISOString(),
-                    config: cloudIsNewer && cloudData.config ? Object.assign(Object.assign({}, defaultConfig), cloudData.config, { bankSettings: mergeBankSettings(cloudData.config.bankSettings) }) : s.config,
-                    msReadings: mergedMsReadings, msDrafts: mergedMsDrafts, msLog: mergedMsLog,
-                    dieselData: mergedDieselData, dieselLog: mergedDieselLog, dayClosing: mergedDayClosing,
-                    advance: (function () { const mergedLog = mergeAdvanceLog(s.advance && s.advance.log, cloudData.advance && cloudData.advance.log); return { log: mergedLog, balances: recomputeAdvanceBalances(mergedLog) }; })(),
-                    salaryRuns: mergeByDateKey(s.salaryRuns, cloudData.salaryRuns, cloudIsNewer),
-                    bankRecon: mergeBankRecon(s.bankRecon, cloudData.bankRecon),
-                    dsrData: mergeByDateKey(s.dsrData, cloudData.dsrData, cloudIsNewer),
-                    ttData: mergeTtData(s.ttData, cloudData.ttData),
-                };
-                suppressPushRef.current = true;
-                persistConfig(mergedPayload.config);
-                persistMsReadings(mergedMsReadings);
-                persistMsDrafts(mergedMsDrafts);
-                persistMsLog(mergedMsLog);
-                persistDieselData(mergedDieselData);
-                persistDieselLog(mergedDieselLog);
-                persistDayClosing(mergedDayClosing);
-                persistAdvance(mergedPayload.advance);
-                persistSalaryRuns(mergedPayload.salaryRuns);
-                persistBankRecon(mergedPayload.bankRecon);
-                persistDsrData(mergedPayload.dsrData);
-                persistTtData(mergedPayload.ttData);
-                setUploadStatus('syncing');
-                await driveUpdate(token, file.id, mergedPayload);
-                window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, mergedPayload.savedAt);
-                setUploadStatus('synced');
-                setLastUploadAt(new Date());
-                if (!silent)
-                    showToast('Synced \u2014 merged with Google Drive (no dates were discarded from either side)');
-            }
-            else {
-                downloadSucceeded = true; // nothing on Drive yet, but the check itself succeeded
-                setDownloadStatus('synced');
-                setLastDownloadAt(new Date());
-                setUploadStatus('syncing');
-                const payload = buildPayload();
-                const created = await driveCreate(token, payload);
-                driveFileIdRef.current = created.id;
-                window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
-                setUploadStatus('synced');
-                setLastUploadAt(new Date());
-            }
+            const result = await driveSyncFile(token, mainSyncOptions(true));
+            downloadSucceeded = true;
+            setDownloadStatus('synced');
+            setLastDownloadAt(new Date());
+            window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, result.payload.savedAt);
+            syncedConfigJsonRef.current = JSON.stringify(result.payload.config);
+            setUploadStatus('synced');
+            setLastUploadAt(new Date());
+            if (result.kind === 'merged' && !silent)
+                showToast('Synced — merged with Google Drive (no dates were discarded from either side)');
         }
         catch (e) {
             console.error('[Drive sync error]', e);
@@ -1088,17 +1284,15 @@ function App() {
     const connectDrive = async () => {
         if (driveSyncInFlightRef.current)
             return;
-        driveSyncInFlightRef.current = true;
         try {
-            const resp = await requestToken('consent');
-            cachedTokenRef.current = { token: resp.access_token, expiresAt: Date.now() + ((Number(resp.expires_in) || 3300) * 1000) };
-            await handleConnected(resp.access_token);
+            await withSyncLock(async () => {
+                const resp = await requestToken('consent');
+                cachedTokenRef.current = { token: resp.access_token, expiresAt: Date.now() + ((Number(resp.expires_in) || 3300) * 1000) };
+                await handleConnected(resp.access_token);
+            });
         }
         catch (e) {
             showToast('Could not connect to Google Drive.', 'red');
-        }
-        finally {
-            driveSyncInFlightRef.current = false;
         }
     };
     const exportData = () => {
@@ -1128,30 +1322,46 @@ function App() {
         };
         reader.readAsText(file);
     };
-    const disconnectDrive = () => { setDriveConnected(false); driveFileIdRef.current = null; setUploadStatus('idle'); setDownloadStatus('idle'); window.localStorage.removeItem(LS_DRIVE_FLAG); showToast('Disconnected from Google Drive'); };
+    const disconnectDrive = () => { setDriveConnected(false); driveFileIdRef.current = null; driveKnownModifiedRef.current = null; bankStatementsDriveFileIdRef.current = null; bankKnownModifiedRef.current = null; syncedConfigJsonRef.current = null; setUploadStatus('idle'); setDownloadStatus('idle'); window.localStorage.removeItem(LS_DRIVE_FLAG); showToast('Disconnected from Google Drive'); };
     const pushNow = useCallback(async () => {
-        if (!driveConnected || driveSyncInFlightRef.current)
+        if (!driveConnected)
             return;
+        if (driveSyncInFlightRef.current) {
+            pendingPushRef.current = true; // re-run when the running sync finishes instead of dropping this push
+            return;
+        }
         driveSyncInFlightRef.current = true;
         setUploadStatus('syncing');
         try {
-            // reuses a cached token when still valid \u2014 only asks Google for a fresh one when it's
+            // reuses a cached token when still valid — only asks Google for a fresh one when it's
             // actually expired, avoiding a popup/flash on every background save
             const token = await getCachedOrFreshToken();
-            const payload = buildPayload();
-            await driveUpdateWithRecovery(token, driveFileIdRef, payload, DRIVE_FILE_NAME);
-            window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, payload.savedAt);
+            // Never a blind overwrite: driveSyncFile checks whether Drive's copy changed since this
+            // device last saw it, and if so merges it in before uploading.
+            const result = await driveSyncFile(token, mainSyncOptions(false));
+            window.localStorage.setItem(LS_LAST_LOCAL_CHANGE, result.payload.savedAt);
+            syncedConfigJsonRef.current = JSON.stringify(result.payload.config);
+            if (result.kind === 'merged') {
+                setDownloadStatus('synced');
+                setLastDownloadAt(new Date());
+            }
             setUploadStatus('synced');
             setLastUploadAt(new Date());
         }
         catch (e) {
+            console.error('[Drive push error]', e);
             setUploadStatus(navigator.onLine ? 'error' : 'offline');
         }
         finally {
             driveSyncInFlightRef.current = false;
+            if (pendingPushRef.current) {
+                pendingPushRef.current = false;
+                setTimeout(() => { if (pushNowRef.current) pushNowRef.current(); }, 800);
+            }
         }
         // eslint-disable-next-line
     }, [driveConnected, config, msReadings, msDrafts, msLog, dieselData, dieselLog, dayClosing, advance, salaryRuns, bankRecon]);
+    pushNowRef.current = pushNow;
     useEffect(() => {
         if (!ready)
             return; // still loading saved data \u2014 not a real edit yet
@@ -1187,15 +1397,33 @@ function App() {
     // which is what froze the page. This keeps it in its own Drive file, pushed independently.
     const bankStatementsPushTimerRef = useRef(null);
     const bankStatementsSyncInFlightRef = useRef(false);
+    const bankPendingPushRef = useRef(false);
+    const bankSuppressPushRef = useRef(false);
+    const bankPushRef = useRef(null);
+    function bankSyncOptions(force) {
+        return {
+            fileName: DRIVE_BANK_STATEMENTS_FILE_NAME, idRef: bankStatementsDriveFileIdRef, knownRef: bankKnownModifiedRef, force: !!force,
+            getLocal: () => ({ bankStatements: latestStateRef.current.bankStatements }),
+            merge: (local, cloud) => mergeBankStatementsData(local, cloud),
+            mergeCopies: (a, b) => mergeBankStatementsData(a, b),
+            apply: (m) => { bankSuppressPushRef.current = true; persistBankStatements(m.bankStatements); },
+            buildPayload: () => ({ version: 1, savedAt: new Date().toISOString(), bankStatements: latestStateRef.current.bankStatements }),
+        };
+    }
+    // Same safe-sync engine as the main file: a push never overwrites a Drive copy this device hasn't
+    // seen — if the file changed since the last download/upload, it merges first.
     const pushBankStatementsNow = useCallback(async () => {
-        if (!driveConnected || bankStatementsSyncInFlightRef.current)
+        if (!driveConnected)
             return;
+        if (bankStatementsSyncInFlightRef.current) {
+            bankPendingPushRef.current = true;
+            return;
+        }
         bankStatementsSyncInFlightRef.current = true;
         setUploadStatus('syncing');
         try {
             const token = await getCachedOrFreshToken();
-            const payload = { version: 1, savedAt: new Date().toISOString(), bankStatements: latestStateRef.current.bankStatements };
-            await driveUpdateWithRecovery(token, bankStatementsDriveFileIdRef, payload, DRIVE_BANK_STATEMENTS_FILE_NAME);
+            await driveSyncFile(token, bankSyncOptions(false));
             setUploadStatus('synced');
             setLastUploadAt(new Date());
         }
@@ -1205,61 +1433,59 @@ function App() {
         }
         finally {
             bankStatementsSyncInFlightRef.current = false;
+            if (bankPendingPushRef.current) {
+                bankPendingPushRef.current = false;
+                setTimeout(() => { if (bankPushRef.current) bankPushRef.current(); }, 800);
+            }
         }
     }, [driveConnected]);
+    bankPushRef.current = pushBankStatementsNow;
     useEffect(() => {
         if (!driveConnected)
             return;
+        if (bankSuppressPushRef.current) {
+            bankSuppressPushRef.current = false;
+            return;
+        }
         if (bankStatementsPushTimerRef.current)
             clearTimeout(bankStatementsPushTimerRef.current);
         bankStatementsPushTimerRef.current = setTimeout(() => { pushBankStatementsNow(); }, 3000);
         return () => clearTimeout(bankStatementsPushTimerRef.current);
         // eslint-disable-next-line
     }, [bankStatements, driveConnected]);
-    // Pull the bank statements file once per connect (mirrors the main app's connect-time pull) \u2014
-    // merged by date+desc+balance per entry, so nothing gets lost between devices, without ever
-    // needing to touch (or re-upload) the main app state file.
+    // Pull + merge the bank statements file once per connect (and on "Sync now"), merged by
+    // date+desc+balance per entry so nothing gets lost between devices.
+    async function pullBankStatements(token) {
+        setDownloadStatus('syncing');
+        try {
+            await driveSyncFile(token, bankSyncOptions(true));
+            setDownloadStatus('synced');
+            setLastDownloadAt(new Date());
+        }
+        catch (e) {
+            console.error('[Bank Statements pull error]', e);
+            setDownloadStatus(navigator.onLine ? 'error' : 'offline');
+        }
+    }
     useEffect(() => {
         if (!driveConnected)
             return;
         (async () => {
-            setDownloadStatus('syncing');
+            // wait for the main sync to release the lock first, so the two don't fight over the token/UI status
+            for (let i = 0; i < 60 && driveSyncInFlightRef.current; i++)
+                await new Promise((r) => setTimeout(r, 500));
+            if (bankStatementsSyncInFlightRef.current)
+                return;
+            bankStatementsSyncInFlightRef.current = true;
             try {
                 const token = await getCachedOrFreshToken();
-                const file = await driveFindFile(token, DRIVE_BANK_STATEMENTS_FILE_NAME);
-                if (!file) {
-                    bankStatementsDriveFileIdRef.current = null;
-                    setDownloadStatus('synced');
-                    setLastDownloadAt(new Date());
-                    return;
-                }
-                bankStatementsDriveFileIdRef.current = file.id;
-                const cloudData = await driveDownload(token, file.id);
-                const cloudStatements = (cloudData && cloudData.bankStatements) || {};
-                const localStatements = latestStateRef.current.bankStatements || { TMB: [], BOB: [] };
-                const mergedStatements = {};
-                ['TMB', 'BOB'].forEach((bankKey) => {
-                    const localList = localStatements[bankKey] || [];
-                    const cloudList = cloudStatements[bankKey] || [];
-                    const seen = new Set();
-                    const merged = [];
-                    [...localList, ...cloudList].forEach((e) => {
-                        const key = e.date + '|' + e.desc + '|' + e.balance;
-                        if (seen.has(key))
-                            return;
-                        seen.add(key);
-                        merged.push(e);
-                    });
-                    merged.sort((a, b) => a.date.localeCompare(b.date));
-                    mergedStatements[bankKey] = merged;
-                });
-                persistBankStatements(mergedStatements);
-                setDownloadStatus('synced');
-                setLastDownloadAt(new Date());
+                await pullBankStatements(token);
             }
             catch (e) {
                 console.error('[Bank Statements pull error]', e);
-                setDownloadStatus(navigator.onLine ? 'error' : 'offline');
+            }
+            finally {
+                bankStatementsSyncInFlightRef.current = false;
             }
         })();
         // eslint-disable-next-line
@@ -1297,31 +1523,78 @@ function App() {
         setCheckDialog({ status: 'checking' });
         try {
             const token = await getCachedOrFreshToken();
-            const file = await driveFindFile(token);
-            if (!file) {
+            const files = await driveListFiles(token, DRIVE_FILE_NAME);
+            if (!files.length) {
                 setCheckDialog({ status: 'error', message: 'No backup found on Drive yet.' });
                 return;
             }
-            const cloudData = await driveDownload(token, file.id);
+            // Read EVERY copy of the backup on Drive (normally just one) and combine them, so the
+            // answer reflects everything that is actually stored there.
+            let cloudData = null;
+            for (let i = 0; i < files.length; i++) {
+                try {
+                    const copy = await driveDownload(token, files[i].id);
+                    cloudData = cloudData ? mergeLocalWithCloud(cloudData, copy, false, false) : copy;
+                }
+                catch (e) { if (i === 0) throw e; }
+            }
             const s = latestStateRef.current;
             const localDate = latestDataDate(s.msLog, s.dieselLog);
             const cloudDate = latestDataDate(cloudData.msLog, cloudData.dieselLog);
-            const cloudIsNewerCheck = cloudDate && (!localDate || cloudDate > localDate);
-            setCheckDialog({ status: 'done', localDate, cloudDate, cloudIsNewer: cloudIsNewerCheck,
+            const diff = diffSyncData(s, cloudData);
+            const sum = (k) => Object.keys(diff).reduce((n, cat) => n + diff[cat][k], 0);
+            const cloudHasMore = sum('cloudOnly') + sum('cloudNewer');
+            const localHasMore = sum('localOnly') + sum('localNewer');
+            // Bank statements live in their own Drive file — compare those too (best-effort).
+            let bank = null;
+            try {
+                const bFiles = await driveListFiles(token, DRIVE_BANK_STATEMENTS_FILE_NAME);
+                if (bFiles.length) {
+                    const bCloud = await driveDownload(token, bFiles[0].id);
+                    const bl = (s.bankStatements || {}), bc = (bCloud && bCloud.bankStatements) || {};
+                    bank = {};
+                    ['TMB', 'BOB'].forEach((k) => {
+                        const keyOf = (e) => e.date + '|' + e.desc + '|' + e.balance;
+                        const L = new Set((bl[k] || []).map(keyOf)), C = new Set((bc[k] || []).map(keyOf));
+                        let cloudOnly = 0, localOnly = 0;
+                        C.forEach((x) => { if (!L.has(x)) cloudOnly++; });
+                        L.forEach((x) => { if (!C.has(x)) localOnly++; });
+                        bank[k] = { cloudOnly, localOnly };
+                    });
+                }
+            }
+            catch (e) { bank = null; }
+            setCheckDialog({ status: 'done', localDate, cloudDate,
+                cloudIsNewer: !!((cloudDate && (!localDate || cloudDate > localDate)) || cloudHasMore > 0),
+                cloudHasMore, localHasMore, diff, bank,
+                fileCount: files.length, fileModified: files[0].modifiedTime, fileSize: files[0].size,
                 localDetail: perCategoryLatestDates({ msLog: s.msLog, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns }),
                 cloudDetail: perCategoryLatestDates(cloudData) });
         }
         catch (e) {
+            console.error('[Check for updates error]', e);
             setCheckDialog({ status: 'error', message: 'Could not reach Google Drive right now.' });
         }
         // eslint-disable-next-line
     }, [driveConnected, msLog, dieselLog, dayClosing, advance, salaryRuns]);
+    // "Sync now" from the dialog: the same full two-way merge as connecting (pulls everything new from
+    // Drive AND pushes anything only this device has), for both Drive files.
     const updateFromCheckDialog = useCallback(async () => {
         setCheckDialog((d) => Object.assign(Object.assign({}, d), { status: 'updating' }));
         try {
             const token = await getCachedOrFreshToken();
-            await handleConnected(token, true);
-            showToast('Updated with the latest data from Drive.');
+            const ran = await withSyncLock(async () => { await handleConnected(token, true); });
+            if (!ran) {
+                showToast('A sync is already running — try again in a moment.', 'red');
+            }
+            else {
+                if (!bankStatementsSyncInFlightRef.current) {
+                    bankStatementsSyncInFlightRef.current = true;
+                    try { await pullBankStatements(token); }
+                    finally { bankStatementsSyncInFlightRef.current = false; }
+                }
+                showToast('Synced with Google Drive — everything from both sides is now merged.');
+            }
         }
         catch (e) {
             showToast('Could not update right now.', 'red');
@@ -1351,7 +1624,11 @@ function App() {
             try {
                 const resp = await requestToken('none');
                 cachedTokenRef.current = { token: resp.access_token, expiresAt: Date.now() + ((Number(resp.expires_in) || 3300) * 1000) };
-                await handleConnected(resp.access_token, true);
+                // holds the sync lock for the whole pull+merge, so no push can overwrite Drive with
+                // this device's (possibly stale) data while the download is still in progress
+                const ran = await withSyncLock(async () => { await handleConnected(resp.access_token, true); });
+                if (!ran)
+                    setTimeout(attemptSilentReconnect, 3000);
             }
             catch (e) {
                 // Silent attempt failed (e.g. access revoked or expired) \u2014 the normal
@@ -1380,25 +1657,63 @@ function CheckUpdatesDialog({ state, onUpdate, onClose }) {
     if (!state)
         return null;
     let body;
+    const fmtD = (d) => d ? (d.length === 7 ? d : fmtDate(d)) : '—';
+    const fmtStamp = (iso) => { if (!iso) return '—'; const dt = new Date(iso); return isNaN(dt.getTime()) ? '—' : dt.toLocaleString('en-IN'); };
     if (state.status === 'checking') {
-        body = React.createElement("p", null, "Checking Google Drive\u2026");
+        body = React.createElement("p", null, "Checking Google Drive…");
     }
     else if (state.status === 'updating') {
-        body = React.createElement("p", null, "Updating\u2026");
+        body = React.createElement("p", null, "Syncing…");
     }
     else if (state.status === 'error') {
         body = React.createElement("p", null, state.message);
     }
-    else if (state.status === 'done' && !state.cloudIsNewer) {
-        body = React.createElement("p", null, `You're up to date. Data entered up to ${state.localDate ? fmtDate(state.localDate) : '\u2014'}.`);
-    }
-    else if (state.status === 'done' && state.cloudIsNewer) {
+    else if (state.status === 'done') {
+        const rows = [['MS Daily', 'msDaily', 'msLog', 'entries'], ['Diesel Daily', 'dieselDaily', 'dieselLog', 'entries'], ['Day Closing', 'dayClosing', 'dayClosing', 'days'], ['Advance / Recovery', 'advance', 'advance', 'entries'], ['Salary', 'salary', 'salaryRuns', 'months']];
+        const cell = { padding: '3px 8px 3px 0', fontSize: 12.5, verticalAlign: 'top' };
+        const diffText = (cat) => {
+            const d = state.diff && state.diff[cat];
+            if (!d) return '';
+            const parts = [];
+            if (d.cloudOnly) parts.push(`${d.cloudOnly} only on Drive`);
+            if (d.cloudNewer) parts.push(`${d.cloudNewer} newer on Drive`);
+            if (d.localOnly) parts.push(`${d.localOnly} only here`);
+            if (d.localNewer) parts.push(`${d.localNewer} newer here`);
+            return parts.length ? parts.join(', ') : 'same';
+        };
+        const bankText = (k) => {
+            const b = state.bank && state.bank[k];
+            if (!b) return '';
+            const parts = [];
+            if (b.cloudOnly) parts.push(`${b.cloudOnly} only on Drive`);
+            if (b.localOnly) parts.push(`${b.localOnly} only here`);
+            return parts.length ? parts.join(', ') : 'same';
+        };
+        const headline = state.cloudIsNewer
+            ? `Google Drive has newer data than this device${state.cloudHasMore ? ` (${state.cloudHasMore} entr${state.cloudHasMore === 1 ? 'y' : 'ies'} to bring in)` : ''}.`
+            : (state.localHasMore ? `Drive has nothing newer, but this device has ${state.localHasMore} entr${state.localHasMore === 1 ? 'y' : 'ies'} Drive doesn't yet.` : `You're up to date. Data entered up to ${state.localDate ? fmtDate(state.localDate) : '—'}.`);
         body = React.createElement(React.Fragment, null,
-            React.createElement("p", null, `This device: data up to ${state.localDate ? fmtDate(state.localDate) : '\u2014'}.`),
-            React.createElement("p", null, `Cloud: data up to ${fmtDate(state.cloudDate)}.`),
-            React.createElement("button", { className: "btn btn-primary", onClick: onUpdate }, "Update now"));
+            React.createElement("p", { style: { color: 'var(--text)', marginBottom: 10 } }, headline),
+            React.createElement("table", { style: { borderCollapse: 'collapse', marginBottom: 10, width: '100%' } },
+                React.createElement("thead", null, React.createElement("tr", null,
+                    React.createElement("th", { style: Object.assign({}, cell, { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 500 }) }, "Latest entry"),
+                    React.createElement("th", { style: Object.assign({}, cell, { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 500 }) }, "This device"),
+                    React.createElement("th", { style: Object.assign({}, cell, { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 500 }) }, "Drive"),
+                    React.createElement("th", { style: Object.assign({}, cell, { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 500 }) }, "Difference"))),
+                React.createElement("tbody", null, rows.map(([label, dk, cat]) => React.createElement("tr", { key: dk },
+                    React.createElement("td", { style: Object.assign({}, cell, { color: 'var(--text)' }) }, label),
+                    React.createElement("td", { style: Object.assign({}, cell, { color: 'var(--text)' }) }, fmtD(state.localDetail && state.localDetail[dk])),
+                    React.createElement("td", { style: Object.assign({}, cell, { color: 'var(--text)' }) }, fmtD(state.cloudDetail && state.cloudDetail[dk])),
+                    React.createElement("td", { style: Object.assign({}, cell, { color: 'var(--text-muted)' }) }, diffText(cat))))
+                    .concat(state.bank ? [['TMB', 'TMB statement'], ['BOB', 'BOB statement']].map(([k, label]) => React.createElement("tr", { key: 'bank' + k },
+                        React.createElement("td", { style: Object.assign({}, cell, { color: 'var(--text)' }) }, label),
+                        React.createElement("td", { style: cell }),
+                        React.createElement("td", { style: cell }),
+                        React.createElement("td", { style: Object.assign({}, cell, { color: 'var(--text-muted)' }) }, bankText(k)))) : []))),
+            React.createElement("p", { style: { fontSize: 12, marginBottom: 12 } }, `Backup file on Drive: last written ${fmtStamp(state.fileModified)}${state.fileCount > 1 ? ` — ${state.fileCount} copies found (they will be merged into one when you sync)` : ''}.`),
+            React.createElement("button", { className: "btn btn-primary", onClick: onUpdate }, state.cloudIsNewer || state.localHasMore ? "Sync now (merge both ways)" : "Sync now anyway"));
     }
-    const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 420, background: 'var(--surface)', color: 'var(--text)' } },
+    const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 520, background: 'var(--surface)', color: 'var(--text)' } },
         React.createElement("h3", { style: { color: 'var(--text)' } }, "Check for updates"),
         body,
         React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: onClose }, "Close")));
