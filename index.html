@@ -1058,6 +1058,7 @@ function App() {
     const [lastDownloadAt, setLastDownloadAt] = useState(null);
     const tokenClientRef = useRef(null);
     const tokenRejectRef = useRef(null);
+    const tokenPendingKindRef = useRef(null);
     const [connectError, setConnectError] = useState(null);
     const [skipDriveGate, setSkipDriveGate] = useState(false);
     const cachedTokenRef = useRef({ token: null, expiresAt: 0 });
@@ -1153,8 +1154,15 @@ function App() {
             }
             // A newer request (e.g. the user clicking Connect while the automatic silent reconnect is
             // still waiting) supersedes any earlier one, so a stale request can't linger or clobber it.
+            // An automatic (silent) request must never cancel one the user started by clicking Connect;
+            // it just steps aside. An explicit request does supersede an older silent one.
+            if (tokenRejectRef.current && promptType === 'none' && tokenPendingKindRef.current === 'explicit') {
+                reject(new Error('busy'));
+                return;
+            }
             if (tokenRejectRef.current)
                 tokenRejectRef.current(new Error('superseded'));
+            tokenPendingKindRef.current = promptType === 'none' ? 'silent' : 'explicit';
             let done = false;
             const timer = setTimeout(() => { finish(() => reject(new Error('token_timeout'))); }, 120000);
             const myReject = (err) => finish(() => reject(err));
@@ -1312,6 +1320,8 @@ function App() {
         }
         catch (e) {
             console.error('[Drive connect error]', e);
+            if (e && (e.message === 'superseded' || e.message === 'busy'))
+                return;
             const t = e && (e.type || e.error || e.message) ? String(e.type || e.error || e.message) : 'unknown';
             setConnectError(t === 'popup_closed' || t === 'token_timeout' ? 'The Google sign-in window was closed or timed out. Please try again.'
                 : t === 'popup_failed_to_open' ? 'Your browser blocked the Google sign-in window. Allow pop-ups for this site and try again.'
@@ -1645,6 +1655,8 @@ function App() {
                 setTimeout(attemptSilentReconnect, 15000); // retry shortly once they've likely paused
                 return;
             }
+            if (tokenPendingKindRef.current === 'explicit' && tokenRejectRef.current)
+                return; // the user is already signing in by hand
             try {
                 const resp = await requestToken('none');
                 cachedTokenRef.current = { token: resp.access_token, expiresAt: Date.now() + ((Number(resp.expires_in) || 3300) * 1000) };
