@@ -487,36 +487,89 @@ function mergeLocalWithCloud(local, cloud, cloudIsNewer, cloudConfigWins) {
         ttData: mergeTtData(s.ttData, c.ttData),
     };
 }
-// Bank statements merge: union by date|desc|balance. When the same entry exists on both sides, keep
-// this side's version but fill any field that is blank here and filled on the other side (a party,
-// month or note typed on another device must not be lost just because this device saw the row first).
+// ---- Bank statement duplicate detection ----
+// Statements have no unique transaction id, so "the same transaction" has to be recognised from its
+// content. The old check was an exact text match on date|description|balance, which missed the same
+// transaction whenever the text differed trivially between two pastes/devices (extra or non-breaking
+// spaces, letter case, a balance stored as 1550979.5 vs "1550979.50", ...). Now:
+//   - descriptions are normalised (case, whitespace) and amounts are compared as numbers to 2 decimals;
+//   - two rows are the same transaction if date + balance match AND (description matches after
+//     normalisation, OR credit matches and the descriptions start the same way). A running balance
+//     after a given transaction is effectively unique, so date+balance is a very strong signal.
+const bsNormDesc = (d) => String(d == null ? '' : d).replace(/ /g, ' ').toUpperCase().replace(/\s+/g, ' ').trim();
+const bsAlnum = (d) => bsNormDesc(d).replace(/[^A-Z0-9]/g, '');
+const bsAmt = (n) => { const v = Number(String(n == null ? '' : n).replace(/,/g, '')); return isFinite(v) ? v.toFixed(2) : String(n == null ? '' : n); };
+const bsBucketKey = (e) => e.date + '|' + bsAmt(e.balance);
+function bsSameTxn(a, b) {
+    if (!a || !b || a.date !== b.date || bsAmt(a.balance) !== bsAmt(b.balance))
+        return false;
+    const x = bsAlnum(a.desc), y = bsAlnum(b.desc);
+    if (x === y)
+        return true;
+    if (bsAmt(a.credit) !== bsAmt(b.credit))
+        return false;
+    const n = Math.min(x.length, y.length, 10);
+    return n >= 6 && x.slice(0, n) === y.slice(0, n);
+}
+// Index over a list of statement rows for fast "is this transaction already here?" lookups.
+function bsIndex(list) {
+    const map = new Map();
+    const api = {
+        add(e) { const k = bsBucketKey(e); if (!map.has(k)) map.set(k, []); map.get(k).push(e); },
+        find(e) { const arr = map.get(bsBucketKey(e)); return arr ? arr.find((x) => bsSameTxn(x, e)) : undefined; },
+    };
+    (list || []).forEach((e) => api.add(e));
+    return api;
+}
+// When two rows turn out to be the same transaction, keep one and carry over anything the other had
+// filled in (party, month, note, "in credit software" ticks) so no typed information is lost.
+function bsFillBlanks(target, from) {
+    ['party', 'note'].forEach((f) => { if (!target[f] && from[f]) target[f] = from[f]; });
+    if ((!target.paymentMonths || target.paymentMonths.length === 0) && from.paymentMonths && from.paymentMonths.length)
+        target.paymentMonths = from.paymentMonths;
+    if (!target.paymentMonths && from.paymentMonth)
+        target.paymentMonth = target.paymentMonth || from.paymentMonth;
+    ['updatedInCreditSoftware', 'enteredInCreditSoftware'].forEach((f) => { if (!target[f] && from[f]) target[f] = from[f]; });
+}
+// Adds only the genuinely new rows of `incoming` to `existing` (also dropping repeats inside `incoming`).
+function bsAppendNew(existing, incoming) {
+    const idx = bsIndex(existing);
+    const added = [];
+    let duplicates = 0;
+    (incoming || []).forEach((r) => {
+        const hit = idx.find(r);
+        if (hit) { duplicates++; return; }
+        idx.add(r);
+        added.push(r);
+    });
+    return { added, duplicates };
+}
+// Collapses duplicates already inside one list, keeping the first occurrence (order preserved).
+function bsDedupeList(list) {
+    const idx = bsIndex([]);
+    const out = [];
+    let removed = 0;
+    (list || []).forEach((e) => {
+        if (!e || typeof e.date !== 'string')
+            return;
+        const hit = idx.find(e);
+        if (hit) { bsFillBlanks(hit, e); removed++; return; }
+        const copy = Object.assign({}, e);
+        idx.add(copy);
+        out.push(copy);
+    });
+    return { list: out, removed };
+}
+// Bank statements merge: union of both sides, duplicates recognised as above. When the same
+// transaction exists on both sides, keep this side's row but fill any field that is blank here and
+// filled on the other side (a party, month or note typed on another device must not be lost).
 function mergeBankStatementsData(local, cloud) {
     const l = (local && local.bankStatements) || {};
     const c = (cloud && cloud.bankStatements) || {};
     const out = {};
     ['TMB', 'BOB'].forEach((bankKey) => {
-        const localList = Array.isArray(l[bankKey]) ? l[bankKey] : [];
-        const cloudList = Array.isArray(c[bankKey]) ? c[bankKey] : [];
-        const byKey = new Map();
-        const order = [];
-        [...localList, ...cloudList].forEach((e) => {
-            if (!e || typeof e.date !== 'string')
-                return;
-            const key = e.date + '|' + e.desc + '|' + e.balance;
-            const existing = byKey.get(key);
-            if (!existing) {
-                byKey.set(key, Object.assign({}, e));
-                order.push(key);
-                return;
-            }
-            ['party', 'note'].forEach((f) => { if (!existing[f] && e[f])
-                existing[f] = e[f]; });
-            if ((!existing.paymentMonths || existing.paymentMonths.length === 0) && e.paymentMonths && e.paymentMonths.length)
-                existing.paymentMonths = e.paymentMonths;
-            ['updatedInCreditSoftware', 'enteredInCreditSoftware'].forEach((f) => { if (!existing[f] && e[f])
-                existing[f] = e[f]; });
-        });
-        const merged = order.map((k) => byKey.get(k));
+        const all = [...(Array.isArray(l[bankKey]) ? l[bankKey] : []), ...(Array.isArray(c[bankKey]) ? c[bankKey] : [])];
+        const merged = bsDedupeList(all).list;
         merged.sort((a, b) => a.date.localeCompare(b.date));
         out[bankKey] = merged;
     });
@@ -1588,11 +1641,10 @@ function App() {
                     const bl = (s.bankStatements || {}), bc = (bCloud && bCloud.bankStatements) || {};
                     bank = {};
                     ['TMB', 'BOB'].forEach((k) => {
-                        const keyOf = (e) => e.date + '|' + e.desc + '|' + e.balance;
-                        const L = new Set((bl[k] || []).map(keyOf)), C = new Set((bc[k] || []).map(keyOf));
-                        let cloudOnly = 0, localOnly = 0;
-                        C.forEach((x) => { if (!L.has(x)) cloudOnly++; });
-                        L.forEach((x) => { if (!C.has(x)) localOnly++; });
+                        const lList = Array.isArray(bl[k]) ? bl[k] : [], cList = Array.isArray(bc[k]) ? bc[k] : [];
+                        const lIdx = bsIndex(lList), cIdx = bsIndex(cList);
+                        const cloudOnly = cList.filter((e) => !lIdx.find(e)).length;
+                        const localOnly = lList.filter((e) => !cIdx.find(e)).length;
                         bank[k] = { cloudOnly, localOnly };
                     });
                 }
@@ -4473,7 +4525,7 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         const rowStyle = { background: statusBg[status] };
         const months = getMonths(e);
         const cells = [
-            React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { style: descCellStyle, title: e.desc }, e.desc),
+            React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { style: descCellStyle, title: e.desc + "  |  Balance: " + bsAmt(e.balance) }, e.desc),
             React.createElement("td", { className: "mono" }, e.credit > 0 ? fmt(e.credit) : '\u2014'),
         ];
         if (showPartyFields) {
@@ -4530,19 +4582,23 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
     const entries = bankStatements[bank] || [];
 
     const appendRecords = (records, sourceLabel) => {
-        const existingKeys = new Set(entries.map((e) => e.date + '|' + e.desc + '|' + e.balance));
-        const newEntries = [];
-        let duplicates = 0;
-        records.forEach((r) => {
-            const key = r.date + '|' + r.desc + '|' + r.balance;
-            if (existingKeys.has(key)) { duplicates += 1; return; }
-            existingKeys.add(key);
-            newEntries.push(Object.assign({ id: uid('bs') }, r));
-        });
+        // Duplicate-safe: compares against everything already stored (normalised text + numeric amounts),
+        // and also drops repeated rows inside the pasted text itself.
+        const { added, duplicates } = bsAppendNew(entries, records);
+        const newEntries = added.map((r) => Object.assign({ id: uid('bs') }, r));
         const merged = [...entries, ...newEntries].sort((a, b) => a.date.localeCompare(b.date));
         persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: merged }));
         showToast(`${sourceLabel}: added ${newEntries.length} new transaction(s), ${duplicates} duplicate(s) skipped.`);
         return newEntries.length;
+    };
+    // Duplicates that are ALREADY in the stored record (added before this check was tightened, or
+    // merged in from another device) \u2014 found with the same rules and removable in one click.
+    const dupScan = React.useMemo(() => bsDedupeList(entries), [entries]);
+    const removeExistingDuplicates = () => {
+        if (dupScan.removed === 0)
+            return;
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: dupScan.list }));
+        showToast(`${dupScan.removed} duplicate row${dupScan.removed === 1 ? '' : 's'} removed from ${bank}.`);
     };
 
     const parseAndAppend = () => {
@@ -4576,8 +4632,8 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 paste raw statement text")),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, bank === 'BOB'
-                ? "Paste exactly as copied from the BOB site \u2014 one transaction per line, e.g. \"19-09-2026 19-09-2026 BY CASH 516805 1070884.54Cr\" (Txn date, Value date, Description, Amount, Balance with Cr/Dr). Each row is checked against the neighbouring row's balance, and a warning appears if anything doesn't reconcile. Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + description + balance) are skipped automatically."
-                : "Paste exactly as copied from the bank site \u2014 one value per line, repeating: Date, Description, (date again if shown), Debit, Credit, Balance, (Raise Dispute if shown). Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + description + balance) are skipped automatically."),
+                ? "Paste exactly as copied from the BOB site \u2014 one transaction per line, e.g. \"19-09-2026 19-09-2026 BY CASH 516805 1070884.54Cr\" (Txn date, Value date, Description, Amount, Balance with Cr/Dr). Each row is checked against the neighbouring row's balance, and a warning appears if anything doesn't reconcile. Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + balance + description, ignoring spacing/case) are skipped automatically."
+                : "Paste exactly as copied from the bank site \u2014 one value per line, repeating: Date, Description, (date again if shown), Debit, Credit, Balance, (Raise Dispute if shown). Added entries go straight into the permanent Bank Statement record \u2014 duplicates (same date + balance + description, ignoring spacing/case) are skipped automatically."),
             React.createElement("textarea", { className: "text-input", rows: 10, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: pasteText, onChange: (e) => setPasteText(e.target.value), placeholder: "Paste raw statement text here, one value per line" }),
             rawErrorNote,
             React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: parseAndAppend }, "Parse and append"))),
@@ -4586,7 +4642,13 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "For data you already have in a structured table (e.g. from a spreadsheet) \u2014 no pattern detection, just read as-is. One transaction per line, tab-separated, in this exact column order: Date, (blank), Description, Debit, Credit, Balance. Use \"-\" for a column with no amount."),
             React.createElement("textarea", { className: "text-input", rows: 6, style: { fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, value: legacyText, onChange: (e) => setLegacyText(e.target.value), placeholder: "Paste tab-separated legacy data here" }),
             legacyErrorList,
-            React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: uploadLegacyAndAppend }, "Upload legacy data"))));
+            React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: uploadLegacyAndAppend }, "Upload legacy data"))),
+        React.createElement("div", { className: "card" },
+            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 duplicate check")),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, dupScan.removed === 0
+                ? `No duplicate transactions found in the ${entries.length} stored ${bank} rows. (Rows count as duplicates when date and running balance match and the description matches, ignoring spacing/case.)`
+                : `${dupScan.removed} duplicate row${dupScan.removed === 1 ? ' is' : 's are'} already stored in ${bank} (same date, same running balance, same description). Removing keeps the first copy and carries over any party / month / note typed on the other.`),
+            dupScan.removed > 0 && React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: removeExistingDuplicates }, `Remove ${dupScan.removed} duplicate${dupScan.removed === 1 ? '' : 's'}`))));
 }
 
 function BankReconTab(props) {
