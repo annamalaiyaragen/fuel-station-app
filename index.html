@@ -4416,6 +4416,11 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
 
     const [confirmDeleteId, setConfirmDeleteId] = useState(null);
     const deleteEntry = (id) => {
+        if (config.lockUpdatedBankEntries !== false) {
+            showToast('Deleting is locked \u2014 release it in Settings \u2192 Bank Statement lock first.', 'red');
+            setConfirmDeleteId(null);
+            return;
+        }
         const next = entries.filter((e) => e.id !== id);
         persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: next }));
         setConfirmDeleteId(null);
@@ -4450,7 +4455,8 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
     }, []);
 
     const runUpdate = () => {
-        const checked = filteredEntries.filter((e) => e.enteredInCreditSoftware);
+        // Rows already marked green were exported before \u2014 never send them to the receipt entry again.
+        const checked = filteredEntries.filter((e) => e.enteredInCreditSoftware && rowStatus(e) !== 'green');
         if (checked.length === 0) {
             showToast('No rows are checked.', 'red');
             return;
@@ -4492,6 +4498,7 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
     const headerActions = React.createElement("div", { style: { display: 'flex', gap: 10, alignItems: 'center' } },
         React.createElement("select", { className: "select-input", value: "", onChange: (e) => jumpToMonth(e.target.value) }, React.createElement("option", { value: "" }, "Jump to month\u2026"), availableMonths.map((m) => React.createElement("option", { key: m, value: m }, monthLabel(m)))),
         React.createElement("div", { className: "tab-switch" }, ['TMB', 'BOB'].map((b) => React.createElement("button", { key: b, className: bank === b ? 'active' : '', onClick: () => switchBank(b) }, b))),
+        React.createElement("button", { className: "btn btn-ghost", onClick: clearFilters, title: "Reset every filter (date, description, amount, party, month, status)" }, "Clear filters"),
         showUpdateFeatures && yellowCount > 0 && React.createElement("button", { className: "btn btn-secondary", onClick: () => setConfirmMarkAll(true) }, `Mark ${yellowCount} old entr${yellowCount === 1 ? 'y' : 'ies'} as updated`),
         showUpdateFeatures && React.createElement("button", { className: "btn btn-primary", onClick: runUpdate }, "Update"));
 
@@ -4513,8 +4520,8 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         showPartyFields ? React.createElement("td", null, React.createElement("select", { className: "select-input", value: filters.paymentMonth, onChange: (e) => updFilter('paymentMonth', e.target.value) }, React.createElement("option", { value: "" }, "Any"), monthOptions.map((m) => React.createElement("option", { key: m, value: m }, m)))) : null,
         // Status is only a FILTER now (row colour already shows it) - it sits above the Note column.
         React.createElement("td", null, showUpdateFeatures ? React.createElement("select", { className: "select-input", value: filters.status, onChange: (e) => updFilter('status', e.target.value) }, React.createElement("option", { value: "" }, "Status: any"), React.createElement("option", { value: "green" }, "Status: Green"), React.createElement("option", { value: "yellow" }, "Status: Yellow"), React.createElement("option", { value: "none" }, "Status: none")) : null),
-        showUpdateFeatures ? React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear")) : null,
-        React.createElement("td", null, !showUpdateFeatures ? React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: clearFilters }, "Clear") : null));
+        showUpdateFeatures ? React.createElement("td", null) : null,
+        React.createElement("td", null));
 
     const descCellStyle = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
     const statusBg = { green: 'var(--green-bg)', yellow: 'var(--amber-dim)', none: 'transparent' };
@@ -4531,27 +4538,41 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         if (showPartyFields) {
             cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", list: datalistId, value: e.party || '', disabled: locked, onChange: (ev) => updateEntry(e.id, { party: ev.target.value }), placeholder: "Party name" })));
             cells.push(React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-sm", disabled: locked, style: { width: '100%', textAlign: 'left' }, onClick: () => setMonthModalFor(e.id) }, months.length > 0 ? months.join(', ') : '\u2014 Select \u2014')));
-            // Free-text note per entry (never locked, and doesn't affect green/yellow status).
-            cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", value: e.note || '', placeholder: "Description / note", onChange: (ev) => updateEntry(e.id, { note: ev.target.value }) })));
+            // Free-text note per entry. Doesn't affect green/yellow status, but is locked together with
+            // Party/Month on updated (green) rows while the lock is on.
+            cells.push(React.createElement("td", null, React.createElement("input", { className: "text-input", value: e.note || '', disabled: locked, placeholder: "Description / note", onChange: (ev) => updateEntry(e.id, { note: ev.target.value }) })));
             if (showUpdateFeatures)
                 cells.push(React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: !!e.enteredInCreditSoftware, disabled: locked, onChange: (ev) => updateEntry(e.id, { enteredInCreditSoftware: ev.target.checked }) })));
         }
         cells.push(React.createElement("td", null, confirmDeleteId === e.id
             ? React.createElement("div", { style: { display: 'flex', gap: 4 } }, React.createElement("button", { className: "btn btn-danger btn-xs", onClick: () => deleteEntry(e.id) }, "Confirm"), React.createElement("button", { className: "btn btn-ghost btn-xs", onClick: () => setConfirmDeleteId(null) }, "Cancel"))
-            : React.createElement("button", { className: "icon-btn", title: "Delete this entry", onClick: () => setConfirmDeleteId(e.id) }, React.createElement(IconTrash, { size: 14 }))));
+            : React.createElement("button", { className: "icon-btn", disabled: lockEnabled, style: lockEnabled ? { opacity: 0.35, cursor: 'not-allowed' } : undefined, title: lockEnabled ? "Locked \u2014 release it in Settings \u2192 Bank Statement lock to delete entries" : "Delete this entry", onClick: () => { if (!lockEnabled) setConfirmDeleteId(e.id); } }, React.createElement(IconTrash, { size: 14 }))));
         return React.createElement("tr", { key: e.id, style: rowStyle }, ...cells);
     });
 
+    // "Select all" for the In-credit-software column: ticks/unticks every currently FILTERED row.
+    // Rows already marked green (updated) are skipped \u2014 they're locked and must not be sent again.
+    const selectableRows = filteredEntries.filter((e) => rowStatus(e) !== 'green');
+    const selectedCount = selectableRows.filter((e) => e.enteredInCreditSoftware).length;
+    const allSelected = selectableRows.length > 0 && selectedCount === selectableRows.length;
+    const toggleSelectAll = (value) => {
+        const ids = new Set(selectableRows.map((e) => e.id));
+        const next = entries.map((e) => ids.has(e.id) ? Object.assign(Object.assign({}, e), { enteredInCreditSoftware: value }) : e);
+        persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: next }));
+    };
+    const selectAllHeader = React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }, title: `Tick / untick all ${selectableRows.length} filtered row${selectableRows.length === 1 ? '' : 's'} that aren't already updated` },
+        React.createElement("input", { type: "checkbox", checked: allSelected, disabled: selectableRows.length === 0, ref: (el) => { if (el) el.indeterminate = selectedCount > 0 && !allSelected; }, onChange: (ev) => toggleSelectAll(ev.target.checked) }),
+        React.createElement("span", null, "In credit software"));
     const headerCells = ["Date", "Description", "Credit"];
     if (showUpdateFeatures)
-        headerCells.push("Party", "Month", "Note", "In credit software");
+        headerCells.push("Party", "Month", "Note", selectAllHeader);
     else if (showPartyFields)
         headerCells.push("Party", "Month", "Note");
     headerCells.push("");
 
     const table = React.createElement("div", { style: { overflowX: 'auto', maxWidth: '100%' } }, React.createElement("table", { className: "data-table", style: { tableLayout: 'fixed' } },
         colGroup,
-        React.createElement("thead", null, React.createElement("tr", null, headerCells.map((h) => React.createElement("th", { key: h }, h))), filterRow),
+        React.createElement("thead", null, React.createElement("tr", null, headerCells.map((h, i) => React.createElement("th", { key: i }, h))), filterRow),
         React.createElement("tbody", null, ...tableRows)));
 
     const emptyMsg = filteredEntries.length === 0 ? React.createElement("div", { className: "empty-hint" }, entries.length === 0 ? `No ${bank} statement entries stored yet \u2014 go to Data Parsing to add some.` : `No entries match the current filters.`) : null;
@@ -4569,7 +4590,7 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         partyDatalist,
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Stored ${bank} statement \u2014 ${entries.length} entries total, ${filteredEntries.length} shown`)),
-            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a permanent record \u2014 entries are added from the Data Parsing tab; there's no way to clear them from this screen. Use the Reconciliation page to check these against your books."),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a permanent record \u2014 entries are added from the Data Parsing tab. Use the Reconciliation page to check these against your books." + (config.lockUpdatedBankEntries !== false ? " Locked: Party / Month / Note / checkbox of updated (green) rows, and deleting any entry. Release it in Settings \u2192 Bank Statement lock." : " Lock is released (Settings \u2192 Bank Statement lock): updated rows can be edited and entries deleted.")),
             emptyMsg, table),
         monthModal);
 }
@@ -4882,6 +4903,7 @@ function BankSettingsPane({ config, persistConfig }) {
     const upd = (bank, type, field, value) => setLocal((c) => (Object.assign(Object.assign({}, c), { [bank]: Object.assign(Object.assign({}, c[bank]), { [type]: Object.assign(Object.assign({}, c[bank][type]), { [field]: value }) }) })));
     const updMapping = (type, bankValue) => setMapping((m) => Object.assign(Object.assign({}, m), { [type]: bankValue }));
     const [lockSetting, setLockSetting] = useState(config.lockUpdatedBankEntries !== false);
+    useEffect(() => { setLockSetting(config.lockUpdatedBankEntries !== false); }, [config.lockUpdatedBankEntries]);
     const dirty = JSON.stringify(local) !== JSON.stringify(config.bankSettings) || JSON.stringify(mapping) !== JSON.stringify(config.bankTypeMapping || {}) || lockSetting !== (config.lockUpdatedBankEntries !== false);
     const save = () => persistConfig(Object.assign(Object.assign({}, config), { bankSettings: local, bankTypeMapping: mapping, lockUpdatedBankEntries: lockSetting }));
     const [testLine, setTestLine] = useState({});
@@ -4893,9 +4915,9 @@ function BankSettingsPane({ config, persistConfig }) {
         React.createElement("div", { className: "form-grid" }, ...mappingFields));
 
     const lockSection = React.createElement("div", { className: "card" },
-        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement \u2014 lock updated entries")),
-        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on, Party/Month/checkbox become read-only for any row already marked green (updated into your credit software) \u2014 preventing accidental edits or duplicate entries. Turn off temporarily to correct a mistake; editing an unlocked green row sends it back to yellow, waiting to be updated again."),
-        React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8 } }, React.createElement("input", { type: "checkbox", checked: lockSetting, onChange: (e) => setLockSetting(e.target.checked) }), "Lock updated (green) Bank Statement entries"));
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement \u2014 lock updated entries & deleting")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on, Party / Month / Note / checkbox become read-only for any row already marked green (updated into your credit software), and the delete icon is locked for every entry \u2014 preventing accidental edits, deletions or duplicate entries. Turn off temporarily to correct a mistake; editing Party or Month of an unlocked green row sends it back to yellow, waiting to be updated again. (Also available directly in Settings \u2192 Bank Statement lock.)"),
+        React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8 } }, React.createElement("input", { type: "checkbox", checked: lockSetting, onChange: (e) => setLockSetting(e.target.checked) }), "Lock updated (green) entries and deleting"));
 
     const typeSections = BANK_TXN_TYPES.map((t) => {
         const bankForType = mapping[t.key] || 'SBI';
@@ -4939,7 +4961,7 @@ function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts
         setConfirmText('');
         showToast('Everything has been wiped \u2014 starting from a clean slate.');
     };
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement lock")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on (recommended), Party / Month / Note / checkbox are read-only for updated (green) rows on the Bank Statement page, and the delete icon is locked for every entry. Turn it off only while you need to correct a mistake, then turn it back on. Editing Party or Month of an unlocked green row sends it back to yellow."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: config.lockUpdatedBankEntries !== false, onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { lockUpdatedBankEntries: e.target.checked })) }), " Lock updated entries and deleting")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
         onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { allowPreDatedChanges: e.target.checked })) }), " Allow pre-dated changes")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Move data to a new device or hosted copy")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Since your data lives only in this browser, moving to a new hosted copy (like GitHub Pages) or a different device won't bring it along automatically. Export a backup here, then Import it on the new copy \u2014 do this once, and Google Drive will keep them in sync from then on."), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-primary", onClick: exportData }, React.createElement(IconDownload, { size: 15 }), " Export backup (.json)"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { var _a; return (_a = fileInputRef.current) === null || _a === void 0 ? void 0 : _a.click(); } }, "Import backup (.json)"), React.createElement("input", { ref: fileInputRef, type: "file", accept: "application/json", style: { display: 'none' },
         onChange: (e) => { var _a; const f = (_a = e.target.files) === null || _a === void 0 ? void 0 : _a[0]; if (f)
             importData(f); e.target.value = ''; } }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Master reset")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This permanently wipes every MS Daily, Diesel Daily, Day Closing, Salary, Advance, and Bank Reconciliation entry you've saved, and resets Master Data (employees, pumps, products, lubes, opening readings, bank parsing settings) back to the built-in defaults. There is no undo \u2014 make sure any data you care about is backed up (Google Drive, or otherwise) before doing this."), !confirmingReset && React.createElement("button", { className: "btn btn-danger", onClick: () => setConfirmingReset(true) }, "Wipe all data and master data"), confirmingReset && React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "confirm-bar" }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "Type RESET below to confirm \u2014 this cannot be undone.")), React.createElement("input", { className: "text-input", style: { maxWidth: 200 }, value: confirmText, onChange: (e) => setConfirmText(e.target.value), placeholder: "Type RESET" }), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-danger", disabled: confirmText !== 'RESET', onClick: doMasterReset }, "Confirm wipe"), React.createElement("button", { className: "btn btn-ghost", onClick: () => { setConfirmingReset(false); setConfirmText(''); } }, "Cancel")))));
