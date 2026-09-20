@@ -1057,6 +1057,9 @@ function App() {
     const [lastUploadAt, setLastUploadAt] = useState(null);
     const [lastDownloadAt, setLastDownloadAt] = useState(null);
     const tokenClientRef = useRef(null);
+    const tokenRejectRef = useRef(null);
+    const [connectError, setConnectError] = useState(null);
+    const [skipDriveGate, setSkipDriveGate] = useState(false);
     const cachedTokenRef = useRef({ token: null, expiresAt: 0 });
     const driveFileIdRef = useRef(null);
     const bankStatementsDriveFileIdRef = useRef(null);
@@ -1128,7 +1131,7 @@ function App() {
         let tries = 0;
         const tryInit = () => {
             if (window.google && window.google.accounts && window.google.accounts.oauth2) {
-                tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({ client_id: GOOGLE_CLIENT_ID, scope: DRIVE_SCOPE, callback: () => { } });
+                tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({ client_id: GOOGLE_CLIENT_ID, scope: DRIVE_SCOPE, callback: () => { }, error_callback: (err) => { if (tokenRejectRef.current) tokenRejectRef.current(err || new Error('token_error')); } });
                 setDriveReady(true);
             }
             else if (tries < 40) {
@@ -1138,17 +1141,32 @@ function App() {
         };
         tryInit();
     }, [configuredClientId]);
+    // Resolves with a token, or rejects if Google reports an error, the popup is closed/blocked
+    // (error_callback), or nothing happens for 2 minutes \u2014 previously a closed or blocked popup left
+    // this promise pending forever, which kept the "sync running" lock held and made the Connect
+    // button do nothing until the page was reloaded.
     function requestToken(promptType) {
         return new Promise((resolve, reject) => {
             if (!tokenClientRef.current) {
                 reject(new Error('not_ready'));
                 return;
             }
-            tokenClientRef.current.callback = (resp) => { if (resp && resp.error)
-                reject(resp);
-            else
-                resolve(resp); };
-            tokenClientRef.current.requestAccessToken({ prompt: promptType });
+            // A newer request (e.g. the user clicking Connect while the automatic silent reconnect is
+            // still waiting) supersedes any earlier one, so a stale request can't linger or clobber it.
+            if (tokenRejectRef.current)
+                tokenRejectRef.current(new Error('superseded'));
+            let done = false;
+            const timer = setTimeout(() => { finish(() => reject(new Error('token_timeout'))); }, 120000);
+            const myReject = (err) => finish(() => reject(err));
+            const finish = (fn) => { if (done) return; done = true; clearTimeout(timer); if (tokenRejectRef.current === myReject) tokenRejectRef.current = null; fn(); };
+            tokenRejectRef.current = myReject;
+            tokenClientRef.current.callback = (resp) => finish(() => { if (resp && resp.error) reject(resp); else resolve(resp); });
+            try {
+                tokenClientRef.current.requestAccessToken({ prompt: promptType });
+            }
+            catch (e) {
+                finish(() => reject(e));
+            }
         });
     }
     // Reuses a still-valid cached token instead of asking Google for a new one every time \u2014
@@ -1284,6 +1302,7 @@ function App() {
     const connectDrive = async () => {
         if (driveSyncInFlightRef.current)
             return;
+        setConnectError(null);
         try {
             await withSyncLock(async () => {
                 const resp = await requestToken('consent');
@@ -1292,6 +1311,11 @@ function App() {
             });
         }
         catch (e) {
+            console.error('[Drive connect error]', e);
+            const t = e && (e.type || e.error || e.message) ? String(e.type || e.error || e.message) : 'unknown';
+            setConnectError(t === 'popup_closed' || t === 'token_timeout' ? 'The Google sign-in window was closed or timed out. Please try again.'
+                : t === 'popup_failed_to_open' ? 'Your browser blocked the Google sign-in window. Allow pop-ups for this site and try again.'
+                    : `Google sign-in failed (${t}). If you opened this file from a preview or your computer instead of the real app address, Google will refuse to sign in there.`);
             showToast('Could not connect to Google Drive.', 'red');
         }
     };
@@ -1647,9 +1671,9 @@ function App() {
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
         advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, bankStatements, persistBankStatements, dsrData, persistDsrData, ttData, persistTtData, workingDate, setWorkingDate, pushNow, showToast };
-    const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline;
+    const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline && !skipDriveGate;
     if (mustConnectFirst) {
-        return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"))));
+        return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"), connectError && React.createElement("div", { className: "empty-hint", style: { marginTop: 12, color: 'var(--red, #e5484d)' } }, connectError), connectError && React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 8 }, onClick: () => setSkipDriveGate(true) }, "Continue without Drive for now"), connectError && React.createElement("div", { className: "empty-hint", style: { marginTop: 6, fontSize: 12 } }, "Data is saved on this device meanwhile. Connect from Settings later \u2014 it will merge safely with what is on Drive."))));
     }
     return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }));
 }
