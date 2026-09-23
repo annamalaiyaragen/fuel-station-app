@@ -244,24 +244,119 @@ const IconBank = (p) => Ico(Object.assign(Object.assign({}, p), { d: [React.crea
 const IconChart = (p) => Ico(Object.assign(Object.assign({}, p), { d: [React.createElement("path", { key: 1, d: "M3 3v18h18" }), React.createElement("path", { key: 2, d: "M7 16l4-6 4 3 5-8" })] }));
 /* ---------- storage (plain localStorage, private to this browser) ---------- */
 async function storageGet(key, fallback) {
+    let raw = null;
     try {
-        const raw = window.localStorage.getItem(key);
+        raw = window.localStorage.getItem(key);
         if (raw == null)
             return fallback;
         return JSON.parse(raw);
     }
     catch (e) {
+        // Unreadable stored data: never silently fall back to empty and then overwrite it. Keep a
+        // copy of what was there (if space allows) and raise a warning banner instead.
+        if (raw != null) {
+            try { window.localStorage.setItem('fs_corrupt_' + key + '_' + Date.now(), raw); } catch (e2) { }
+            fsRaiseStorageAlert({ kind: 'corrupt', key });
+        }
         return fallback;
     }
 }
 async function storageSet(key, value) {
     try {
         window.localStorage.setItem(key, JSON.stringify(value));
+        if (window.__fsStorageFull) {
+            window.__fsStorageFull = false;
+            window.dispatchEvent(new Event('fs-storage-ok'));
+        }
         return true;
     }
     catch (e) {
+        // Most often the browser's storage quota being full. The data is still in memory (and is
+        // pushed to Drive), but it would be lost on reload — so make it impossible to miss.
+        window.__fsStorageFull = true;
+        fsRaiseStorageAlert({ kind: 'full', key });
         return false;
     }
+}
+// Alerts raised before the App component has mounted (e.g. while loading) are kept on window so the
+// App can pick them up when it starts listening.
+function fsRaiseStorageAlert(alert) {
+    window.__fsStorageAlert = alert;
+    try { window.dispatchEvent(new CustomEvent('fs-storage-alert', { detail: alert })); } catch (e) { }
+}
+// Approximate localStorage usage (characters = key + value lengths), grouped for the Settings meter.
+const FS_STORAGE_LABELS = { fs_bank_statements: 'Bank statements (TMB + BOB)', fs_ms_log: 'MS Daily log', fs_diesel_log: 'Diesel Daily log', fs_ms_readings: 'MS readings', fs_ms_drafts: 'MS drafts', fs_diesel_data: 'Diesel data', fs_day_closing: 'Day Closing', fs_advance: 'Advance / Recovery', fs_salary_runs: 'Salary runs', fs_bank_recon: 'Bank reconciliation', fs_dsr_data: 'Daily Stock Register', fs_tt_data: 'TT', fs_config: 'Settings / master data' };
+function measureLocalStorage() {
+    const rows = {};
+    let total = 0;
+    try {
+        for (let i = 0; i < window.localStorage.length; i++) {
+            const k = window.localStorage.key(i);
+            const v = window.localStorage.getItem(k) || '';
+            const size = k.length + v.length;
+            total += size;
+            const label = FS_STORAGE_LABELS[k] || (k.startsWith('fs_corrupt_') ? 'Saved copies of unreadable data' : 'Other');
+            rows[label] = (rows[label] || 0) + size;
+        }
+    }
+    catch (e) { }
+    return { total, rows: Object.keys(rows).map((label) => ({ label, size: rows[label] })).sort((a, b) => b.size - a.size) };
+}
+// Finds out how much room this browser really allows by filling a temporary key until it refuses.
+function probeStorageLimit() {
+    const key = 'fs_probe_tmp';
+    const chunk = 'x'.repeat(200000);
+    let s = '', size = 0;
+    try {
+        while (size < 12000000) { s += chunk; window.localStorage.setItem(key, s); size = s.length; }
+    }
+    catch (e) { }
+    try { window.localStorage.removeItem(key); } catch (e) { }
+    return size;
+}
+// ---- Build / device identity ----
+// Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
+// into every Drive write so a device running an OLDER build can tell newer data exists and stop
+// pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
+const APP_BUILD = '2026.09.21-2';
+function compareBuild(a, b) {
+    const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
+    const pa = parse(a), pb = parse(b);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0);
+        if (d !== 0)
+            return d < 0 ? -1 : 1;
+    }
+    return 0;
+}
+function getDeviceId() {
+    try {
+        let id = window.localStorage.getItem('fuelapp_device_id');
+        if (!id) {
+            id = 'dev_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+            window.localStorage.setItem('fuelapp_device_id', id);
+        }
+        return id;
+    }
+    catch (e) { return 'dev_unknown'; }
+}
+function getDeviceName() { try { return window.localStorage.getItem('fuelapp_device_name') || ''; } catch (e) { return ''; } }
+function writerInfo() { return { build: APP_BUILD, deviceId: getDeviceId(), deviceName: getDeviceName(), at: new Date().toISOString() }; }
+// Stable comparison of two saved records ignoring volatile fields (savedAt etc.). Used so autosave /
+// re-save of an UNCHANGED record does nothing — no new timestamp, no push — which is what lets the
+// merge rule "newer savedAt wins" mean "edited more recently" rather than "autosaved more recently".
+function stableStringify(v) {
+    if (v === undefined)
+        return 'null';
+    if (v === null || typeof v !== 'object')
+        return JSON.stringify(v);
+    if (Array.isArray(v))
+        return '[' + v.map(stableStringify).join(',') + ']';
+    return '{' + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+}
+function recordsEquivalent(a, b, ignoreKeys) {
+    const strip = (o) => { const c = Object.assign({}, o); (ignoreKeys || ['savedAt']).forEach((k) => { delete c[k]; }); return c; };
+    return stableStringify(strip(a)) === stableStringify(strip(b));
 }
 // Merge two arrays of records that each have a unique `id`, keeping whichever version of a given id
 // was saved more recently. Records that only exist on one side are always kept \u2014 never discarded.
@@ -445,9 +540,11 @@ async function driveDownload(token, fileId) {
         throw new Error('drive_download_failed_' + res.status);
     return res.json();
 }
-async function driveCreate(token, content, fileName) {
+async function driveCreate(token, content, fileName, parents) {
     const boundary = 'fuelstation314159265';
     const metadata = { name: fileName || DRIVE_FILE_NAME, mimeType: 'application/json' };
+    if (parents && parents.length)
+        metadata.parents = parents;
     const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(content)}\r\n--${boundary}--`;
     const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,modifiedTime', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body });
     if (!res.ok)
@@ -459,6 +556,172 @@ async function driveUpdate(token, fileId, content) {
     if (!res.ok)
         throw new Error('drive_update_failed_' + res.status);
     return res.json();
+}
+// ---------------------------------------------------------------------------------------------
+// Permanent snapshots + financial-year archives on Google Drive.
+// NOTHING in this block ever deletes or overwrites a Drive file: every snapshot and every archive is
+// created once and kept forever (the app has no delete/trim code for them at all).
+// ---------------------------------------------------------------------------------------------
+const DRIVE_SNAPSHOT_FOLDER = 'Fuel Station Snapshots';
+const DRIVE_ARCHIVE_FOLDER = 'Fuel Station Archive';
+const LS_SNAP_DAY = 'fuelapp_last_snapshot_day';
+const LS_SNAP_HASH = 'fuelapp_last_snapshot_hash';
+// Fast non-cryptographic hash, used only to notice "nothing changed since the last snapshot".
+function quickHash(str) {
+    let h1 = 0xdeadbeef ^ str.length, h2 = 0x41c6ce57 ^ str.length;
+    for (let i = 0; i < str.length; i++) {
+        const ch = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+async function sha256Hex(str) {
+    try {
+        if (window.crypto && window.crypto.subtle) {
+            const buf = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+            return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+    }
+    catch (e) { }
+    return null;
+}
+async function driveFolderIds(token, folderName, create) {
+    const q = encodeURIComponent(`name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&orderBy=createdTime&pageSize=20&fields=files(id,name)`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+    if (!res.ok)
+        throw new Error('drive_folder_failed_' + res.status);
+    let ids = ((await res.json()).files || []).map((f) => f.id);
+    if (!ids.length && create) {
+        const r2 = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder' }) });
+        if (!r2.ok)
+            throw new Error('drive_folder_create_failed_' + r2.status);
+        ids = [(await r2.json()).id];
+    }
+    return ids;
+}
+async function driveListFolder(token, folderIds) {
+    const out = [];
+    for (const id of folderIds) {
+        let pageToken = '';
+        do {
+            const q = encodeURIComponent(`'${id}' in parents and trashed=false`);
+            const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&pageSize=1000&fields=nextPageToken,files(id,name,modifiedTime,size)${pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : ''}`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+            if (!res.ok)
+                throw new Error('drive_list_failed_' + res.status);
+            const data = await res.json();
+            (data.files || []).forEach((f) => out.push(f));
+            pageToken = data.nextPageToken || '';
+        } while (pageToken);
+    }
+    return out;
+}
+const snapNameFor = (day, stamp) => `fuel_station_snapshot_${day}${stamp ? '_' + stamp : ''}.json`;
+function snapshotFingerprint(doc) {
+    const main = Object.assign({}, doc.main || {});
+    delete main.savedAt;
+    delete main.writtenBy;
+    delete main.appBuild;
+    return quickHash(stableStringify({ main, bank: doc.bankStatements || null }));
+}
+// Writes one snapshot file unless a file with that name already exists in the snapshot folder.
+async function driveWriteSnapshot(token, doc, fileName) {
+    const folders = await driveFolderIds(token, DRIVE_SNAPSHOT_FOLDER, true);
+    const existing = await driveListFolder(token, folders);
+    if (existing.some((f) => f.name === fileName))
+        return { status: 'exists' };
+    const created = await driveCreate(token, doc, fileName, [folders[0]]);
+    return { status: 'created', id: created.id };
+}
+async function driveListSnapshots(token) {
+    const folders = await driveFolderIds(token, DRIVE_SNAPSHOT_FOLDER, false);
+    const files = (await driveListFolder(token, folders)).filter((f) => /^fuel_station_snapshot_.*\.json$/.test(f.name));
+    files.sort((a, b) => b.name.localeCompare(a.name));
+    return files;
+}
+// ---- financial years (1 April to 31 March) ----
+const fyStartYearOf = (dateStr) => { const y = Number(dateStr.slice(0, 4)), m = Number(dateStr.slice(5, 7)); return m >= 4 ? y : y - 1; };
+const fyLabel = (y) => `${y}-${String((y + 1) % 100).padStart(2, '0')}`;
+const fyBounds = (y) => ({ from: `${y}-04-01`, to: `${y + 1}-03-31` });
+const inDateRange = (d, r) => typeof d === 'string' && d.length >= 10 && d.slice(0, 10) >= r.from && d.slice(0, 10) <= r.to;
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+function filterArrayByDate(arr, r) { return (Array.isArray(arr) ? arr : []).filter((x) => x && inDateRange(x.date, r)); }
+function filterKeyedByDate(obj, r) {
+    const out = {};
+    Object.keys(obj && typeof obj === 'object' ? obj : {}).forEach((k) => { if (DATE_KEY_RE.test(k) && inDateRange(k, r))
+        out[k] = obj[k]; });
+    return out;
+}
+// Everything dated inside the financial year, copied (never moved) out of the working data.
+function buildFyArchive(state, startYear, meta) {
+    const s = state || {};
+    const r = fyBounds(startYear);
+    const salaryRuns = {};
+    Object.keys(s.salaryRuns || {}).forEach((k) => { if (/^\d{4}-\d{2}$/.test(k) && inDateRange(k + '-01', r))
+        salaryRuns[k] = s.salaryRuns[k]; });
+    const bank = s.bankStatements || {};
+    const sections = {
+        msLog: filterArrayByDate(s.msLog, r),
+        dieselLog: filterArrayByDate(s.dieselLog, r),
+        dayClosing: filterKeyedByDate(s.dayClosing, r),
+        advanceLog: (s.advance && Array.isArray(s.advance.log) ? s.advance.log : []).filter((x) => x && inDateRange(x.date, r)),
+        salaryRuns,
+        msReadings: filterKeyedByDate(s.msReadings, r),
+        dsrData: filterKeyedByDate(s.dsrData, r),
+        bankTMB: filterArrayByDate(bank.TMB, r),
+        bankBOB: filterArrayByDate(bank.BOB, r),
+    };
+    // Not date-keyed (running balances, settings, trip history): included whole, "as it stood" at archive time.
+    const context = { config: s.config || null, dieselData: s.dieselData || null, bankRecon: s.bankRecon || null, ttData: s.ttData || null, advanceBalances: (s.advance && s.advance.balances) || null };
+    const counts = {};
+    Object.keys(sections).forEach((k) => { const v = sections[k]; counts[k] = Array.isArray(v) ? v.length : Object.keys(v).length; });
+    return Object.assign({ kind: 'fy-archive', version: 1, fy: fyLabel(startYear), from: r.from, to: r.to, counts, sections, context }, meta || {});
+}
+async function archiveChecksum(arch) {
+    const text = stableStringify({ sections: arch.sections, context: arch.context });
+    return { quick: quickHash(text), sha256: await sha256Hex(text), length: text.length };
+}
+const archiveFileName = (fy, checkpointDay) => `fuel_station_archive_FY${fy}${checkpointDay ? '_checkpoint_' + checkpointDay : ''}.json`;
+// Creates the archive file (never overwrites an existing one), downloads it straight back and checks that
+// what Drive holds is exactly what was built. Throws if it does not match; nothing local is changed either way.
+async function driveWriteFyArchive(token, arch, fileName) {
+    const folders = await driveFolderIds(token, DRIVE_ARCHIVE_FOLDER, true);
+    const existing = await driveListFolder(token, folders);
+    const same0 = existing.find((f) => f.name === fileName);
+    if (same0)
+        return { status: 'exists', id: same0.id };
+    arch.checksum = await archiveChecksum(arch);
+    const created = await driveCreate(token, arch, fileName, [folders[0]]);
+    const back = await driveDownload(token, created.id);
+    const check = await archiveChecksum(back);
+    const same = check.quick === arch.checksum.quick && check.length === arch.checksum.length && (!check.sha256 || !arch.checksum.sha256 || check.sha256 === arch.checksum.sha256);
+    if (!same)
+        throw new Error('archive_verify_failed');
+    return { status: 'created', id: created.id, checksum: arch.checksum };
+}
+async function driveListArchives(token) {
+    const folders = await driveFolderIds(token, DRIVE_ARCHIVE_FOLDER, false);
+    const files = (await driveListFolder(token, folders)).filter((f) => /^fuel_station_archive_FY.*\.json$/.test(f.name));
+    files.sort((a, b) => b.name.localeCompare(a.name));
+    return files;
+}
+async function verifyArchiveFile(token, fileId) {
+    const doc = await driveDownload(token, fileId);
+    if (!doc || doc.kind !== 'fy-archive' || !doc.checksum)
+        return { ok: false, reason: 'Not a valid archive file.' };
+    const now = await archiveChecksum(doc);
+    const ok = now.quick === doc.checksum.quick && now.length === doc.checksum.length && (!now.sha256 || !doc.checksum.sha256 || now.sha256 === doc.checksum.sha256);
+    return { ok, doc };
+}
+function buildSnapshotDoc(s) {
+    s = s || {};
+    return {
+        kind: 'snapshot', version: 1, takenAt: new Date().toISOString(), appBuild: APP_BUILD, writtenBy: writerInfo(),
+        main: { version: 2, savedAt: new Date().toISOString(), config: s.config, msReadings: s.msReadings, msDrafts: s.msDrafts, msLog: s.msLog, dieselData: s.dieselData, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns, bankRecon: s.bankRecon, dsrData: s.dsrData, ttData: s.ttData },
+        bankStatements: s.bankStatements || null,
+    };
 }
 // Merges a device's local state with a Drive copy of the main backup. Pure function (no React, no
 // localStorage) so the same logic serves connect-time sync, "Sync now", and the pre-push safety
@@ -667,9 +930,13 @@ async function driveSyncFile(token, o, depth) {
                 console.warn('[Drive sync] skipping unreadable duplicate copy', files[i].id, e);
                 continue;
             }
+            if (o.checkCloud)
+                o.checkCloud(copy); // throws if the data was written by a NEWER app build than this one
             cloud = cloud ? o.mergeCopies(cloud, copy) : copy;
         }
         const merged = o.merge(o.getLocal(), cloud, o.force ? 'connect' : 'push');
+        if (o.stamp)
+            o.stamp(merged);
         o.apply(merged);
         let written = null;
         for (let i = files.length - 1; i >= 0; i--) { // oldest first, so the newest copy stays newest
@@ -1132,6 +1399,66 @@ function App() {
     const pendingPushRef = useRef(false);
     const pushNowRef = useRef(null);
     const initialLoadStampSkippedRef = useRef(false);
+    // ---- build / device / storage alerts ----
+    const [outdatedBuild, setOutdatedBuild] = useState(null);      // build number of newer data found on Drive
+    const outdatedBuildRef = useRef(null);
+    const [newBuildAvailable, setNewBuildAvailable] = useState(null);
+    const [storageAlert, setStorageAlert] = useState(() => window.__fsStorageAlert || null);
+    const [deviceName, setDeviceNameState] = useState(getDeviceName());
+    const [nameSkipped, setNameSkipped] = useState(false);
+    const setDeviceName = (n) => { try { window.localStorage.setItem('fuelapp_device_name', n.trim()); } catch (e) { } setDeviceNameState(n.trim()); };
+    // Called by the sync engine for every Drive copy it reads. Newer data than this build => stop.
+    function checkCloudBuild(copy) {
+        if (copy && copy.appBuild && compareBuild(copy.appBuild, APP_BUILD) > 0) {
+            outdatedBuildRef.current = copy.appBuild;
+            setOutdatedBuild(copy.appBuild);
+            throw new Error('build_outdated');
+        }
+    }
+    useEffect(() => {
+        const onAlert = (ev) => setStorageAlert(ev.detail);
+        const onOk = () => setStorageAlert((a) => (a && a.kind === 'full' ? null : a));
+        window.addEventListener('fs-storage-alert', onAlert);
+        window.addEventListener('fs-storage-ok', onOk);
+        return () => { window.removeEventListener('fs-storage-alert', onAlert); window.removeEventListener('fs-storage-ok', onOk); };
+    }, []);
+    // When this device's storage refuses a write, immediately get the data safely to Drive.
+    useEffect(() => {
+        if (storageAlert && storageAlert.kind === 'full' && driveConnected)
+            pushNow();
+        // eslint-disable-next-line
+    }, [storageAlert]);
+    // After loading, warn early if the browser storage is getting full.
+    useEffect(() => {
+        if (!ready)
+            return;
+        const used = measureLocalStorage().total;
+        if (used > 4000000)
+            setStorageAlert((a) => a || { kind: 'nearlyfull', used });
+    }, [ready]);
+    // Is a newer version of the app deployed? Reads this page's own address without cache and compares
+    // build numbers. Silent when opened from a preview / local file, or if the fetch fails.
+    useEffect(() => {
+        if (!/^https?:$/.test(window.location.protocol))
+            return;
+        let last = 0;
+        const check = async () => {
+            last = Date.now();
+            try {
+                const res = await fetch(window.location.origin + window.location.pathname, { cache: 'no-store' });
+                if (!res.ok)
+                    return;
+                const m = /const APP_BUILD = '([^']+)'/.exec(await res.text());
+                if (m && compareBuild(m[1], APP_BUILD) > 0)
+                    setNewBuildAvailable(m[1]);
+            }
+            catch (e) { }
+        };
+        const t = setTimeout(check, 4000);
+        const onVis = () => { if (document.visibilityState === 'visible' && Date.now() - last > 300000) check(); };
+        document.addEventListener('visibilitychange', onVis);
+        return () => { clearTimeout(t); document.removeEventListener('visibilitychange', onVis); };
+    }, []);
     const configuredClientId = GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('PASTE_');
     useEffect(() => {
         (async () => {
@@ -1244,7 +1571,7 @@ function App() {
     }
     function buildPayload() {
         const s = latestStateRef.current;
-        return { version: 2, savedAt: new Date().toISOString(), config: s.config, msReadings: s.msReadings, msDrafts: s.msDrafts, msLog: s.msLog, dieselData: s.dieselData, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns, bankRecon: s.bankRecon, dsrData: s.dsrData, ttData: s.ttData };
+        return { version: 2, savedAt: new Date().toISOString(), appBuild: APP_BUILD, writtenBy: writerInfo(), config: s.config, msReadings: s.msReadings, msDrafts: s.msDrafts, msLog: s.msLog, dieselData: s.dieselData, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns, bankRecon: s.bankRecon, dsrData: s.dsrData, ttData: s.ttData };
     }
     function applyCloudData(data, push = true) {
         suppressPushRef.current = !push;
@@ -1313,6 +1640,8 @@ function App() {
             mergeCopies: (a, b) => mergeLocalWithCloud(a, b, false, false),
             apply: applyMerged,
             buildPayload,
+            stamp: (m) => { m.appBuild = APP_BUILD; m.writtenBy = writerInfo(); },
+            checkCloud: checkCloudBuild,
         };
     }
     // Runs fn while holding the single "a sync is running" lock. Returns false if a sync was already
@@ -1355,9 +1684,10 @@ function App() {
         }
         catch (e) {
             console.error('[Drive sync error]', e);
+            const blocked = e && e.message === 'build_outdated';
             if (!downloadSucceeded)
-                setDownloadStatus('error');
-            setUploadStatus('error');
+                setDownloadStatus(blocked ? 'blocked' : 'error');
+            setUploadStatus(blocked ? 'blocked' : 'error');
         }
     }
     const connectDrive = async () => {
@@ -1382,8 +1712,56 @@ function App() {
             showToast('Could not connect to Google Drive.', 'red');
         }
     };
+    // Brings back entries that a snapshot has and this device lacks. It is a union, so nothing existing is removed or changed.
+    function restoreFromSnapshot(snap) {
+        const s = latestStateRef.current;
+        const m = mergeLocalWithCloud(s, (snap && snap.main) || {}, false, false);
+        applyMerged(m);
+        suppressPushRef.current = false; // this is a real change: let it upload
+        if (snap && snap.bankStatements) {
+            const bm = mergeBankStatementsData({ bankStatements: s.bankStatements }, { bankStatements: snap.bankStatements });
+            persistBankStatements(bm.bankStatements);
+        }
+    }
+    // Once a day (first sync of the day, and only if something changed since the last snapshot) a full,
+    // permanent snapshot is written to Drive. It only uses an already-valid token, so it never pops up a
+    // sign-in window, and a failure is simply retried after the next sync.
+    const snapBusyRef = useRef(false);
+    async function maybeAutoSnapshot() {
+        if (snapBusyRef.current || outdatedBuildRef.current || !latestStateRef.current || !latestStateRef.current.msLog)
+            return;
+        const day = todayStr();
+        try { if (window.localStorage.getItem(LS_SNAP_DAY) === day) return; } catch (e) { }
+        const t = cachedTokenRef.current;
+        if (!t.token || Date.now() >= t.expiresAt - 60000)
+            return;
+        snapBusyRef.current = true;
+        try {
+            const doc = buildSnapshotDoc(latestStateRef.current);
+            const fp = snapshotFingerprint(doc);
+            let last = null;
+            try { last = window.localStorage.getItem(LS_SNAP_HASH); } catch (e) { }
+            if (last !== fp) {
+                await driveWriteSnapshot(t.token, doc, snapNameFor(day));
+                try { window.localStorage.setItem(LS_SNAP_HASH, fp); } catch (e) { }
+            }
+            try { window.localStorage.setItem(LS_SNAP_DAY, day); } catch (e) { }
+        }
+        catch (e) {
+            console.error('[Snapshot]', e);
+        }
+        finally {
+            snapBusyRef.current = false;
+        }
+    }
+    useEffect(() => {
+        if (lastUploadAt || lastDownloadAt)
+            maybeAutoSnapshot();
+        // eslint-disable-next-line
+    }, [lastUploadAt, lastDownloadAt]);
     const exportData = () => {
-        const payload = buildPayload();
+        // The Drive backup keeps bank statements in a separate file, but a manual backup must contain everything.
+        const payload = Object.assign(buildPayload(), { bankStatements: latestStateRef.current.bankStatements });
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -1411,8 +1789,8 @@ function App() {
     };
     const disconnectDrive = () => { setDriveConnected(false); driveFileIdRef.current = null; driveKnownModifiedRef.current = null; bankStatementsDriveFileIdRef.current = null; bankKnownModifiedRef.current = null; syncedConfigJsonRef.current = null; setUploadStatus('idle'); setDownloadStatus('idle'); window.localStorage.removeItem(LS_DRIVE_FLAG); showToast('Disconnected from Google Drive'); };
     const pushNow = useCallback(async () => {
-        if (!driveConnected)
-            return;
+        if (!driveConnected || outdatedBuildRef.current)
+            return; // an older build never pushes once newer data has been seen on Drive
         if (driveSyncInFlightRef.current) {
             pendingPushRef.current = true; // re-run when the running sync finishes instead of dropping this push
             return;
@@ -1437,7 +1815,7 @@ function App() {
         }
         catch (e) {
             console.error('[Drive push error]', e);
-            setUploadStatus(navigator.onLine ? 'error' : 'offline');
+            setUploadStatus(e && e.message === 'build_outdated' ? 'blocked' : (navigator.onLine ? 'error' : 'offline'));
         }
         finally {
             driveSyncInFlightRef.current = false;
@@ -1494,13 +1872,15 @@ function App() {
             merge: (local, cloud) => mergeBankStatementsData(local, cloud),
             mergeCopies: (a, b) => mergeBankStatementsData(a, b),
             apply: (m) => { bankSuppressPushRef.current = true; persistBankStatements(m.bankStatements); },
-            buildPayload: () => ({ version: 1, savedAt: new Date().toISOString(), bankStatements: latestStateRef.current.bankStatements }),
+            buildPayload: () => ({ version: 1, savedAt: new Date().toISOString(), appBuild: APP_BUILD, writtenBy: writerInfo(), bankStatements: latestStateRef.current.bankStatements }),
+            stamp: (m) => { m.appBuild = APP_BUILD; m.writtenBy = writerInfo(); },
+            checkCloud: checkCloudBuild,
         };
     }
     // Same safe-sync engine as the main file: a push never overwrites a Drive copy this device hasn't
     // seen — if the file changed since the last download/upload, it merges first.
     const pushBankStatementsNow = useCallback(async () => {
-        if (!driveConnected)
+        if (!driveConnected || outdatedBuildRef.current)
             return;
         if (bankStatementsSyncInFlightRef.current) {
             bankPendingPushRef.current = true;
@@ -1516,7 +1896,7 @@ function App() {
         }
         catch (e) {
             console.error('[Bank Statements push error]', e);
-            setUploadStatus(navigator.onLine ? 'error' : 'offline');
+            setUploadStatus(e && e.message === 'build_outdated' ? 'blocked' : (navigator.onLine ? 'error' : 'offline'));
         }
         finally {
             bankStatementsSyncInFlightRef.current = false;
@@ -1551,7 +1931,7 @@ function App() {
         }
         catch (e) {
             console.error('[Bank Statements pull error]', e);
-            setDownloadStatus(navigator.onLine ? 'error' : 'offline');
+            setDownloadStatus(e && e.message === 'build_outdated' ? 'blocked' : (navigator.onLine ? 'error' : 'offline'));
         }
     }
     useEffect(() => {
@@ -1618,9 +1998,11 @@ function App() {
             // Read EVERY copy of the backup on Drive (normally just one) and combine them, so the
             // answer reflects everything that is actually stored there.
             let cloudData = null;
+            let newestWriter = null, newestBuild = null;
             for (let i = 0; i < files.length; i++) {
                 try {
                     const copy = await driveDownload(token, files[i].id);
+                    if (i === 0) { newestWriter = copy.writtenBy || null; newestBuild = copy.appBuild || null; }
                     cloudData = cloudData ? mergeLocalWithCloud(cloudData, copy, false, false) : copy;
                 }
                 catch (e) { if (i === 0) throw e; }
@@ -1653,7 +2035,7 @@ function App() {
             setCheckDialog({ status: 'done', localDate, cloudDate,
                 cloudIsNewer: !!((cloudDate && (!localDate || cloudDate > localDate)) || cloudHasMore > 0),
                 cloudHasMore, localHasMore, diff, bank,
-                fileCount: files.length, fileModified: files[0].modifiedTime, fileSize: files[0].size,
+                fileCount: files.length, fileModified: files[0].modifiedTime, fileSize: files[0].size, writer: newestWriter, writerBuild: newestBuild,
                 localDetail: perCategoryLatestDates({ msLog: s.msLog, dieselLog: s.dieselLog, dayClosing: s.dayClosing, advance: s.advance, salaryRuns: s.salaryRuns }),
                 cloudDetail: perCategoryLatestDates(cloudData) });
         }
@@ -1735,11 +2117,284 @@ function App() {
     const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
         advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, bankStatements, persistBankStatements, dsrData, persistDsrData, ttData, persistTtData, workingDate, setWorkingDate, pushNow, showToast };
+    const bannerStyle = (bg, fg) => ({ background: bg, color: fg, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' });
+    const bannerBtn = (label, onClick) => React.createElement("button", { className: "btn btn-secondary btn-sm", onClick }, label);
+    const banners = [
+        outdatedBuild && React.createElement("div", { key: "ob", className: "confirm-bar", style: bannerStyle('var(--red-bg)', 'var(--red)') }, React.createElement(IconAlert, { size: 16 }),
+            React.createElement("span", { style: { flex: 1 } }, `Sync is paused: a newer version of the app (build ${outdatedBuild}) has already saved data to Google Drive, and this device is on build ${APP_BUILD}. Reload the page (Ctrl+F5) to update. Nothing on this device is lost.`),
+            bannerBtn('Reload now', () => window.location.reload())),
+        newBuildAvailable && !outdatedBuild && React.createElement("div", { key: "nb", className: "confirm-bar", style: bannerStyle('var(--amber-dim)', 'var(--text)') }, React.createElement(IconAlert, { size: 16 }),
+            React.createElement("span", { style: { flex: 1 } }, `A new version of the app is available (build ${newBuildAvailable}; you are on ${APP_BUILD}). Reload when convenient to use it.`),
+            bannerBtn('Reload now', () => window.location.reload()), bannerBtn('Later', () => setNewBuildAvailable(null))),
+        storageAlert && storageAlert.kind === 'full' && React.createElement("div", { key: "sf", className: "confirm-bar", style: bannerStyle('var(--red-bg)', 'var(--red)') }, React.createElement(IconAlert, { size: 16 }),
+            React.createElement("span", { style: { flex: 1 } }, "This device's browser storage is full, so your last change could not be saved on this device. It is still on screen and is being sent to Google Drive. Download a backup now, then see Settings \u2192 Storage to free space."),
+            bannerBtn('Download backup', exportData), bannerBtn('Dismiss', () => setStorageAlert(null))),
+        storageAlert && storageAlert.kind === 'corrupt' && React.createElement("div", { key: "sc", className: "confirm-bar", style: bannerStyle('var(--red-bg)', 'var(--red)') }, React.createElement(IconAlert, { size: 16 }),
+            React.createElement("span", { style: { flex: 1 } }, `Saved data for "${storageAlert.key}" could not be read on this device (a copy of it was kept). Connect to Google Drive and use Sync now to bring the data back, and avoid entering new data until then.`),
+            bannerBtn('Dismiss', () => setStorageAlert(null))),
+        storageAlert && storageAlert.kind === 'nearlyfull' && React.createElement("div", { key: "sn", className: "confirm-bar", style: bannerStyle('var(--amber-dim)', 'var(--text)') }, React.createElement(IconAlert, { size: 16 }),
+            React.createElement("span", { style: { flex: 1 } }, `This device's browser storage is about ${Math.round(storageAlert.used / 50000)}% used (limit is roughly 5 MB). See Settings \u2192 Storage.`),
+            bannerBtn('Dismiss', () => setStorageAlert(null))),
+    ].filter(Boolean);
+    const nameModal = !deviceName && !nameSkipped ? React.createElement(DeviceNameModal, { onSave: setDeviceName, onSkip: () => setNameSkipped(true) }) : null;
     const mustConnectFirst = configuredClientId && driveReady && !driveConnected && isOnline && !skipDriveGate;
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"), connectError && React.createElement("div", { className: "empty-hint", style: { marginTop: 12, color: 'var(--red, #e5484d)' } }, connectError), connectError && React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 8 }, onClick: () => setSkipDriveGate(true) }, "Continue without Drive for now"), connectError && React.createElement("div", { className: "empty-hint", style: { marginTop: 6, fontSize: 12 } }, "Data is saved on this device meanwhile. Connect from Settings later \u2014 it will merge safely with what is on Drive."))));
     }
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates }), React.createElement("main", { className: "main" }, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }));
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates, deviceName }), React.createElement("main", { className: "main" }, ...banners, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme, deviceName, setDeviceName, getToken: getCachedOrFreshToken, getState: () => latestStateRef.current, restoreFromSnapshot })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }), nameModal);
+}
+function DeviceNameModal({ onSave, onSkip }) {
+    const [name, setName] = useState('');
+    const box = React.createElement("div", { className: "modal-box", style: { maxWidth: 400, background: 'var(--surface)', color: 'var(--text)' } },
+        React.createElement("h3", { style: { color: 'var(--text)' } }, "Name this device"),
+        React.createElement("p", null, "Give this device a short name (for example \"Office PC\" or \"Owner phone\"). It is shown in the sidebar and recorded with every Google Drive save, so you can always tell which device wrote what. You only need to do this once per device."),
+        React.createElement("input", { className: "text-input", autoFocus: true, value: name, placeholder: "e.g. Office PC", onChange: (e) => setName(e.target.value), onKeyDown: (e) => { if (e.key === 'Enter' && name.trim()) onSave(name); } }),
+        React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: onSkip }, "Later"), React.createElement("button", { className: "btn btn-primary", disabled: !name.trim(), onClick: () => onSave(name) }, "Save name")));
+    return ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, box), document.body);
+}
+const ARCHIVE_SECTION_LABELS = { msLog: 'MS Daily', dieselLog: 'Diesel Daily', dayClosing: 'Day Closing', advanceLog: 'Advance / Recovery', salaryRuns: 'Salary runs', msReadings: 'Meter readings', dsrData: 'Daily Stock Register', bankTMB: 'TMB statement', bankBOB: 'BOB statement' };
+const ARCHIVE_PREFERRED_COLS = ['date', 'slotLabel', 'pump', 'cashier', 'name', 'type', 'desc', 'party', 'month', 'note', 'credit', 'debit', 'amount', 'total', 'combinedTotal', 'finalCash', 'balance', 'status'];
+function archiveSectionRows(sections, key) {
+    const v = sections && sections[key];
+    let rows = [];
+    if (Array.isArray(v))
+        rows = v.map((x) => (x && typeof x === 'object' ? x : { value: x }));
+    else if (v && typeof v === 'object')
+        rows = Object.keys(v).sort().map((k) => {
+            const o = v[k];
+            const base = key === 'salaryRuns' ? { date: k + '-01', month: k } : { date: k };
+            return Object.assign(base, o && typeof o === 'object' && !Array.isArray(o) ? o : { value: o });
+        });
+    return rows.map((r) => { const flat = {}; Object.keys(r).forEach((k) => { const x = r[k]; flat[k] = x !== null && typeof x === 'object' ? JSON.stringify(x) : x; }); return flat; });
+}
+function archiveColumns(rows) {
+    const seen = new Set();
+    rows.slice(0, 300).forEach((r) => Object.keys(r).forEach((k) => seen.add(k)));
+    const pref = ARCHIVE_PREFERRED_COLS.filter((k) => seen.has(k));
+    const rest = [...seen].filter((k) => !pref.includes(k) && k !== 'id' && k !== 'savedAt');
+    return [...pref, ...rest].slice(0, 14);
+}
+function rowsToCsv(cols, rows) {
+    const esc = (v) => { const s = v === undefined || v === null ? '' : String(v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    return [cols.map(esc).join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\r\n');
+}
+function saveTextFile(name, text, type) {
+    const blob = new Blob([text], { type: type || 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+const kbText = (n) => { n = Number(n) || 0; return n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; };
+// Settings card: permanent snapshots, financial-year archives, and the read-only viewer for old years.
+function BackupArchiveCard({ getToken, getState, restoreFromSnapshot, showToast, driveConnected }) {
+    const [snaps, setSnaps] = useState(null);
+    const [archives, setArchives] = useState(null);
+    const [busy, setBusy] = useState('');
+    const [msg, setMsg] = useState(null);
+    const [restoreAsk, setRestoreAsk] = useState(null); // { file, doc, bring }
+    const [fy, setFy] = useState(null);
+    const [view, setView] = useState(null); // { name, doc }
+    const [sec, setSec] = useState('msLog');
+    const [from, setFrom] = useState('');
+    const [to, setTo] = useState('');
+    const [q, setQ] = useState('');
+    const state = getState();
+    const nowYear = fyStartYearOf(todayStr());
+    const firstYear = useMemo(() => {
+        let min = null;
+        const eat = (d) => { if (typeof d === 'string' && d.length >= 10 && (!min || d.slice(0, 10) < min))
+            min = d.slice(0, 10); };
+        (state.msLog || []).forEach((r) => eat(r.date));
+        (state.dieselLog || []).forEach((r) => eat(r.date));
+        Object.keys(state.dayClosing || {}).forEach(eat);
+        return min ? Math.min(fyStartYearOf(min), nowYear) : nowYear;
+    }, [state.msLog, state.dieselLog, state.dayClosing, nowYear]);
+    const years = [];
+    for (let y = nowYear; y >= firstYear; y--)
+        years.push(y);
+    const selYear = fy === null ? nowYear : fy;
+    const ended = fyBounds(selYear).to < todayStr();
+    const preview = useMemo(() => buildFyArchive(state, selYear).counts, [state.msLog, state.dieselLog, state.dayClosing, state.advance, state.salaryRuns, state.msReadings, state.dsrData, state.bankStatements, selYear]);
+    const run = async (label, fn) => {
+        setBusy(label);
+        setMsg(null);
+        try {
+            await fn();
+        }
+        catch (e) {
+            console.error('[Backup/Archive]', e);
+            setMsg({ tone: 'red', text: e && e.message === 'archive_verify_failed' ? 'The copy on Drive did not match what was sent, so it was NOT treated as saved. Nothing in the app was changed. Please try again.' : 'That did not work (' + (e && e.message ? e.message : 'unknown error') + '). Check the connection and try again.' });
+        }
+        finally {
+            setBusy('');
+        }
+    };
+    const loadLists = () => run('lists', async () => {
+        const token = await getToken();
+        setSnaps(await driveListSnapshots(token));
+        setArchives(await driveListArchives(token));
+    });
+    const snapshotNow = () => run('snap', async () => {
+        const token = await getToken();
+        const doc = buildSnapshotDoc(state);
+        const d = new Date();
+        const stamp = String(d.getUTCHours()).padStart(2, '0') + String(d.getUTCMinutes()).padStart(2, '0') + String(d.getUTCSeconds()).padStart(2, '0');
+        const r = await driveWriteSnapshot(token, doc, snapNameFor(todayStr(), stamp));
+        setSnaps(await driveListSnapshots(token));
+        setMsg({ tone: 'ok', text: r.status === 'created' ? 'Snapshot saved to Google Drive. It is kept permanently.' : 'A snapshot with that name already exists.' });
+    });
+    const downloadSnap = (f) => run('dl' + f.id, async () => {
+        const token = await getToken();
+        const doc = await driveDownload(token, f.id);
+        saveTextFile(f.name, JSON.stringify(doc, null, 2), 'application/json');
+    });
+    const askRestore = (f) => run('rs' + f.id, async () => {
+        const token = await getToken();
+        const doc = await driveDownload(token, f.id);
+        const s = getState();
+        const d = diffSyncData(s, doc.main || {});
+        const bm = mergeBankStatementsData({ bankStatements: s.bankStatements }, { bankStatements: doc.bankStatements });
+        const bankBring = ['TMB', 'BOB'].reduce((n, k) => n + Math.max(0, (bm.bankStatements[k] || []).length - ((s.bankStatements && s.bankStatements[k]) || []).length), 0);
+        setRestoreAsk({ file: f, doc, bring: { ms: d.msLog.cloudOnly, diesel: d.dieselLog.cloudOnly, closing: d.dayClosing.cloudOnly, advance: d.advance.cloudOnly, salary: d.salaryRuns.cloudOnly, bank: bankBring } });
+    });
+    const doRestore = () => {
+        restoreFromSnapshot(restoreAsk.doc);
+        setRestoreAsk(null);
+        showToast('Missing entries restored from the snapshot and syncing to Drive.');
+    };
+    const saveArchive = () => run('arch', async () => {
+        const token = await getToken();
+        const s = getState();
+        const day = todayStr();
+        const arch = buildFyArchive(s, selYear, { createdAt: new Date().toISOString(), appBuild: APP_BUILD, writtenBy: writerInfo(), archiveKind: ended ? 'final' : 'checkpoint' });
+        const name = archiveFileName(fyLabel(selYear), ended ? '' : day);
+        let r = await driveWriteFyArchive(token, arch, name);
+        let text;
+        if (r.status === 'exists') {
+            // Never overwrite: check the existing copy instead. If it is damaged, write a fresh dated copy beside it.
+            const v = await verifyArchiveFile(token, r.id);
+            if (v.ok)
+                text = `${name} is already on Drive and its checksum is intact, so nothing was written. Archives are never overwritten.`;
+            else {
+                const d = new Date();
+                const alt = name.replace(/\.json$/, '') + '_recopy_' + String(d.getUTCHours()).padStart(2, '0') + String(d.getUTCMinutes()).padStart(2, '0') + String(d.getUTCSeconds()).padStart(2, '0') + '.json';
+                r = await driveWriteFyArchive(token, arch, alt);
+                text = `The existing ${name} failed its checksum, so a fresh verified copy was saved as ${alt}. The old file was left untouched.`;
+            }
+        }
+        else
+            text = `Saved and verified: ${name}. Drive returned exactly what was sent. Your working data in the app was not changed.`;
+        setArchives(await driveListArchives(token));
+        setMsg({ tone: text.startsWith('The existing') ? 'amber' : 'ok', text });
+    });
+    const verifyArchive = (f) => run('vf' + f.id, async () => {
+        const token = await getToken();
+        const r = await verifyArchiveFile(token, f.id);
+        setMsg(r.ok ? { tone: 'ok', text: `${f.name}: checksum matches, the archive is intact.` } : { tone: 'red', text: `${f.name}: ${r.reason || 'the checksum does NOT match. Do not rely on this file; save a fresh archive.'}` });
+    });
+    const openArchive = (f) => run('op' + f.id, async () => {
+        const token = await getToken();
+        const doc = await driveDownload(token, f.id);
+        if (!doc || doc.kind !== 'fy-archive')
+            throw new Error('not_an_archive');
+        setView({ name: f.name, doc });
+        setSec('msLog');
+        setFrom('');
+        setTo('');
+        setQ('');
+    });
+    const allRows = useMemo(() => (view ? archiveSectionRows(view.doc.sections, sec) : []), [view, sec]);
+    const rows = useMemo(() => {
+        const ql = q.trim().toLowerCase();
+        return allRows.filter((r) => {
+            const d = typeof r.date === 'string' ? r.date.slice(0, 10) : '';
+            if (from && d && d < from)
+                return false;
+            if (to && d && d > to)
+                return false;
+            if ((from || to) && !d)
+                return false;
+            return !ql || JSON.stringify(r).toLowerCase().includes(ql);
+        });
+    }, [allRows, from, to, q]);
+    const cols = useMemo(() => archiveColumns(allRows), [allRows]);
+    const tone = (t) => t === 'red' ? 'var(--red)' : t === 'amber' ? 'var(--amber, #d99a2b)' : 'var(--green, #3fa35c)';
+    const dis = !driveConnected || !!busy;
+    const cnt = (o, k) => (o && o[k]) || 0;
+    return React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Backups and yearly archive")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Permanent record on your Google Drive. The app never deletes or overwrites a snapshot or an archive. A snapshot of everything is saved automatically the first time you sync each day (if anything changed). A financial year runs 1 April to 31 March."),
+        !driveConnected && React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px', color: 'var(--amber, #d99a2b)' } }, "Connect Google Drive first."),
+        msg && React.createElement("div", { style: { padding: '8px 12px', marginBottom: 10, borderRadius: 8, border: '1px solid ' + tone(msg.tone), color: tone(msg.tone), fontSize: 13 } }, msg.text),
+        React.createElement("h4", { style: { margin: '6px 0' } }, "Daily snapshots"),
+        React.createElement("div", { className: "btn-group", style: { marginBottom: 8 } },
+            React.createElement("button", { className: "btn btn-secondary btn-sm", disabled: dis, onClick: loadLists }, busy === 'lists' ? 'Loading…' : 'Show snapshots and archives'),
+            React.createElement("button", { className: "btn btn-secondary btn-sm", disabled: dis, onClick: snapshotNow }, busy === 'snap' ? 'Saving…' : 'Take a snapshot now')),
+        restoreAsk && React.createElement("div", { className: "confirm-bar" }, React.createElement(IconAlert, { size: 16 }),
+            React.createElement("span", { style: { flex: 1 } }, `Restore missing entries from ${restoreAsk.file.name}? It would bring back: MS Daily ${restoreAsk.bring.ms}, Diesel Daily ${restoreAsk.bring.diesel}, Day Closing ${restoreAsk.bring.closing}, Advance ${restoreAsk.bring.advance}, Salary ${restoreAsk.bring.salary}, Bank rows ${restoreAsk.bring.bank}. Nothing you have now is removed or changed; only entries that are missing here are added.`),
+            React.createElement("button", { className: "btn btn-primary btn-sm", onClick: doRestore }, "Restore missing"),
+            React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => setRestoreAsk(null) }, "Cancel")),
+        snaps && (snaps.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No snapshots yet.") :
+            React.createElement("div", { style: { maxHeight: 220, overflowY: 'auto', marginBottom: 10 } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ['Snapshot', 'Size', ''].map((h) => React.createElement("th", { key: h }, h)))),
+                React.createElement("tbody", null, snaps.map((f) => React.createElement("tr", { key: f.id }, React.createElement("td", null, f.name.replace(/^fuel_station_snapshot_/, '').replace(/\.json$/, '')), React.createElement("td", { className: "mono" }, kbText(f.size)),
+                    React.createElement("td", null, React.createElement("div", { className: "btn-group" },
+                        React.createElement("button", { className: "btn btn-secondary btn-sm", disabled: !!busy, onClick: () => downloadSnap(f) }, "Download"),
+                        React.createElement("button", { className: "btn btn-secondary btn-sm", disabled: !!busy, onClick: () => askRestore(f) }, "Restore missing entries"))))))))),
+        React.createElement("h4", { style: { margin: '14px 0 6px' } }, "Financial-year archive"),
+        React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Financial year" }, React.createElement("select", { className: "select-input", value: selYear, onChange: (e) => setFy(Number(e.target.value)) }, years.map((y) => React.createElement("option", { key: y, value: y }, `FY ${fyLabel(y)}${fyBounds(y).to < todayStr() ? ' (ended)' : ' (current)'}`))))),
+        React.createElement("div", { className: "empty-hint", style: { padding: '4px 0 8px' } }, `${fyBounds(selYear).from} to ${fyBounds(selYear).to}: ${cnt(preview, 'msLog')} MS shifts, ${cnt(preview, 'dieselLog')} Diesel days, ${cnt(preview, 'dayClosing')} day closings, ${cnt(preview, 'advanceLog')} advance entries, ${cnt(preview, 'bankTMB') + cnt(preview, 'bankBOB')} bank rows. ${ended ? 'This year has ended, so the archive is saved as the final copy.' : 'This year is still running, so this saves a dated checkpoint copy.'} Saving copies the data to Drive and checks it; it does not remove anything from the app.`),
+        React.createElement("div", { className: "btn-group", style: { marginBottom: 8 } }, React.createElement("button", { className: "btn btn-primary btn-sm", disabled: dis, onClick: saveArchive }, busy === 'arch' ? 'Saving and verifying…' : (ended ? 'Save final archive to Drive' : 'Save checkpoint to Drive'))),
+        archives && (archives.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No archives on Drive yet.") :
+            React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ['Archive', 'Size', ''].map((h) => React.createElement("th", { key: h }, h)))),
+                React.createElement("tbody", null, archives.map((f) => React.createElement("tr", { key: f.id }, React.createElement("td", null, f.name.replace(/^fuel_station_archive_/, '').replace(/\.json$/, '')), React.createElement("td", { className: "mono" }, kbText(f.size)),
+                    React.createElement("td", null, React.createElement("div", { className: "btn-group" },
+                        React.createElement("button", { className: "btn btn-secondary btn-sm", disabled: !!busy, onClick: () => openArchive(f) }, "View (read-only)"),
+                        React.createElement("button", { className: "btn btn-secondary btn-sm", disabled: !!busy, onClick: () => verifyArchive(f) }, "Verify")))))))),
+        view && React.createElement("div", { style: { marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' } },
+            React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Viewing ${view.name}`), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => setView(null) }, "Close viewer")),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 8px' } }, `Read-only copy from Drive (${view.doc.from} to ${view.doc.to}). It is held in memory only and is never mixed into your working data or synced back.`),
+            React.createElement("div", { className: "tab-switch", style: { flexWrap: 'wrap' } }, Object.keys(ARCHIVE_SECTION_LABELS).map((k) => React.createElement("button", { key: k, className: sec === k ? 'active' : '', onClick: () => setSec(k) }, `${ARCHIVE_SECTION_LABELS[k]} (${(view.doc.counts && view.doc.counts[k]) || 0})`))),
+            React.createElement("div", { className: "form-grid", style: { marginTop: 8 } },
+                React.createElement(Field, { label: "From" }, React.createElement("input", { className: "text-input", type: "date", value: from, onChange: (e) => setFrom(e.target.value) })),
+                React.createElement(Field, { label: "To" }, React.createElement("input", { className: "text-input", type: "date", value: to, onChange: (e) => setTo(e.target.value) })),
+                React.createElement(Field, { label: "Search" }, React.createElement("input", { className: "text-input", value: q, placeholder: "any text", onChange: (e) => setQ(e.target.value) }))),
+            React.createElement("div", { className: "empty-hint", style: { padding: '6px 0' } }, `${rows.length} of ${allRows.length} rows`, React.createElement("button", { className: "btn btn-secondary btn-sm", style: { marginLeft: 10 }, disabled: rows.length === 0, onClick: () => saveTextFile(`${ARCHIVE_SECTION_LABELS[sec].replace(/[^A-Za-z]+/g, '_')}_FY${view.doc.fy}.csv`, rowsToCsv(cols, rows), 'text/csv') }, "Download CSV")),
+            rows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "Nothing matches.") :
+                React.createElement("div", { style: { maxHeight: 420, overflow: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, cols.map((c) => React.createElement("th", { key: c }, c)))),
+                    React.createElement("tbody", null, rows.slice(0, 500).map((r, i) => React.createElement("tr", { key: i }, cols.map((c) => React.createElement("td", { key: c, title: r[c] === undefined ? '' : String(r[c]) }, r[c] === undefined || r[c] === null ? '' : String(r[c]).slice(0, 60))))))),
+                    rows.length > 500 && React.createElement("div", { className: "empty-hint" }, "Showing the first 500 rows; narrow the dates or search, or download the CSV for all of them."))));
+}
+function StorageMeterCard({ exportData }) {
+    const [m, setM] = useState(() => measureLocalStorage());
+    const [limit, setLimit] = useState(null); // measured limit (characters), once tested
+    const assumed = 5000000;
+    const cap = limit || assumed;
+    const pct = Math.min(100, Math.round((m.total / cap) * 100));
+    const tone = pct >= 90 ? 'var(--red)' : pct >= 70 ? 'var(--amber, #d99a2b)' : 'var(--green, #3fa35c)';
+    const kb = (n) => (n / 1024 >= 1000 ? (n / 1048576).toFixed(2) + ' MB' : Math.round(n / 1024) + ' KB');
+    const test = () => { const free = probeStorageLimit(); const now = measureLocalStorage(); setM(now); setLimit(now.total + free); };
+    return React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Storage")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `This browser keeps your data on this device with a size limit (usually about 5 MB per website). Used: ${kb(m.total)} of ${limit ? 'about ' + kb(limit) + ' (measured)' : 'about 5 MB (typical)'} \u2014 ${pct}%. ` + (pct >= 90 ? 'Almost full: download a backup now and tell me so we can move the large data to a bigger store.' : pct >= 70 ? 'Getting full: worth planning the move to a bigger store.' : 'Plenty of room.')),
+        React.createElement("div", { style: { height: 10, borderRadius: 6, background: 'var(--surface-2)', overflow: 'hidden', marginBottom: 10 } }, React.createElement("div", { style: { width: pct + '%', height: '100%', background: tone } })),
+        React.createElement("table", { className: "data-table" }, React.createElement("tbody", null, m.rows.map((r) => React.createElement("tr", { key: r.label }, React.createElement("td", null, r.label), React.createElement("td", { className: "mono" }, kb(r.size)))))),
+        React.createElement("div", { className: "btn-group", style: { marginTop: 10 } },
+            React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => setM(measureLocalStorage()) }, "Refresh"),
+            React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: test }, "Measure the real limit"),
+            React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: exportData }, "Download full backup")));
+}
+function DeviceCard({ deviceName, setDeviceName }) {
+    const [name, setName] = useState(deviceName || '');
+    return React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "This device")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `App build ${APP_BUILD}. The device name is shown in the sidebar and recorded with every Google Drive save. If a newer build has saved data to Drive, this device pauses syncing until you reload, so an old version can never overwrite newer data.`),
+        React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Device name" }, React.createElement("input", { className: "text-input", value: name, placeholder: "e.g. Office PC", onChange: (e) => setName(e.target.value) }))),
+        React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", disabled: !name.trim() || name.trim() === deviceName, onClick: () => setDeviceName(name) }, "Save name")));
 }
 function CheckUpdatesDialog({ state, onUpdate, onClose }) {
     if (!state)
@@ -1798,6 +2453,7 @@ function CheckUpdatesDialog({ state, onUpdate, onClose }) {
                         React.createElement("td", { style: cell }),
                         React.createElement("td", { style: cell }),
                         React.createElement("td", { style: Object.assign({}, cell, { color: 'var(--text-muted)' }) }, bankText(k)))) : []))),
+            React.createElement("p", { style: { fontSize: 12, marginBottom: 6 } }, state.writer ? `Last saved to Drive by ${state.writer.deviceName || 'an unnamed device'} on build ${state.writer.build || state.writerBuild || '?'}.` : 'Last saved to Drive by an older version of the app (no device information recorded).'),
             React.createElement("p", { style: { fontSize: 12, marginBottom: 12 } }, `Backup file on Drive: last written ${fmtStamp(state.fileModified)}${state.fileCount > 1 ? ` — ${state.fileCount} copies found (they will be merged into one when you sync)` : ''}.`),
             React.createElement("button", { className: "btn btn-primary", onClick: onUpdate }, state.cloudIsNewer || state.localHasMore ? "Sync now (merge both ways)" : "Sync now anyway"));
     }
@@ -1807,7 +2463,7 @@ function CheckUpdatesDialog({ state, onUpdate, onClose }) {
         React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: onClose }, "Close")));
     return ReactDOM.createPortal(React.createElement("div", { className: "modal-overlay" }, modalBox), document.body);
 }
-function Sidebar({ tab, setTab, stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates }) {
+function Sidebar({ tab, setTab, stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates, deviceName }) {
     const items = [
         { id: 'dashboard', label: 'Dashboard', Icon: IconDash },
         { id: 'ms', label: 'MS Daily', Icon: IconClip },
@@ -1826,6 +2482,7 @@ function Sidebar({ tab, setTab, stationName, driveConnected, uploadStatus, downl
     const statusLabel = (status, lastAt, prefix) => {
         if (!driveConnected) return prefix + ': Local only';
         if (status === 'syncing') return prefix + ': Syncing\u2026';
+        if (status === 'blocked') return prefix + ': Paused \u2014 reload app';
         if (status === 'error') return prefix + ': Error';
         if (status === 'offline') return prefix + ': Offline \u2014 will retry';
         if (lastAt) return prefix + ': ' + lastAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
@@ -1840,7 +2497,7 @@ function Sidebar({ tab, setTab, stationName, driveConnected, uploadStatus, downl
     return React.createElement("nav", { className: "sidebar no-print" }, React.createElement("div", { className: "brand" }, React.createElement("div", { className: "brand-mark" }, React.createElement(IconFuel, { size: 20 })), React.createElement("div", { className: "brand-text" }, React.createElement("div", { className: "brand-name" }, stationName), React.createElement("div", { className: "brand-sub" }, "Station Management"))), React.createElement("div", { className: "nav-items" }, items.map((it) => React.createElement("button", { key: it.id, className: `nav-item ${tab === it.id ? 'active' : ''}`, onClick: () => setTab(it.id) }, React.createElement(it.Icon, { size: 17 }), React.createElement("span", null, it.label)))),
         React.createElement("div", { className: "sync-indicator", onClick: checkForUpdates, title: "Check for updates", style: { marginBottom: 0, paddingBottom: 2 } }, React.createElement("span", { className: `sync-dot sync-dot-${statusTone(uploadStatus)}` }), statusLabel(uploadStatus, lastUploadAt, 'Upload')),
         React.createElement("div", { className: "sync-indicator", onClick: checkForUpdates, title: "Check for updates", style: { borderTop: 'none', marginTop: 0, paddingTop: 0 } }, React.createElement("span", { className: `sync-dot sync-dot-${statusTone(downloadStatus)}` }), statusLabel(downloadStatus, lastDownloadAt, 'Download')),
-        React.createElement("div", { className: "sidebar-foot" }, "Runs fully offline in this browser.", React.createElement("br"), "Your data stays under your control."));
+        React.createElement("div", { className: "sidebar-foot" }, "Runs fully offline in this browser.", React.createElement("br"), "Your data stays under your control.", React.createElement("br"), React.createElement("span", { style: { opacity: 0.7 } }, `Build ${APP_BUILD}` + (deviceName ? ` \u00b7 ${deviceName}` : ""))));
 }
 function Dashboard({ config, msLog, dieselLog, dieselData, dayClosing, advance, showToast, setTab }) {
     const [viewDate, setViewDate] = useState(yesterdayStr());
@@ -1992,7 +2649,7 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
             persistMsReadings(Object.assign(Object.assign({}, msReadings), { [entryDate]: Object.assign(Object.assign({}, dayReadings), { [meterId]: lastDefined }) }));
     };
     const shiftCount = rec.shiftCount || 1;
-    const meterCalc = useMemo(() => pump ? computeMeterCheckpoints(config, msReadings, entryDate, pump, shiftCount, rec.checkpoints) : {}, [pump, msReadings, entryDate, shiftCount, rec.checkpoints]);    const saveShift = (i, force) => {
+    const meterCalc = useMemo(() => pump ? computeMeterCheckpoints(config, msReadings, entryDate, pump, shiftCount, rec.checkpoints) : {}, [pump, msReadings, entryDate, shiftCount, rec.checkpoints]);    const saveShift = (i, force, auto) => {
         var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
         if (!pump)
             return;
@@ -2023,6 +2680,15 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
             phonepeMorningClosing: ((_h = draft.phonepeDetail) === null || _h === void 0 ? void 0 : _h.morningClosing) !== '' ? Number((_j = draft.phonepeDetail) === null || _j === void 0 ? void 0 : _j.morningClosing) || 0 : undefined,
             paytmMorningClosing: ((_k = draft.paytmDetail) === null || _k === void 0 ? void 0 : _k.morningClosing) !== '' ? Number((_l = draft.paytmDetail) === null || _l === void 0 ? void 0 : _l.morningClosing) || 0 : undefined,
             denom: draft.denom, denomTotal: dTotal, status: dEntered ? (dOff <= 10 ? 'OK' : 'Mismatch') : 'Unverified', savedAt: new Date().toISOString() };
+        // Unchanged since the last save? Then do nothing \u2014 no new timestamp, no push. (Autosave used to
+        // re-stamp every shift every 90 seconds, which let an idle device override real edits made elsewhere.)
+        const prevRecord = msLog.find((r) => r.id === recordId);
+        if (prevRecord && recordsEquivalent(prevRecord, record, ['savedAt'])) {
+            updateRec({ saved: Object.assign(Object.assign({}, rec.saved), { [i]: true }) });
+            if (!auto)
+                showToast(`${record.slotLabel} is already saved \u2014 no changes.`);
+            return true;
+        }
         persistMsLog([...msLog.filter((r) => r.id !== recordId), record]);
         updateRec({ saved: Object.assign(Object.assign({}, rec.saved), { [i]: true }) });
         showToast(`Saved ${record.slotLabel} \u2014 ${record.status}`, record.status === 'OK' ? 'ok' : 'red');
@@ -2034,7 +2700,7 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
         if (isDateLocked(entryDate, config)) return;
         Object.keys(rec.shiftDrafts || {}).forEach((i) => {
             const draft = rec.shiftDrafts[i];
-            if (draft && draft.cashier && draft.cashier.trim()) saveShift(Number(i), true);
+            if (draft && draft.cashier && draft.cashier.trim()) saveShift(Number(i), true, true);
         });
     };
     useEffect(() => {
@@ -2504,7 +3170,8 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         const emptyLube = emptyId ? config.lubes.find((l) => l.id === emptyId) : null;
         showToast(`Undone \u2014 ${fmtNum(last.litres)}L removed from MS godown${emptyLube ? `, 1 removed from ${emptyLube.name} stock` : ''}. Click Save below for this to reach Day Closing.`);
     };
-    const doSave = () => {
+    const doSave = (autoArg) => {
+        const auto = autoArg === true; // autosave passes true; a button click passes an event object
         var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
         if (isDateLocked(entryDate, config)) {
             showToast('This date is locked \u2014 turn on "Allow pre-dated changes" in Settings to edit dates older than yesterday.', 'red');
@@ -2531,6 +3198,11 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
             phonepeMorningClosing: ((_g = rec.phonepeDetail) === null || _g === void 0 ? void 0 : _g.morningClosing) !== '' ? Number((_h = rec.phonepeDetail) === null || _h === void 0 ? void 0 : _h.morningClosing) || 0 : undefined,
             paytmMorningClosing: Object.values(rec.paytmDetails || {}).some((d) => d.morningClosing !== '' && d.morningClosing !== undefined) ? Object.values(rec.paytmDetails || {}).reduce((s, d) => s + (Number(d.morningClosing) || 0), 0) : undefined,
             lubeBatchDetail, msGodownTransfers: rec.msGodownTransfers || {}, dieselPointSegments: fin.dieselPointSegments, advanceExpensesApplied: [], savedAt: new Date().toISOString() };
+        // Unchanged since the last save? Skip the record write, the advance-log rebuild and the Drive push
+        // (only the cheap closing-balance bookkeeping below still runs).
+        const prevDieselRecord = dieselLog.find((r) => r.id === recordId);
+        const unchanged = !!(prevDieselRecord && recordsEquivalent(prevDieselRecord, record, ['savedAt', 'advanceExpensesApplied']));
+        if (!unchanged) {
         // Advance-type expenses: remove any log entries THIS diesel record previously created (tagged
         // dieselExpenseAdvanceFor), undoing their balance effect directly \u2014 instead of adding offsetting
         // reversal lines on top. This means re-saving the same day never inflates the log or the
@@ -2553,6 +3225,7 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         record.advanceExpensesApplied = advanceExpensesApplied;
         if (advChanged) persistAdvance({ balances: advBalances, log: advLog });
         persistDieselLog([...dieselLog.filter((r) => r.id !== recordId), record]);
+        }
         const lubeClosingBalances = {};
         const godownClosingBalances = {};
         const lubeBatchesClosing = {};
@@ -2563,13 +3236,18 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
             lubeBatchesClosing[l.id] = line.closingBatches;
         });
         updateRec({ saved: true, lubeClosingBalances, godownClosingBalances, lubeBatchesClosing });
+        if (unchanged) {
+            if (!auto)
+                showToast('Diesel Daily for ' + fmtDate(entryDate) + ' is already saved \u2014 no changes.');
+            return;
+        }
         showToast('Diesel Daily saved for ' + fmtDate(entryDate));
         if (pushNow) pushNow();
     };
     const autoSaveRef = useRef(null);
     autoSaveRef.current = () => {
         if (isDateLocked(entryDate, config)) return;
-        if (rec.cashier && rec.cashier.trim()) doSave();
+        if (rec.cashier && rec.cashier.trim()) doSave(true);
     };
     useEffect(() => {
         return () => { if (autoSaveRef.current) autoSaveRef.current(); };
@@ -4942,7 +5620,7 @@ function SettingsGate(props) {
         return React.createElement("div", { className: "page" }, React.createElement("div", { style: { margin: 'auto', maxWidth: 380 } }, React.createElement(PasswordGate, { onUnlock: () => setUnlocked(true) })));
     return React.createElement(SettingsTab, props);
 }
-function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts, persistMsLog, persistDieselData, persistDieselLog, persistDayClosing, persistAdvance, persistSalaryRuns, persistBankRecon, showToast, configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns, exportData, importData, theme, setTheme }) {
+function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts, persistMsLog, persistDieselData, persistDieselLog, persistDayClosing, persistAdvance, persistSalaryRuns, persistBankRecon, showToast, configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns, exportData, importData, theme, setTheme, deviceName, setDeviceName, getToken, getState, restoreFromSnapshot }) {
     const [confirmingReset, setConfirmingReset] = useState(false);
     const [confirmText, setConfirmText] = useState('');
     const fileInputRef = useRef(null);
@@ -4961,7 +5639,7 @@ function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts
         setConfirmText('');
         showToast('Everything has been wiped \u2014 starting from a clean slate.');
     };
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement lock")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on (recommended), Party / Month / Note / checkbox are read-only for updated (green) rows on the Bank Statement page, and the delete icon is locked for every entry. Turn it off only while you need to correct a mistake, then turn it back on. Editing Party or Month of an unlocked green row sends it back to yellow."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: config.lockUpdatedBankEntries !== false, onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { lockUpdatedBankEntries: e.target.checked })) }), " Lock updated entries and deleting")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement(DeviceCard, { deviceName, setDeviceName }), React.createElement(StorageMeterCard, { exportData }), React.createElement(BackupArchiveCard, { getToken, getState, restoreFromSnapshot, showToast, driveConnected }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement lock")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on (recommended), Party / Month / Note / checkbox are read-only for updated (green) rows on the Bank Statement page, and the delete icon is locked for every entry. Turn it off only while you need to correct a mistake, then turn it back on. Editing Party or Month of an unlocked green row sends it back to yellow."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: config.lockUpdatedBankEntries !== false, onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { lockUpdatedBankEntries: e.target.checked })) }), " Lock updated entries and deleting")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
         onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { allowPreDatedChanges: e.target.checked })) }), " Allow pre-dated changes")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Move data to a new device or hosted copy")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Since your data lives only in this browser, moving to a new hosted copy (like GitHub Pages) or a different device won't bring it along automatically. Export a backup here, then Import it on the new copy \u2014 do this once, and Google Drive will keep them in sync from then on."), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-primary", onClick: exportData }, React.createElement(IconDownload, { size: 15 }), " Export backup (.json)"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { var _a; return (_a = fileInputRef.current) === null || _a === void 0 ? void 0 : _a.click(); } }, "Import backup (.json)"), React.createElement("input", { ref: fileInputRef, type: "file", accept: "application/json", style: { display: 'none' },
         onChange: (e) => { var _a; const f = (_a = e.target.files) === null || _a === void 0 ? void 0 : _a[0]; if (f)
             importData(f); e.target.value = ''; } }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Master reset")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This permanently wipes every MS Daily, Diesel Daily, Day Closing, Salary, Advance, and Bank Reconciliation entry you've saved, and resets Master Data (employees, pumps, products, lubes, opening readings, bank parsing settings) back to the built-in defaults. There is no undo \u2014 make sure any data you care about is backed up (Google Drive, or otherwise) before doing this."), !confirmingReset && React.createElement("button", { className: "btn btn-danger", onClick: () => setConfirmingReset(true) }, "Wipe all data and master data"), confirmingReset && React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "confirm-bar" }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "Type RESET below to confirm \u2014 this cannot be undone.")), React.createElement("input", { className: "text-input", style: { maxWidth: 200 }, value: confirmText, onChange: (e) => setConfirmText(e.target.value), placeholder: "Type RESET" }), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-danger", disabled: confirmText !== 'RESET', onClick: doMasterReset }, "Confirm wipe"), React.createElement("button", { className: "btn btn-ghost", onClick: () => { setConfirmingReset(false); setConfirmText(''); } }, "Cancel")))));
