@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.09.23-1';
+const APP_BUILD = '2026.10.01-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -2870,6 +2870,16 @@ function getEffectivePrice(lube, dateStr) {
 // months of already-settled history. Anything before this date keeps computing exactly as it
 // always did (receipts going straight to display); only today and forward use the new behavior.
 const LUBE_THREE_TIER_CUTOVER = '2026-09-18';
+// A second, later cutover for two refinements to the godown/holding split above (same
+// don't-reprocess-settled-history reasoning): (1) a held (different-price) batch now becomes the
+// new Godown stock as soon as Godown alone runs out, instead of waiting for Display and any
+// active price-batch to ALSO be empty at the same moment - which in practice could leave a batch
+// stuck in Holding indefinitely; (2) Godown now tops up Display by Replenish qty on its own
+// whenever Display runs out (still only up to Replenish qty at a time, and the manual "Restock"
+// button still works too for topping up ahead of need) instead of requiring a click every time.
+// Days before this date keep computing with the stricter release rule and manual-only replenish,
+// exactly as they always did.
+const LUBE_AUTO_RELEASE_CUTOVER = '2026-10-01';
 function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, dateStr, heldOpening, godownPriceOpening) {
     const effective = getEffectivePrice(lube, dateStr);
     const lubeInvoicePrice = effective.invoicePrice;
@@ -2882,7 +2892,13 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
     const receiptQty = receiptActive ? (Number(entry === null || entry === void 0 ? void 0 : entry.receipt) || 0) : 0;
     const batchInvoicePrice = (entry === null || entry === void 0 ? void 0 : entry.batchInvoicePrice) !== undefined && (entry === null || entry === void 0 ? void 0 : entry.batchInvoicePrice) !== '' ? Number(entry.batchInvoicePrice) : lubeInvoicePrice;
     const batchMrp = (entry === null || entry === void 0 ? void 0 : entry.batchMrp) !== undefined && (entry === null || entry === void 0 ? void 0 : entry.batchMrp) !== '' ? Number(entry.batchMrp) : lubeMrp;
-    const isNewPriceTier = receiptActive && receiptQty > 0 && (batchInvoicePrice !== lubeInvoicePrice || batchMrp !== lubeMrp);
+    // A lube can opt out of price-tier tracking altogether (Master Data -> Lubes -> "Track price
+    // batches") for an item whose purchase price moves around too often for batch-level FIFO to be
+    // worth the trouble (e.g. a consumable bought at whatever the going rate is each time) - every
+    // receipt for it is then treated as the current price, going straight to Godown like normal
+    // stock, never into Holding.
+    const trackPriceTiers = lube.trackPriceTiers !== false;
+    const isNewPriceTier = trackPriceTiers && receiptActive && receiptQty > 0 && (batchInvoicePrice !== lubeInvoicePrice || batchMrp !== lubeMrp);
     let batches = (batchesOpening || []).map((b) => (Object.assign({}, b)));
     let held = (heldOpening || []).map((b) => (Object.assign({}, b)));
     let base = baseOpening;
@@ -2890,9 +2906,19 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
     let godownPrice = godownPriceOpening || { invoicePrice: lubeInvoicePrice, mrp: lubeMrp };
     // A new lot at the SAME price as the current lube price goes straight to godown (not display) -
     // it's stock that's arrived but not yet moved to the shelf. A DIFFERENT price is held separately
-    // rather than mixed into godown, since godown only tracks one price at a time; it's only released
-    // once both godown and display are fully sold through, so the older/cheaper stock always sells first.
+    // (in its own FIFO queue - see "held" above) rather than mixed into godown, since godown only
+    // tracks one price at a time; the oldest held lot is released into godown once godown itself
+    // runs out (see LUBE_AUTO_RELEASE_CUTOVER below), so the older/cheaper stock always sells first.
     const useNewLubeLogic = dateStr >= LUBE_THREE_TIER_CUTOVER;
+    const useAutoRelease = dateStr >= LUBE_AUTO_RELEASE_CUTOVER;
+    // Release BEFORE today's receipt is added to Holding (see the comment further down by its call),
+    // so a batch added by today's own receipt never gets caught by this same check.
+    if (useAutoRelease && godown <= 0.0001 && held.length > 0) {
+        const released0 = held[0];
+        godown += released0.qty;
+        godownPrice = { invoicePrice: released0.invoicePrice, mrp: released0.mrp };
+        held = held.slice(1);
+    }
     if (receiptActive && receiptQty > 0) {
         if (bypassGodown) {
             // A byproduct of internal use (e.g. an empty barrel returned) isn't a purchased lot
@@ -2914,24 +2940,58 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
                 base += receiptQty;
         }
     }
-    const manualClicks = Number(entry === null || entry === void 0 ? void 0 : entry.manualReplenishCount) || 0;
-    const requestedReplenish = manualClicks * lubeReplenishQty;
-    const replenished = Math.min(requestedReplenish, godown);
-    godown -= replenished;
-    if (replenished > 0) {
-        // If godown's current stock is priced differently from the lube's regular price (because it
-        // was released from a held batch), replenishing creates a new batch tier instead of merging
-        // into base, so that price distinction carries through to display/sale correctly.
+    // The oldest held (differently-priced) lot becomes the new Godown stock, at its own price,
+    // whenever Godown itself is empty - on/after the cutover only (the strict pre-cutover rule,
+    // requiring Display and any active price-batch to ALSO be empty, is applied separately at the
+    // very end of this function so days before the cutover keep computing exactly as before).
+    function releaseHeldIfGodownEmpty() {
+        if (!useAutoRelease || godown > 0.0001 || held.length === 0)
+            return false;
+        const released = held[0];
+        godown += released.qty;
+        godownPrice = { invoicePrice: released.invoicePrice, mrp: released.mrp };
+        held = held.slice(1);
+        return true;
+    }
+    // Moves one Replenish-qty lot from Godown into Display (or, if that godown lot is priced
+    // differently from today's regular price, into its own batch tier - same rule as the manual
+    // button always used). Returns the quantity actually moved (0 if there's nothing to move).
+    function replenishOnce() {
+        const take = Math.min(lubeReplenishQty, godown);
+        if (take <= 0)
+            return 0;
+        godown -= take;
         const godownIsCurrentPrice = godownPrice.invoicePrice === lubeInvoicePrice && godownPrice.mrp === lubeMrp;
         if (godownIsCurrentPrice)
-            base += replenished;
+            base += take;
         else
-            batches = [...batches, { qty: replenished, invoicePrice: godownPrice.invoicePrice, mrp: godownPrice.mrp }];
+            batches = [...batches, { qty: take, invoicePrice: godownPrice.invoicePrice, mrp: godownPrice.mrp }];
+        return take;
     }
+    // On/after the cutover, Display tops itself up from Godown (one Replenish-qty lot at a time) the
+    // moment it's about to run short of covering `need` more units, pulling the next held batch into
+    // Godown first if Godown itself has run dry - repeating until the need is covered or there's
+    // truly nothing left in Godown or Holding. Before the cutover this is a no-op; only the manual
+    // button (below) could move stock out of Godown, exactly as it always did.
+    function autoTopUp(need) {
+        if (!useAutoRelease || lubeReplenishQty <= 0)
+            return;
+        while (base <= 0.0001 && need > 0.0001) {
+            if (godown <= 0.0001 && !releaseHeldIfGodownEmpty())
+                break;
+            if (replenishOnce() <= 0)
+                break;
+        }
+    }
+    let replenished = 0;
+    const manualClicks = Number(entry === null || entry === void 0 ? void 0 : entry.manualReplenishCount) || 0;
+    for (let i = 0; i < manualClicks; i++)
+        replenished += replenishOnce();
     // Internal use (e.g. a barrel consumed for the station's own use, not sold to a customer) depletes
     // stock the same way a sale would, but is deliberately kept separate from priceTotal below - its
     // price exists only for audit/valuation purposes, not as Diesel Daily revenue.
     let remainingInternal = internalUse;
+    autoTopUp(remainingInternal);
     const baseInternalTaken = Math.min(Math.max(base, 0), remainingInternal);
     base -= baseInternalTaken;
     remainingInternal -= baseInternalTaken;
@@ -2947,6 +3007,7 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
         remainingInternal = 0;
     }
     let remainingSale = sale;
+    autoTopUp(remainingSale);
     const baseSold = Math.min(Math.max(base, 0), remainingSale);
     base -= baseSold;
     remainingSale -= baseSold;
@@ -2964,9 +3025,15 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
         base -= remainingSale;
         remainingSale = 0;
     }
-    // Once godown and display are both fully sold through, the oldest held (differently-priced) lot
-    // automatically becomes the new godown stock, at its own price - ready for the usual replenish.
-    if (useNewLubeLogic && godown <= 0.0001 && base <= 0.0001 && batches.length === 0 && held.length > 0) {
+    // No catch-all release here: a held lot added by TODAY's own receipt (see above) must sit in
+    // Holding and wait its FIFO turn, not be swept straight back out just because nothing else
+    // happened today. If today's own processing (replenish/sale) left Godown empty again with more
+    // genuinely-queued held lots, that's already been handled above by autoTopUp's own release call;
+    // anything left over simply gets picked up by the opening-state check the next time this lube is
+    // computed (tomorrow, or on this device's next render).
+    // Pre-cutover days only: the stricter original rule - Godown, Display AND any active
+    // price-batch all had to be fully sold through before the oldest held lot was released.
+    if (useNewLubeLogic && !useAutoRelease && godown <= 0.0001 && base <= 0.0001 && batches.length === 0 && held.length > 0) {
         const released = held[0];
         godown += released.qty;
         godownPrice = { invoicePrice: released.invoicePrice, mrp: released.mrp };
@@ -3511,7 +3578,7 @@ function MasterData({ config, persistConfig, showToast, dieselData, persistDiese
     }), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => addTerminal('paytm') }, React.createElement(IconPlus, { size: 14 }), " Add Paytm terminal")), sub === 'tanks' && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Tanks"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addTank }, React.createElement(IconPlus, { size: 14 }), " Add Tank")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Group nozzles (meters/diesel points) into the physical tank they draw from \u2014 this feeds the Daily Stock Register report. Two tanks can hold the same grade (e.g. MS1 and MS2)."), (local.tanks || []).map((t, idx) => {
         const nozzleOptions = t.productId === 'p_diesel' ? local.dieselPoints.map((p) => ({ id: p.id, label: p.label })) : local.meters.filter((m) => m.productId === t.productId).map((m) => ({ id: m.id, label: m.label }));
         return React.createElement("div", { key: t.id, className: "slot-config" }, React.createElement("div", { className: "slot-config-head" }, React.createElement("input", { className: "text-input slot-name-input", value: t.name, onChange: (e) => updTank(idx, { name: e.target.value }) }), React.createElement("select", { className: "select-input", style: { width: 140 }, value: t.productId, onChange: (e) => updTank(idx, { productId: e.target.value, nozzleIds: [] }) }, local.products.map((p) => React.createElement("option", { key: p.id, value: p.id }, p.name))), React.createElement("button", { className: "icon-btn", onClick: () => removeTank(idx) }, React.createElement(IconTrash, { size: 14 }))), React.createElement("div", { style: { fontSize: 12, color: 'var(--text-muted)', margin: '6px 0 4px' } }, "Nozzles feeding this tank:"), React.createElement("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 12 } }, nozzleOptions.map((n) => React.createElement("label", { key: n.id, className: "toggle" }, React.createElement("input", { type: "checkbox", checked: (t.nozzleIds || []).includes(n.id), onChange: () => toggleTankNozzle(idx, n.id) }), " ", n.label))));
-    })), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across. \"Empty barrel item\" adds 1 to that item's stock automatically whenever Barrel Used is clicked for this lube."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Show in Inventory report", "Feeds MS item", "Avg. barrel volume", "Empty barrel item", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: l.includeInInventory !== false, onChange: (e) => updLube(idx, { includeInInventory: e.target.checked }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, l.feedsMsLubeId ? React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.emptyBarrelLubeId || '', onChange: (e) => updLube(idx, { emptyBarrelLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.id !== l.id && !x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name))) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 })))))))), React.createElement("div", { className: "card" },
+    })), sub === 'products' && React.createElement(React.Fragment, null, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Products & Rates")), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Product"), React.createElement("th", null, "Rate"))), React.createElement("tbody", null, local.products.map((p, idx) => React.createElement("tr", { key: p.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: p.name, onChange: (e) => updProduct(idx, { name: e.target.value }) })), React.createElement("td", null, React.createElement(NumInput, { value: p.rate, onChange: (v) => updProduct(idx, { rate: v }) }))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Lubes"), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addLube }, React.createElement(IconPlus, { size: 14 }), " Add Lube")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Invoice price values the Inventory report. MRP is the selling price used for revenue. Godown stock automatically tops up display stock (by Replenish qty) whenever display would drop to zero or below \u2014 applies only to Diesel Daily's shop lubes, not 2T Oil / Packet Oil (MS Daily only, marked below). \"Feeds MS item\" links a Diesel-side item (like a barrel) to an MS-side item it refills \u2014 use the Barrel Used button in Diesel Daily to transfer volume across. \"Empty barrel item\" adds 1 to that item's stock automatically whenever Barrel Used is clicked for this lube. A receipt at a different price than shown here goes into Holding and is only released into Godown (oldest price first) once Godown itself runs out \u2014 untick \"Track price batches\" for an item whose price changes too often for this to be worth tracking; its receipts then always go straight to Godown at whatever price is entered."), React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Godown stock", "Display opening", "Replenish qty", "Invoice price", "MRP", "Track price batches", "Show in Inventory report", "Feeds MS item", "Avg. barrel volume", "Empty barrel item", ""].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, local.lubes.map((l, idx) => React.createElement("tr", { key: l.id }, React.createElement("td", null, React.createElement("input", { className: "text-input", value: l.name, onChange: (e) => updLube(idx, { name: e.target.value }) }), l.msOnly && React.createElement(Pill, { tone: "muted" }, "MS only")), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.godownStock, onChange: (v) => updLube(idx, { godownStock: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.openingBalance, onChange: (v) => updLube(idx, { openingBalance: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement(NumInput, { value: l.replenishQty, onChange: (v) => updLube(idx, { replenishQty: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.invoicePrice, onChange: (v) => updLube(idx, { invoicePrice: v }) })), React.createElement("td", null, React.createElement(NumInput, { value: l.mrp, onChange: (v) => updLube(idx, { mrp: v }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("input", { type: "checkbox", title: "On: receipts at a different price go into Holding and wait their FIFO turn. Off: every receipt goes straight to Godown at whatever price is entered.", checked: l.trackPriceTiers !== false, onChange: (e) => updLube(idx, { trackPriceTiers: e.target.checked }) })), React.createElement("td", null, React.createElement("input", { type: "checkbox", checked: l.includeInInventory !== false, onChange: (e) => updLube(idx, { includeInInventory: e.target.checked }) })), React.createElement("td", null, l.msOnly ? React.createElement("span", { className: "readonly-value" }, "\u2014") : React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.feedsMsLubeId || '', onChange: (e) => updLube(idx, { feedsMsLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name)))), React.createElement("td", null, l.feedsMsLubeId ? React.createElement(NumInput, { value: l.avgBarrelVolume, onChange: (v) => updLube(idx, { avgBarrelVolume: v }), placeholder: "e.g. 213" }) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, l.feedsMsLubeId ? React.createElement("select", { className: "select-input", style: { width: 130 }, value: l.emptyBarrelLubeId || '', onChange: (e) => updLube(idx, { emptyBarrelLubeId: e.target.value }) }, React.createElement("option", { value: "" }, "None"), local.lubes.filter((x) => x.id !== l.id && !x.msOnly).map((x) => React.createElement("option", { key: x.id, value: x.id }, x.name))) : React.createElement("span", { className: "readonly-value" }, "\u2014")), React.createElement("td", null, React.createElement("button", { className: "btn btn-ghost btn-xs", style: { marginRight: 6 }, title: "Clear all carried-forward stock history for this lube", onClick: () => resetLubeLedger(l.id) }, "Reset stock"), React.createElement("button", { className: "icon-btn", onClick: () => removeLube(idx) }, React.createElement(IconTrash, { size: 14 })))))))), React.createElement("div", { className: "card" },
   React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Correct lube stock")),
   React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Set the correct Display and Godown quantities as of a specific date \u2014 everything after that date recalculates automatically, with no need to revisit each day in between."),
   React.createElement("div", { className: "form-grid" },
