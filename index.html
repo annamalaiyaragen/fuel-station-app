@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.01-1';
+const APP_BUILD = '2026.10.01-2';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -2976,7 +2976,14 @@ function lubeLineCore(lube, entry, baseOpening, godownOpening, batchesOpening, d
     function autoTopUp(need) {
         if (!useAutoRelease || lubeReplenishQty <= 0)
             return;
-        while (base <= 0.0001 && need > 0.0001) {
+        // "Covering `need`" means enough SELLABLE stock to fulfil it - base plus whatever's already
+        // sitting in a price batch, not base alone. A lot released at a different price lands in
+        // batches (see replenishOnce), so checking base alone here would never see it as progress and
+        // would keep pulling one Replenish-qty lot after another until Godown and Holding were both
+        // completely drained, however small the actual need. Stopping once there's enough available
+        // (across base + batches) is what keeps this to "one lot at a time, only as needed."
+        const available = () => Math.max(base, 0) + batches.reduce((s, b) => s + b.qty, 0);
+        while (available() < need - 0.0001) {
             if (godown <= 0.0001 && !releaseHeldIfGodownEmpty())
                 break;
             if (replenishOnce() <= 0)
@@ -3346,7 +3353,7 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         var _a, _b, _c;
         const line = fin.lubeLines[l.id];
         const entry = ((_a = rec.lubeEntries) === null || _a === void 0 ? void 0 : _a[l.id]) || {};
-        const batchSummary = line.openingBatches.length === 0 ? '\u2014' : line.openingBatches.map((b) => `${fmtNum(b.qty)} @ ${fmt(b.mrp)}`).join(', ');
+        const batchSummary = line.closingBatches.length === 0 ? '\u2014' : line.closingBatches.map((b) => `${fmtNum(b.qty)} @ ${fmt(b.mrp)}`).join(', ');
         const heldSummary = (line.closingHeld && line.closingHeld.length > 0) ? line.closingHeld.map((b) => `${fmtNum(b.qty)} @ ${fmt(b.mrp)}`).join(', ') : null;
         const receiptToday = entry.receiptOn && (Number(entry.receipt) || 0) > 0;
         const internalUseToday = (Number(entry.internalUseQty) || 0) > 0;
