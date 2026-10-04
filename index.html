@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.04-3';
+const APP_BUILD = '2026.10.04-4';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -6145,10 +6145,31 @@ function getLatestTripEntry(tripLogForKl) {
   return [...tripLogForKl].sort((a, b) => a.date.localeCompare(b.date))[tripLogForKl.length - 1];
 }
 function emptyTripLogEntry() { return { id: ttUid(), date: todayStr(), openingKm: '', closingKm: '', diesel: '', waste: '', outlet: '', driver: '', cleaner: '', maintenance: '' }; }
+// A trip is identified by its odometer readings: two entries for the same vehicle with the same
+// Opening AND Closing KM are the same trip logged twice (a double click, or the same trip entered on two
+// devices - each copy has its own id so the merge keeps both). The first one logged stays; later copies
+// are returned here so they can be flagged, and are NOT counted in trip pay. Nothing is deleted.
+function ttDuplicateTripIds(list) {
+  const ordered = (list || []).map((t, i) => ({ t, i })).sort((a, b) => String(a.t.savedAt || '').localeCompare(String(b.t.savedAt || '')) || a.i - b.i);
+  const seen = new Set(); const dups = new Set();
+  ordered.forEach(({ t }) => {
+    const k = Number(t.openingKm) + '|' + Number(t.closingKm);
+    if (seen.has(k)) dups.add(t.id); else seen.add(k);
+  });
+  return dups;
+}
+// Mileage = kilometres per litre of diesel (higher is better). Worked out from the entry's own KM and
+// diesel, not from the stored `mileage` field: older entries stored litres-per-km (diesel / km) there.
+function ttMileageKmpl(t) {
+  const km = Number(t.totalKm) || (Number(t.closingKm) - Number(t.openingKm)) || 0;
+  const l = Number(t.diesel) || 0;
+  return km > 0 && l > 0 ? round2(km / l) : null;
+}
 function countTripsForPayroll(tripLog, dateFrom, dateTo) {
   const counts = {};
   ['12', '20'].forEach((kl) => {
-    ((tripLog && tripLog[kl]) || []).filter((t) => t.date >= dateFrom && t.date <= dateTo).forEach((t) => {
+    const dupIds = ttDuplicateTripIds((tripLog && tripLog[kl]) || []);
+    ((tripLog && tripLog[kl]) || []).filter((t) => t.date >= dateFrom && t.date <= dateTo && !dupIds.has(t.id)).forEach((t) => {
       if (t.driver) { const k = t.driver + '|' + kl + '|Driver'; counts[k] = (counts[k] || 0) + 1; }
       if (t.cleaner) { const k = t.cleaner + '|' + kl + '|Cleaner'; counts[k] = (counts[k] || 0) + 1; }
     });
@@ -6184,6 +6205,7 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
 
   const updateNewTrip = (patch) => setNewTrip((t) => ({ ...t, ...patch }));
 
+  const lastAddedRef = useRef('');
   const addTripEntry = () => {
     const opening = derivedOpeningKm !== null ? Number(derivedOpeningKm) : Number(newTrip.openingKm);
     const closing = Number(newTrip.closingKm);
@@ -6191,9 +6213,18 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
     if (derivedOpeningKm === null && !(Number(newTrip.openingKm) > 0)) { showToast('Enter the starting Opening KM \u2014 this is the very first trip logged for this vehicle.', 'red'); return; }
     if (!(closing > opening)) { showToast('Closing KM must be greater than Opening KM.', 'red'); return; }
     if (!newTrip.driver) { showToast('Select a driver.', 'red'); return; }
+    // Same Opening and Closing KM already logged for this vehicle = the same trip. The ref also catches a
+    // quick double click, which would otherwise run twice before the saved list has refreshed.
+    const tripKey = tripKl + '|' + opening + '|' + closing;
+    const existing = (tripLog[tripKl] || []).find((t) => Number(t.openingKm) === opening && Number(t.closingKm) === closing);
+    if (existing || lastAddedRef.current === tripKey) {
+      showToast(existing ? `This trip is already logged (${fmtDate(existing.date)}, ${fmtNum(opening)} \u2192 ${fmtNum(closing)} km) \u2014 not added again.` : 'This trip was just logged \u2014 not added again.', 'red');
+      return;
+    }
+    lastAddedRef.current = tripKey;
     const totalKm = round2(closing - opening);
     const diesel = Number(newTrip.diesel) || 0;
-    const mileage = totalKm > 0 ? round2(diesel / totalKm) : 0;
+    const mileage = diesel > 0 && totalKm > 0 ? round2(totalKm / diesel) : 0; // km per litre
     const entry = { id: ttUid(), date: newTrip.date, openingKm: opening, closingKm: closing, totalKm, diesel, waste: Number(newTrip.waste) || 0, mileage, outlet: newTrip.outlet, driver: newTrip.driver, cleaner: newTrip.cleaner, maintenance: newTrip.maintenance, savedAt: new Date().toISOString() };
     const nextLog = { ...tripLog, [tripKl]: [...(tripLog[tripKl] || []), entry] };
     persistTtData({ ...ttData, tripLog: nextLog });
@@ -6203,11 +6234,13 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
   };
 
   const removeTripEntry = (id) => {
+    lastAddedRef.current = ''; // a removed trip may be logged again
     const nextLog = { ...tripLog, [tripKl]: (tripLog[tripKl] || []).filter((t) => t.id !== id) };
     persistTtData({ ...ttData, tripLog: nextLog });
     if (pushNow) pushNow();
   };
 
+  const dupTripIds = ttDuplicateTripIds(tripLog[tripKl] || []);
   const monthRows = (tripLog[tripKl] || []).filter((t) => ttMonthKeyOf(t.date) === tripMonth).sort((a, b) => a.date.localeCompare(b.date));
 
   const generate = () => {
@@ -6288,11 +6321,11 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
         React.createElement("div", { className: "card-head" }, React.createElement("h3", null, tripKl + " KL trip log"), React.createElement(MonthSelect, { value: tripMonth, onChange: setTripMonth })),
         monthRows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No trips logged for this vehicle in " + monthLabel(tripMonth) + ".") :
         React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
-          React.createElement("thead", null, React.createElement("tr", null, ["Date", "Opening", "Closing", "Total KM", "Diesel", "Waste", "Mileage", "Outlet", "Driver", "Cleaner", "Maintenance", ""].map((h) => React.createElement("th", { key: h }, h)))),
-          React.createElement("tbody", null, monthRows.map((t) => React.createElement("tr", { key: t.id },
-            React.createElement("td", null, fmtDate(t.date)), React.createElement("td", { className: "mono" }, fmtNum(t.openingKm)), React.createElement("td", { className: "mono" }, fmtNum(t.closingKm)),
+          React.createElement("thead", null, React.createElement("tr", null, ["Date", "Opening", "Closing", "Total KM", "Diesel", "Waste", "Mileage (km/L)", "Outlet", "Driver", "Cleaner", "Maintenance", ""].map((h) => React.createElement("th", { key: h }, h)))),
+          React.createElement("tbody", null, monthRows.map((t) => React.createElement("tr", { key: t.id, style: dupTripIds.has(t.id) ? { background: 'var(--amber-dim)' } : undefined, title: dupTripIds.has(t.id) ? 'Duplicate: same Opening and Closing KM as an earlier entry. Not counted in trip pay \u2014 use the bin to remove it.' : undefined },
+            React.createElement("td", null, fmtDate(t.date), dupTripIds.has(t.id) && React.createElement("div", { style: { fontSize: 11, color: 'var(--amber)' } }, 'Duplicate \u2014 not counted')), React.createElement("td", { className: "mono" }, fmtNum(t.openingKm)), React.createElement("td", { className: "mono" }, fmtNum(t.closingKm)),
             React.createElement("td", { className: "mono" }, fmtNum(t.totalKm)), React.createElement("td", { className: "mono" }, fmtNum(t.diesel)), React.createElement("td", { className: "mono" }, fmtNum(t.waste)),
-            React.createElement("td", { className: "mono" }, fmtNum(t.mileage)), React.createElement("td", null, t.outlet), React.createElement("td", null, t.driver), React.createElement("td", null, t.cleaner),
+            React.createElement("td", { className: "mono" }, ttMileageKmpl(t) === null ? '\u2014' : fmtNum(ttMileageKmpl(t))), React.createElement("td", null, t.outlet), React.createElement("td", null, t.driver), React.createElement("td", null, t.cleaner),
             React.createElement("td", { style: { fontSize: 12 } }, t.maintenance || '\u2014'),
             React.createElement("td", null, React.createElement("button", { className: "icon-btn", onClick: () => removeTripEntry(t.id) }, React.createElement(IconTrash, { size: 14 })))))))
         )
