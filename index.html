@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.04-2';
+const APP_BUILD = '2026.10.04-3';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -4315,6 +4315,16 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
     const daysInMonth = new Date(Number(y), Number(m), 0).getDate();
     const hiddenNames = new Set(config.employees.filter((e) => e.hideFromSalary || e.ttStaff).map((e) => e.name));
     const names = [...new Set([...Object.keys(credits), ...config.employees.map((e) => e.name)])].filter((n) => !hiddenNames.has(n));
+    // What each person owed BEFORE this month's salary deduction: today's balance plus whatever this
+    // month's submitted statement already recovered. Before submitting that is simply today's balance;
+    // after submitting (i.e. when you open the statement to re-run it) it puts the original figure back,
+    // so the Total Advance column and the suggested advance are the same as on the first run, instead of
+    // the already-reduced balance. Counted from the de-duplicated log, like every other advance figure.
+    const priorRecoveryByName = {};
+    canonicalAdvanceLog(advance.log).entries.forEach((e) => {
+        if (e.monthKey === month && e.type === 'Recovery')
+            priorRecoveryByName[e.name] = round2((priorRecoveryByName[e.name] || 0) + Number(e.amount));
+    });
     const rows = names.map((name) => {
         const emp = config.employees.find((e) => e.name === name);
         const c = credits[name] || { msPowerComm: 0, volume: 0, dieselDayPay: 0, dieselSplitShare: 0, attd: 0 };
@@ -4339,9 +4349,9 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         }
         const defaultPf = emp && emp.pfOn ? (Number(emp.pf) || 0) : 0;
         const defaultBonus = (emp && emp.bonusOn ? (Number(emp.bonus) || 0) : 0) + (c.volume > BONUS_VOLUME_THRESHOLD ? BONUS_VOLUME_AMOUNT : 0);
-        const defaultAdvance = advanceTier(advance.balances[name] || 0);
+        const fullBalance = round2((advance.balances[name] || 0) + (priorRecoveryByName[name] || 0));
+        const defaultAdvance = advanceTier(fullBalance);
         const quit = !!ov.quit;
-        const fullBalance = round2(advance.balances[name] || 0);
         const pf = ov.pf !== undefined ? ov.pf : defaultPf;
         const adv = quit ? fullBalance : (ov.advance !== undefined ? ov.advance : defaultAdvance);
         const bonus = ov.bonus !== undefined ? ov.bonus : defaultBonus;
@@ -4376,12 +4386,16 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         }
         doSubmit();
     };
-    const doSubmit = () => {
+    const doSubmit = (baseAdvance) => {
+        // baseAdvance: the advance state to apply the deduction on top of. A re-run passes the state
+        // AFTER reversing the earlier deduction - reading `advance` here would be this render's
+        // pre-reversal copy, which undid the reversal and deducted the month a second time.
+        const base = baseAdvance && baseAdvance.log ? baseAdvance : advance;
         const entries = [];
-        const balances = Object.assign({}, advance.balances);
+        const balances = Object.assign({}, base.balances);
         rows.forEach((r) => { const amt = Number(r.adv) || 0; if (amt <= 0)
             return; balances[r.name] = (balances[r.name] || 0) - amt; entries.push({ name: r.name, amount: amt }); });
-        const log = [...advance.log];
+        const log = [...base.log];
         entries.forEach((e) => log.unshift({ name: e.name, type: 'Recovery', amount: e.amount, date: new Date().toISOString(), desc: 'Salary for ' + monthLabel(month), balanceAfter: balances[e.name], monthKey: month, reversed: false }));
         persistAdvance({ balances, log });
         // Freeze each row's advance to EXACTLY what was actually submitted (whether it came from a
@@ -4401,13 +4415,12 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         if (pushNow) pushNow();
     };
     const reverseAndReRun = () => {
+        // Reverse this month's earlier deduction (what was counted - see priorRecoveryByName), drop those
+        // log lines, then apply the new figures once on top of that, all in a single step.
         const balances = Object.assign({}, advance.balances);
-        const priorEntries = advance.log.filter((e) => e.monthKey === month && e.type === 'Recovery');
-        priorEntries.forEach((e) => { balances[e.name] = round2((balances[e.name] || 0) + e.amount); });
+        Object.keys(priorRecoveryByName).forEach((n) => { balances[n] = round2((balances[n] || 0) + priorRecoveryByName[n]); });
         const log = advance.log.filter((e) => !(e.monthKey === month && e.type === 'Recovery'));
-        persistAdvance({ balances, log });
-        persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { submitted: null, confirmReRun: false }) }));
-        setTimeout(doSubmit, 0);
+        doSubmit({ balances, log });
     };
     const [detailFor, setDetailFor] = useState(null);
 
@@ -4426,6 +4439,7 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         React.createElement("button", { className: "btn btn-primary", onClick: submit }, submitted ? 'Submitted \u2013 re-run' : 'Submit salary statement'),
         React.createElement(Pill, { tone: submitted ? 'green' : 'muted' }, submitted ? 'Submitted' : 'Not submitted'),
         React.createElement("button", { className: "btn btn-secondary", onClick: () => window.print() }, React.createElement(IconPrint, { size: 15 }), " Print"));
+    const reRunHint = submitted && React.createElement("div", { className: "empty-hint print-hide" }, `Total Advance shows what each person owed before this month's deduction. Re-running first puts back the ${monthLabel(month)} deduction already taken, then deducts the Advance column once \u2014 it is never taken twice.`);
     const reRunConfirm = runData.confirmReRun && React.createElement(ConfirmBar, { message: `A salary statement for ${monthLabel(month)} was already submitted. Re-running will reverse those advance recoveries first, then reapply with the new figures.`, confirmLabel: "Reverse and re-run", onConfirm: reverseAndReRun, onCancel: () => persistSalaryRuns(Object.assign(Object.assign({}, salaryRuns), { [month]: Object.assign(Object.assign({}, runData), { confirmReRun: false }) })) });
     const tableRows = rows.map((r) => React.createElement("tr", { key: r.name },
         React.createElement("td", null, r.name),
@@ -4443,7 +4457,7 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         React.createElement("tbody", null, ...tableRows),
         React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 7 }, React.createElement("b", null, "Grand total net")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grandNet))))));
     const detailModal = detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (rows.find((r) => r.name === detailFor) || {}).salary, onClose: () => setDetailFor(null) });
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: headerActions }), reRunConfirm, React.createElement(AdvanceDriftNotice, { advance, persistAdvance, pushNow, showToast }), table, detailModal);
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: headerActions }), reRunConfirm, reRunHint, React.createElement(AdvanceDriftNotice, { advance, persistAdvance, pushNow, showToast }), table, detailModal);
 }
 function fmtLogDate(d) {
     if (!d)
