@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.01-3';
+const APP_BUILD = '2026.10.04-2';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -411,16 +411,155 @@ function mergeAdvanceLog(localLog, cloudLog) {
     });
     return merged;
 }
+// ---- Per-day "latest save wins" for auto-generated advance entries ----
+// Diesel Daily expense advances and Day Closing cash shortages/excesses are rewritten as a whole set
+// every time that day is saved: the old entries are removed and new ones (new timestamp) added. The
+// union-merge above can't see a removal, so a device that still held the old copies (or a Drive file
+// not yet updated) would bring them straight back next to the new ones and the person's balance was
+// counted twice. Each such save therefore records its save time in advance.daySaves['dx|<day>' or
+// 'dc|<day>']; on merge, any entry for that day stamped BEFORE the latest recorded save is a
+// superseded copy and is not carried forward. Entries of the same save share the save time exactly.
+function advanceDayTag(e) {
+    return e && e.dayClosingCashDiffFor ? 'dc|' + e.dayClosingCashDiffFor : (e && e.dieselExpenseAdvanceFor ? 'dx|' + e.dieselExpenseAdvanceFor : null);
+}
+function mergeAdvanceDaySaves(a, b) {
+    const out = Object.assign({}, a && typeof a === 'object' ? a : {});
+    Object.keys(b && typeof b === 'object' ? b : {}).forEach((k) => {
+        if (!out[k] || String(b[k]) > String(out[k]))
+            out[k] = b[k];
+    });
+    return out;
+}
+function dropSupersededAdvanceEntries(log, daySaves) {
+    const saves = daySaves || {};
+    return (Array.isArray(log) ? log : []).filter((e) => {
+        const tag = advanceDayTag(e);
+        if (!tag || !saves[tag])
+            return true;
+        return !(String(e.date || '') < String(saves[tag]));
+    });
+}
 // Balances are a straight sum (Advance adds, Recovery subtracts), which is order-independent \u2014
 // so recomputing directly from the merged log guarantees balances always match what the log
 // actually contains, rather than trusting a balances object from whichever side "won".
 function recomputeAdvanceBalances(log) {
     const balances = {};
-    (log || []).forEach((e) => {
+    // Counted from the de-duplicated view of the log (see canonicalAdvanceLog), not the raw one: the
+    // same Diesel-expense or Day-Closing advance can end up saved twice or three times (each copy
+    // stamped with its own save time, so the union-merge above can't tell they're the same event),
+    // and summing every raw copy inflated that person's balance.
+    canonicalAdvanceLog(log).entries.forEach((e) => {
         const delta = e.type === 'Advance' ? Number(e.amount) : -Number(e.amount);
         balances[e.name] = round2((balances[e.name] || 0) + delta);
     });
     return balances;
+}
+// The one definition of "which log entries actually count", shared by every balance and every
+// report so they can never disagree again. Nothing is deleted from the stored log - this only
+// decides which entries are counted:
+//  1. Entries created automatically for one specific day (Day Closing cash shortage/excess,
+//     Diesel Daily expense advance) are tagged with that day. Within one person + one day:
+//       - a legacy "Reversing ..." entry cancels one opposite entry of the same amount (both ignored),
+//       - what's left of the same type and amount counts once (the earliest copy),
+//       - if what's left has DIFFERENT amounts (a corrected figure came back from another device
+//         alongside the old one), only the most recent counts, and it's reported as a conflict.
+//  2. A salary-recovery entry exists once per person per salary month - the latest wins (a
+//     re-run replaces the earlier one).
+//  3. Everything else (manual Advance/Recovery entries, opening balances, corrections) always counts.
+function canonicalAdvanceLog(log) {
+    const entries = Array.isArray(log) ? log : [];
+    const dropped = new Map();
+    const conflicts = [];
+    const isReversal = (e) => /^reversing/i.test(String(e.desc || ''));
+    const dateOf = (e) => String(e.date || '');
+    const groups = new Map();
+    entries.forEach((e, i) => {
+        if (!e)
+            return;
+        const tag = e.dayClosingCashDiffFor ? 'dc|' + e.dayClosingCashDiffFor : (e.dieselExpenseAdvanceFor ? 'dx|' + e.dieselExpenseAdvanceFor : null);
+        if (tag === null)
+            return;
+        const key = e.name + '|' + tag;
+        if (!groups.has(key))
+            groups.set(key, []);
+        groups.get(key).push({ e, i });
+    });
+    groups.forEach((g, key) => {
+        const byDate = (a, b) => dateOf(a.e).localeCompare(dateOf(b.e)) || b.i - a.i;
+        const reversals = g.filter((x) => isReversal(x.e)).sort(byDate);
+        const normals = g.filter((x) => !isReversal(x.e)).sort(byDate);
+        const matched = new Set();
+        reversals.forEach((r) => {
+            // Cancel against the most recent unmatched opposite entry, so the earliest copy survives.
+            for (let k = normals.length - 1; k >= 0; k--) {
+                const n = normals[k];
+                if (matched.has(n.i) || n.e.type === r.e.type || Number(n.e.amount) !== Number(r.e.amount))
+                    continue;
+                matched.add(n.i);
+                dropped.set(n.i, 'cancelled by a reversal entry');
+                dropped.set(r.i, 'cancels an earlier entry');
+                return;
+            }
+        });
+        const left = normals.filter((x) => !matched.has(x.i));
+        ['Advance', 'Recovery'].forEach((type) => {
+            const ofType = left.filter((x) => x.e.type === type);
+            if (ofType.length <= 1)
+                return;
+            // Entries written by ONE save share one timestamp, so several entries with the same stamp are
+            // genuinely separate (e.g. two advances to the same person that day) and are all kept. Only
+            // entries from DIFFERENT saves can be copies of each other.
+            const stamps = [];
+            ofType.forEach((x) => { const d = dateOf(x.e); if (stamps.indexOf(d) < 0) stamps.push(d); });
+            if (stamps.length <= 1)
+                return;
+            const sig = (d) => ofType.filter((x) => dateOf(x.e) === d).map((x) => Number(x.e.amount)).sort((p, q) => p - q).join(',');
+            const sameEverySave = stamps.every((d) => sig(d) === sig(stamps[0]));
+            const keepStamp = sameEverySave ? stamps[0] : stamps[stamps.length - 1]; // stamps are in ascending order
+            ofType.forEach((x) => { if (dateOf(x.e) !== keepStamp)
+                dropped.set(x.i, sameEverySave ? 'duplicate copy of the same entry' : 'superseded by a later figure for the same day'); });
+            if (!sameEverySave) {
+                const kept = ofType.filter((x) => dateOf(x.e) === keepStamp);
+                conflicts.push({ name: kept[0].e.name, key, type, amounts: [...new Set(ofType.map((x) => Number(x.e.amount)))], kept: kept.reduce((t, x) => t + Number(x.e.amount), 0) });
+            }
+        });
+    });
+    const salary = new Map();
+    entries.forEach((e, i) => {
+        if (!e || !e.monthKey || e.type !== 'Recovery')
+            return;
+        const key = e.name + '|' + e.monthKey;
+        if (!salary.has(key))
+            salary.set(key, []);
+        salary.get(key).push({ e, i });
+    });
+    salary.forEach((g) => {
+        if (g.length <= 1)
+            return;
+        g.sort((a, b) => dateOf(b.e).localeCompare(dateOf(a.e)) || a.i - b.i);
+        g.slice(1).forEach((x) => dropped.set(x.i, 'older salary recovery replaced by a re-run'));
+    });
+    return {
+        entries: entries.filter((e, i) => e && !dropped.has(i)),
+        ignored: entries.map((e, i) => dropped.has(i) ? { entry: e, why: dropped.get(i) } : null).filter(Boolean),
+        conflicts,
+    };
+}
+// People whose stored balance doesn't equal what their (de-duplicated) entries add up to.
+function computeAdvanceDrift(advance) {
+    const log = (advance && advance.log) || [];
+    const stored = (advance && advance.balances) || {};
+    const canon = canonicalAdvanceLog(log);
+    const correct = recomputeAdvanceBalances(log);
+    const names = new Set([...Object.keys(stored), ...Object.keys(correct)]);
+    const rows = [];
+    names.forEach((name) => {
+        const shown = round2(Number(stored[name]) || 0);
+        const should = round2(Number(correct[name]) || 0);
+        if (Math.abs(shown - should) > 0.005)
+            rows.push({ name, shown, correct: should, ignored: canon.ignored.filter((x) => x.entry.name === name) });
+    });
+    return rows.sort((a, b) => a.name.localeCompare(b.name));
 }
 // Trip logs and settlement history both use the same id+savedAt shape as msLog/dieselLog, just
 // nested one level under vehicle type (tripLog) or as a flat array (history) - so the same safe
@@ -733,7 +872,8 @@ function mergeLocalWithCloud(local, cloud, cloudIsNewer, cloudConfigWins) {
     const s = local || {};
     const c = cloud || {};
     const chosenConfig = (cloudConfigWins && c.config) ? c.config : (s.config || c.config || {});
-    const mergedAdvanceLog = mergeAdvanceLog(s.advance && s.advance.log, c.advance && c.advance.log);
+    const mergedAdvanceDaySaves = mergeAdvanceDaySaves(s.advance && s.advance.daySaves, c.advance && c.advance.daySaves);
+    const mergedAdvanceLog = dropSupersededAdvanceEntries(mergeAdvanceLog(s.advance && s.advance.log, c.advance && c.advance.log), mergedAdvanceDaySaves);
     return {
         version: 2, savedAt: new Date().toISOString(),
         config: Object.assign({}, defaultConfig, chosenConfig, { bankSettings: mergeBankSettings(chosenConfig.bankSettings) }),
@@ -743,7 +883,7 @@ function mergeLocalWithCloud(local, cloud, cloudIsNewer, cloudConfigWins) {
         dieselData: mergeByDateKey(s.dieselData, c.dieselData, cloudIsNewer),
         dieselLog: mergeArraysById(s.dieselLog, c.dieselLog),
         dayClosing: mergeByDateKey(s.dayClosing, c.dayClosing, cloudIsNewer),
-        advance: { log: mergedAdvanceLog, balances: recomputeAdvanceBalances(mergedAdvanceLog) },
+        advance: { log: mergedAdvanceLog, balances: recomputeAdvanceBalances(mergedAdvanceLog), daySaves: mergedAdvanceDaySaves },
         salaryRuns: mergeByDateKey(s.salaryRuns, c.salaryRuns, cloudIsNewer),
         bankRecon: mergeBankRecon(s.bankRecon, c.bankRecon),
         dsrData: mergeByDateKey(s.dsrData, c.dsrData, cloudIsNewer),
@@ -1499,7 +1639,16 @@ function App() {
     const persistDieselData = useCallback(async (next) => { setDieselData(next); latestStateRef.current.dieselData = next; await storageSet(K.DIESEL_DATA, next); }, []);
     const persistDieselLog = useCallback(async (next) => { setDieselLog(next); latestStateRef.current.dieselLog = next; await storageSet(K.DIESEL_LOG, next); }, []);
     const persistDayClosing = useCallback(async (next) => { setDayClosing(next); latestStateRef.current.dayClosing = next; await storageSet(K.DAY_CLOSING, next); }, []);
-    const persistAdvance = useCallback(async (next) => { setAdvance(next); latestStateRef.current.advance = next; await storageSet(K.ADVANCE, next); }, []);
+    const persistAdvance = useCallback(async (next) => {
+        // Callers mostly pass just {balances, log}; carry the per-day save markers (see
+        // dropSupersededAdvanceEntries) over so no write ever loses them.
+        if (next && next.daySaves === undefined) {
+            const prev = latestStateRef.current.advance;
+            if (prev && prev.daySaves)
+                next = Object.assign({}, next, { daySaves: prev.daySaves });
+        }
+        setAdvance(next); latestStateRef.current.advance = next; await storageSet(K.ADVANCE, next);
+    }, []);
     const persistSalaryRuns = useCallback(async (next) => { setSalaryRuns(next); latestStateRef.current.salaryRuns = next; await storageSet(K.SALARY_RUNS, next); }, []);
     const persistBankRecon = useCallback(async (next) => { setBankRecon(next); latestStateRef.current.bankRecon = next; await storageSet(K.BANK_RECON, next); }, []);
     const persistBankStatements = useCallback(async (next) => { setBankStatements(next); latestStateRef.current.bankStatements = next; await storageSet(K.BANK_STATEMENTS, next); }, []);
@@ -3316,17 +3465,18 @@ function DieselDaily({ config, persistConfig, dieselData, persistDieselData, die
         let advLog = advance.log.filter((e) => e.dieselExpenseAdvanceFor !== entryDate);
         let advChanged = priorTaggedEntries.length > 0;
         const advanceExpensesApplied = [];
+        const advSaveStamp = new Date().toISOString(); // one stamp for the whole save (see dropSupersededAdvanceEntries)
         (rec.expenses || []).forEach((e) => {
             if (e.type === 'advance' && e.employeeName && Number(e.amount) > 0) {
                 const amt = round2(Number(e.amount));
                 advBalances[e.employeeName] = round2((advBalances[e.employeeName] || 0) + amt);
-                advLog = [{ name: e.employeeName, type: 'Advance', amount: amt, date: new Date().toISOString(), desc: `Diesel Daily expense advance on ${fmtDate(entryDate)}` + (e.desc ? ' - ' + e.desc : ''), balanceAfter: advBalances[e.employeeName], dieselExpenseAdvanceFor: entryDate }, ...advLog];
+                advLog = [{ name: e.employeeName, type: 'Advance', amount: amt, date: advSaveStamp, desc: `Diesel Daily expense advance on ${fmtDate(entryDate)}` + (e.desc ? ' - ' + e.desc : ''), balanceAfter: advBalances[e.employeeName], dieselExpenseAdvanceFor: entryDate }, ...advLog];
                 advanceExpensesApplied.push({ employeeName: e.employeeName, amount: amt });
                 advChanged = true;
             }
         });
         record.advanceExpensesApplied = advanceExpensesApplied;
-        if (advChanged) persistAdvance({ balances: advBalances, log: advLog });
+        if (advChanged) persistAdvance({ balances: advBalances, log: advLog, daySaves: Object.assign({}, advance.daySaves || {}, { ['dx|' + entryDate]: advSaveStamp }) });
         persistDieselLog([...dieselLog.filter((r) => r.id !== recordId), record]);
         }
         const lubeClosingBalances = {};
@@ -3828,6 +3978,7 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
         let log = advance.log.filter((e) => e.dayClosingCashDiffFor !== date);
         let advanceChanged = priorEntriesForThisDay.length > 0;
         let cashDiffApplied = [];
+        const dcSaveStamp = new Date().toISOString(); // one stamp for the whole submission (see dropSupersededAdvanceEntries)
         if (cashDiffFlagged && cashDiffReconciled) {
             const type = cashDiff < 0 ? 'Advance' : 'Recovery'; // shortage \u2192 they owe it (Advance); excess \u2192 reduces what they owe (Recovery)
             cashDiffEntries.forEach((e) => {
@@ -3835,7 +3986,7 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
                 if (amount <= 0)
                     return;
                 balances[e.employee] = round2((balances[e.employee] || 0) + (type === 'Advance' ? amount : -amount));
-                log = [{ name: e.employee, type, amount, date: new Date().toISOString(),
+                log = [{ name: e.employee, type, amount, date: dcSaveStamp,
                         desc: `Cash ${cashDiff < 0 ? 'shortage' : 'excess'} on ${fmtDate(date)}${e.desc ? ' \u2013 ' + e.desc : ''}`,
                         balanceAfter: balances[e.employee], dayClosingCashDiffFor: date }, ...log];
                 cashDiffApplied.push({ employee: e.employee, amount, type, at: new Date().toISOString() });
@@ -3843,7 +3994,7 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
             advanceChanged = true;
         }
         if (advanceChanged)
-            persistAdvance({ balances, log });
+            persistAdvance({ balances, log, daySaves: Object.assign({}, advance.daySaves || {}, { ['dc|' + date]: dcSaveStamp }) });
         update({ submitted: true, netOverallTotal, newTotal, depositAmount, submittedAt: new Date().toISOString(),
             msLubeClosingBalances: { oil: oilBalance, pktoil: pktBalance },
             msLubeGodownClosing: { oil: oilGodownBalance },
@@ -4292,7 +4443,7 @@ function NetSalaryReport({ config, msLog, dieselLog, advance, persistAdvance, sa
         React.createElement("tbody", null, ...tableRows),
         React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 7 }, React.createElement("b", null, "Grand total net")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(grandNet))))));
     const detailModal = detailFor && React.createElement(SalaryDetailModal, { name: detailFor, msLog, dieselLog, month, salary: (rows.find((r) => r.name === detailFor) || {}).salary, onClose: () => setDetailFor(null) });
-    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: headerActions }), reRunConfirm, table, detailModal);
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: headerActions }), reRunConfirm, React.createElement(AdvanceDriftNotice, { advance, persistAdvance, pushNow, showToast }), table, detailModal);
 }
 function fmtLogDate(d) {
     if (!d)
@@ -4357,23 +4508,11 @@ function SalaryDetailModal({ name, msLog, dieselLog, month, salary, onClose }) {
 // are collapsed down to their final, correct value for reporting purposes. This never touches the
 // actual stored log or balances (which are already correct) \u2014 it only affects what this report displays.
 function dedupeAdvanceLogForReporting(log) {
-  function dedupeByKey(entries, keyFn) {
-    const seen = new Set();
-    const keep = [];
-    entries.forEach((e) => {
-      const key = keyFn(e);
-      if (key === null) { keep.push(e); return; }
-      if (seen.has(key)) return;
-      seen.add(key);
-      keep.push(e);
-    });
-    return keep;
-  }
-  let result = dedupeByKey(log, (e) => e.dayClosingCashDiffFor ? (e.name + '|dc|' + e.dayClosingCashDiffFor) : null);
-  result = dedupeByKey(result, (e) => e.dieselExpenseAdvanceFor ? (e.name + '|dx|' + e.dieselExpenseAdvanceFor) : null);
-  result = result.filter((e) => e.type !== 'Reversal');
-  result = dedupeByKey(result, (e) => (e.monthKey && e.type === 'Recovery') ? (e.name + '|sal|' + e.monthKey) : null);
-  return result;
+  // Same rule the balances use (canonicalAdvanceLog) so the Monthly Summary can never disagree with
+  // the Balances tab or the Net Salary Report. The old version kept just the FIRST entry it met for
+  // each day, which dropped one half of a cancelling Advance/Recovery pair and left a phantom
+  // balance (Devaraj's Rs 55.66), and also kept every duplicate copy of a Diesel-expense advance.
+  return canonicalAdvanceLog(log).entries.filter((e) => e.type !== 'Reversal');
 }
 function computeMonthlyAdvanceSummary(advance, monthKey) {
   const cleanLog = dedupeAdvanceLogForReporting(advance.log || []);
@@ -4405,6 +4544,32 @@ function computeMonthlyAdvanceSummary(advance, monthKey) {
     return { name, opening, advanceGiven, recovery, closing, entries: monthEntries };
   });
   return results.filter((r) => r.opening !== 0 || r.advanceGiven !== 0 || r.recovery !== 0 || r.closing !== 0);
+}
+// Shown on the Advance and Net Salary pages whenever a stored balance doesn't equal what that
+// person's de-duplicated entries add up to. Correcting it only rewrites the balance figure - no
+// log entry is deleted or edited, so the full history stays exactly as it was.
+function AdvanceDriftNotice({ advance, persistAdvance, pushNow, showToast }) {
+    const [open, setOpen] = useState(false);
+    const rows = computeAdvanceDrift(advance);
+    if (rows.length === 0)
+        return null;
+    const applyFix = () => {
+        const balances = Object.assign({}, advance.balances);
+        rows.forEach((r) => { balances[r.name] = r.correct; });
+        persistAdvance({ balances, log: advance.log });
+        showToast('Corrected ' + rows.length + ' advance balance' + (rows.length === 1 ? '' : 's'));
+        if (pushNow)
+            pushNow();
+        setOpen(false);
+    };
+    const summary = React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' } },
+        React.createElement("div", null, React.createElement("b", null, `${rows.length} advance balance${rows.length === 1 ? '' : 's'} ${rows.length === 1 ? "doesn't" : "don't"} match the entries behind ${rows.length === 1 ? 'it' : 'them'}`), React.createElement("div", { className: "empty-hint", style: { padding: 0 } }, rows.map((r) => `${r.name}: shows ${fmt(r.shown)}, entries add up to ${fmt(r.correct)}`).join(' \u00b7 '))),
+        React.createElement("button", { className: "btn btn-secondary btn-sm no-print", onClick: () => setOpen(!open) }, open ? 'Hide details' : 'Review & fix'));
+    const detail = open && React.createElement("div", { style: { marginTop: 10 } },
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 8px' } }, "The same advance was saved more than once (for example a Diesel Daily expense or a Day Closing shortage), and every copy was added to the balance. The copies below are not counted. Nothing is deleted from the log - only the balance figure is corrected."),
+        React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Name", "Shown now", "Should be", "Entries not counted"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.name }, React.createElement("td", null, r.name), React.createElement("td", { className: "mono" }, fmt(r.shown)), React.createElement("td", { className: "mono" }, fmt(r.correct)), React.createElement("td", { style: { fontSize: 12 } }, r.ignored.length === 0 ? '\u2014' : r.ignored.map((x, i) => React.createElement("div", { key: i }, `${fmtLogDate(x.entry.date)} \u2014 ${x.entry.type} ${fmt(x.entry.amount)} (${x.why})`))))))),
+        React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 10 } }, React.createElement("button", { className: "btn btn-primary btn-sm", onClick: applyFix }, "Correct these balances"), React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => setOpen(false) }, "Cancel")));
+    return React.createElement("div", { className: "card no-print", style: { borderLeft: '3px solid var(--accent, #b8741a)', marginBottom: 12 } }, summary, detail);
 }
 function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const [advSub, setAdvSub] = useState('balances');
@@ -4458,7 +4623,7 @@ function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     const logSection = React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "All transactions (unfiltered, most recent first)")), React.createElement("div", null, ...logEntries));
     const modalNode = modal && React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box" }, React.createElement("h3", null, `${modal.type} \u2013 ${modal.name}`), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: modal.amount, onChange: (v) => setModal(Object.assign(Object.assign({}, modal), { amount: v })) })), React.createElement(Field, { label: "Date" }, React.createElement("input", { type: "date", className: "date-input", value: modal.date, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { date: e.target.value })) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: modal.desc, onChange: (e) => setModal(Object.assign(Object.assign({}, modal), { desc: e.target.value })) })), React.createElement("div", { className: "modal-actions" }, React.createElement("button", { className: "btn btn-ghost", onClick: () => setModal(null) }, "Cancel"), React.createElement("button", { className: "btn btn-primary", onClick: save }, "Save"))));
     const subTabSwitch = React.createElement("div", { className: "tab-switch" }, ['balances', 'summary'].map((s) => React.createElement("button", { key: s, className: advSub === s ? 'active' : '', onClick: () => setAdvSub(s) }, s === 'balances' ? 'Balances' : 'Monthly Summary')));
-    return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, balanceSection, logSection), modalNode);
+    return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, React.createElement(AdvanceDriftNotice, { advance, persistAdvance, pushNow, showToast }), balanceSection, logSection), modalNode);
 }
 function computeDieselVolumeForDate(config, dieselData, date) {
     const rec = dieselData[date];
