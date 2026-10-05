@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.04-4';
+const APP_BUILD = '2026.10.05-2';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -571,9 +571,12 @@ function mergeTtData(local, cloud) {
     const cloudTripLog = (cloudTt.tripLog && typeof cloudTt.tripLog === 'object') ? cloudTt.tripLog : {};
     const tripKls = new Set([...Object.keys(localTripLog), ...Object.keys(cloudTripLog)]);
     const mergedTripLog = {};
-    tripKls.forEach((kl) => { mergedTripLog[kl] = mergeArraysById(localTripLog[kl], cloudTripLog[kl]); });
+    // Trips deleted with "Save changes" are remembered by id (deletedTrips) so a copy still held by another
+    // device or an older Drive file is dropped here instead of being brought back by the union.
+    const deletedTrips = Object.assign({}, (cloudTt.deletedTrips && typeof cloudTt.deletedTrips === 'object') ? cloudTt.deletedTrips : {}, (localTt.deletedTrips && typeof localTt.deletedTrips === 'object') ? localTt.deletedTrips : {});
+    tripKls.forEach((kl) => { mergedTripLog[kl] = mergeArraysById(localTripLog[kl], cloudTripLog[kl]).filter((t) => !deletedTrips[t.id]); });
     const mergedHistory = mergeArraysById(localTt.history, cloudTt.history);
-    return { tripLog: mergedTripLog, history: mergedHistory };
+    return { tripLog: mergedTripLog, history: mergedHistory, deletedTrips };
 }
 // Bank Reconciliation's per-bank-and-type state previously merged as a whole object like advance
 // used to, which risked losing a status change (a tally, an ignore, a successful auto-match) if a
@@ -6165,6 +6168,40 @@ function ttMileageKmpl(t) {
   const l = Number(t.diesel) || 0;
   return km > 0 && l > 0 ? round2(km / l) : null;
 }
+function ttDraftFromEntry(t) {
+  return { date: t.date || '', openingKm: String(t.openingKm === undefined || t.openingKm === null ? '' : t.openingKm), closingKm: String(t.closingKm === undefined || t.closingKm === null ? '' : t.closingKm), diesel: t.diesel ? String(t.diesel) : '', waste: t.waste ? String(t.waste) : '', outlet: t.outlet || '', driver: t.driver || '', cleaner: t.cleaner || '', maintenance: t.maintenance || '' };
+}
+function ttDraftChanged(t, d) {
+  return String(t.date || '') !== d.date || Number(t.openingKm) !== Number(d.openingKm) || Number(t.closingKm) !== Number(d.closingKm) || (Number(t.diesel) || 0) !== (Number(d.diesel) || 0) || (Number(t.waste) || 0) !== (Number(d.waste) || 0) || (t.outlet || '') !== d.outlet || (t.driver || '') !== d.driver || (t.cleaner || '') !== d.cleaner || (t.maintenance || '') !== d.maintenance;
+}
+function ttEntryFromDraft(t, d) {
+  const opening = Number(d.openingKm), closing = Number(d.closingKm);
+  const totalKm = round2(closing - opening);
+  const diesel = Number(d.diesel) || 0;
+  return Object.assign({}, t, { date: d.date, openingKm: opening, closingKm: closing, totalKm, diesel, waste: Number(d.waste) || 0, mileage: diesel > 0 && totalKm > 0 ? round2(totalKm / diesel) : 0, outlet: d.outlet, driver: d.driver, cleaner: d.cleaner, maintenance: d.maintenance, savedAt: new Date().toISOString() });
+}
+// Back-to-back trips: when the vehicle doesn't return to the station between trips there is no diesel
+// fill (Diesel = 0) and no fresh odometer reading, so a trip with no diesel is a placeholder and the
+// diesel for ALL of those legs is entered on the next trip that has diesel. Mileage therefore has to be
+// worked out per fill: (km of the diesel-less trips just before it + its own km) / its diesel. Trips are
+// taken in odometer order. Returns { tripId: { kmpl, cumKm, legs } } for trips that have diesel; trips
+// without diesel are left out (shown as a dash).
+function ttMileageChain(list) {
+  const ordered = (list || []).slice().sort((a, b) => (Number(a.openingKm) - Number(b.openingKm)) || String(a.date || '').localeCompare(String(b.date || '')));
+  const out = {};
+  let carryKm = 0; let carryLegs = 0;
+  ordered.forEach((t) => {
+    const km = Number(t.totalKm) || (Number(t.closingKm) - Number(t.openingKm)) || 0;
+    const l = Number(t.diesel) || 0;
+    if (l > 0) {
+      const cumKm = round2(carryKm + km);
+      out[t.id] = { kmpl: cumKm > 0 ? round2(cumKm / l) : null, cumKm, legs: carryLegs + 1 };
+      carryKm = 0; carryLegs = 0;
+    }
+    else { carryKm += km; carryLegs += 1; }
+  });
+  return out;
+}
 function countTripsForPayroll(tripLog, dateFrom, dateTo) {
   const counts = {};
   ['12', '20'].forEach((kl) => {
@@ -6185,6 +6222,8 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
   const [dateTo, setDateTo] = useState('');
   const [salaryDraft, setSalaryDraft] = useState(null);
   const [newTrip, setNewTrip] = useState(emptyTripLogEntry());
+  const [tripDrafts, setTripDrafts] = useState({});   // trip id -> edited copy, not saved yet
+  const [tripDeletes, setTripDeletes] = useState({}); // trip id -> true, marked for deletion, not saved yet
   const ttStaffNames = config.employees.filter((e) => e.ttStaff).map((e) => e.name);
   const tripLog = ttData.tripLog || { '12': [], '20': [] };
 
@@ -6233,14 +6272,60 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
     showToast('Trip logged.');
   };
 
-  const removeTripEntry = (id) => {
-    lastAddedRef.current = ''; // a removed trip may be logged again
-    const nextLog = { ...tripLog, [tripKl]: (tripLog[tripKl] || []).filter((t) => t.id !== id) };
-    persistTtData({ ...ttData, tripLog: nextLog });
+  // ---- Editing / deleting logged trips: changes are only staged until "Save changes" is pressed ----
+  const setTripDraft = (id, patch) => setTripDrafts((x) => ({ ...x, [id]: { ...x[id], ...patch } }));
+  const startTripEdit = (t) => setTripDrafts((x) => x[t.id] ? x : { ...x, [t.id]: ttDraftFromEntry(t) });
+  const cancelTripEdit = (id) => setTripDrafts((x) => { const n = { ...x }; delete n[id]; return n; });
+  const markTripDelete = (id) => setTripDeletes((x) => ({ ...x, [id]: true }));
+  const undoTripDelete = (id) => setTripDeletes((x) => { const n = { ...x }; delete n[id]; return n; });
+  const tripsById = {};
+  ['12', '20'].forEach((kl) => (tripLog[kl] || []).forEach((t) => { tripsById[t.id] = t; }));
+  const changedTripIds = Object.keys(tripDrafts).filter((id) => tripsById[id] && !tripDeletes[id] && ttDraftChanged(tripsById[id], tripDrafts[id]));
+  const deletedTripIds = Object.keys(tripDeletes).filter((id) => tripsById[id]);
+  const pendingTripChanges = changedTripIds.length + deletedTripIds.length;
+  useEffect(() => {
+    if (pendingTripChanges === 0) return undefined;
+    const warn = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [pendingTripChanges]);
+  const discardTripChanges = () => { setTripDrafts({}); setTripDeletes({}); };
+  const saveTripChanges = () => {
+    if (pendingTripChanges === 0) return;
+    for (const id of changedTripIds) {
+      const d = tripDrafts[id]; const t = tripsById[id]; const where = fmtDate(t.date) + ' trip';
+      if (!d.date) { showToast(`${where}: pick a date.`, 'red'); return; }
+      if (d.openingKm === '' || !(Number(d.openingKm) >= 0)) { showToast(`${where}: enter the Opening KM.`, 'red'); return; }
+      if (!(Number(d.closingKm) > Number(d.openingKm))) { showToast(`${where}: Closing KM must be greater than Opening KM.`, 'red'); return; }
+      if (!d.driver) { showToast(`${where}: select a driver.`, 'red'); return; }
+    }
+    const nextLog = { ...tripLog };
+    ['12', '20'].forEach((kl) => {
+      nextLog[kl] = (tripLog[kl] || []).filter((t) => !tripDeletes[t.id]).map((t) => changedTripIds.indexOf(t.id) >= 0 ? ttEntryFromDraft(t, tripDrafts[t.id]) : t);
+    });
+    for (const id of changedTripIds) {
+      const e = nextLog['12'].concat(nextLog['20']).find((t) => t.id === id);
+      const kl = nextLog['12'].some((t) => t.id === id) ? '12' : '20';
+      const clash = nextLog[kl].find((t) => t.id !== id && Number(t.openingKm) === e.openingKm && Number(t.closingKm) === e.closingKm);
+      if (clash) { showToast(`Another trip (${fmtDate(clash.date)}) already has ${fmtNum(e.openingKm)} \u2192 ${fmtNum(e.closingKm)} km \u2014 the same trip can't be logged twice.`, 'red'); return; }
+    }
+    // Deleted trips are remembered by id, so a copy still sitting on another device or in Drive can't bring them back on the next sync.
+    const deletedTrips = { ...(ttData.deletedTrips || {}) };
+    const nowIso = new Date().toISOString();
+    deletedTripIds.forEach((id) => { deletedTrips[id] = nowIso; });
+    persistTtData({ ...ttData, tripLog: nextLog, deletedTrips });
+    lastAddedRef.current = '';
+    setTripDrafts({}); setTripDeletes({});
     if (pushNow) pushNow();
+    showToast(`Saved \u2014 ${changedTripIds.length} edited, ${deletedTripIds.length} deleted.`);
   };
 
   const dupTripIds = ttDuplicateTripIds(tripLog[tripKl] || []);
+  // Mileage is shown for the list as it WILL be once saved (pending edits applied, pending deletions removed).
+  const mileageChain = ttMileageChain((tripLog[tripKl] || []).filter((t) => !tripDeletes[t.id]).map((t) => {
+    const d = tripDrafts[t.id];
+    return d ? Object.assign({}, t, { openingKm: Number(d.openingKm) || 0, closingKm: Number(d.closingKm) || 0, totalKm: Number(d.closingKm) > Number(d.openingKm) ? round2(Number(d.closingKm) - Number(d.openingKm)) : 0, diesel: Number(d.diesel) || 0 }) : t;
+  }));
   const monthRows = (tripLog[tripKl] || []).filter((t) => ttMonthKeyOf(t.date) === tripMonth).sort((a, b) => a.date.localeCompare(b.date));
 
   const generate = () => {
@@ -6288,6 +6373,49 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
     setSub('history');
   };
 
+  const tripOptions = (list, current) => (current && list.indexOf(current) < 0 ? [current, ...list] : list);
+  const renderTripRow = (t) => {
+    const d = tripDrafts[t.id]; const del = !!tripDeletes[t.id]; const dup = dupTripIds.has(t.id);
+    if (d && !del) {
+      const km = Number(d.closingKm) > Number(d.openingKm) ? round2(Number(d.closingKm) - Number(d.openingKm)) : null;
+      const lit = Number(d.diesel) || 0;
+      const sel = (field, list) => React.createElement("select", { className: "select-input", value: d[field], onChange: (e) => setTripDraft(t.id, { [field]: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014"), tripOptions(list, d[field]).map((o) => React.createElement("option", { key: o, value: o }, o)));
+      return React.createElement("tr", { key: t.id, style: { background: 'var(--accent-dim, rgba(80,120,255,.08))' } },
+        React.createElement("td", null, React.createElement("input", { type: "date", className: "text-input", style: { minWidth: 130 }, value: d.date, max: todayStr(), onChange: (e) => setTripDraft(t.id, { date: e.target.value }) }), React.createElement("div", null, React.createElement("button", { className: "btn-link", style: { fontSize: 11 }, onClick: () => cancelTripEdit(t.id) }, "Cancel edit"))),
+        React.createElement("td", null, React.createElement(NumInput, { value: d.openingKm, onChange: (v) => setTripDraft(t.id, { openingKm: v }) })),
+        React.createElement("td", null, React.createElement(NumInput, { value: d.closingKm, onChange: (v) => setTripDraft(t.id, { closingKm: v }) })),
+        React.createElement("td", { className: "mono" }, km === null ? '\u2014' : fmtNum(km)),
+        React.createElement("td", null, React.createElement(NumInput, { value: d.diesel, onChange: (v) => setTripDraft(t.id, { diesel: v }) })),
+        React.createElement("td", null, React.createElement(NumInput, { value: d.waste, onChange: (v) => setTripDraft(t.id, { waste: v }) })),
+        React.createElement("td", { className: "mono" }, mileageChain[t.id] && mileageChain[t.id].kmpl !== null ? fmtNum(mileageChain[t.id].kmpl) : '\u2014'),
+        React.createElement("td", null, sel('outlet', TT_OUTLETS)), React.createElement("td", null, sel('driver', ttStaffNames)), React.createElement("td", null, sel('cleaner', ttStaffNames)),
+        React.createElement("td", null, React.createElement("input", { className: "text-input", value: d.maintenance, onChange: (e) => setTripDraft(t.id, { maintenance: e.target.value }) })),
+        React.createElement("td", null, React.createElement("button", { className: "icon-btn", title: "Mark for deletion", onClick: () => markTripDelete(t.id) }, React.createElement(IconTrash, { size: 14 }))));
+    }
+    const faded = del ? { textDecoration: 'line-through', opacity: 0.55 } : null;
+    return React.createElement("tr", { key: t.id, style: dup && !del ? { background: 'var(--amber-dim)' } : undefined, title: dup ? 'Duplicate: same Opening and Closing KM as an earlier entry. Not counted in trip pay.' : undefined },
+      React.createElement("td", null, del ? React.createElement("span", { style: faded }, fmtDate(t.date)) : React.createElement("button", { className: "btn-link", title: "Click to edit this trip", onClick: () => startTripEdit(t) }, fmtDate(t.date)),
+        del && React.createElement("div", { style: { fontSize: 11, color: 'var(--red, #c0392b)' } }, 'Will be deleted on Save'),
+        dup && !del && React.createElement("div", { style: { fontSize: 11, color: 'var(--amber)' } }, 'Duplicate \u2014 not counted')),
+      React.createElement("td", { className: "mono", style: faded }, fmtNum(t.openingKm)), React.createElement("td", { className: "mono", style: faded }, fmtNum(t.closingKm)),
+      React.createElement("td", { className: "mono", style: faded }, fmtNum(t.totalKm)), React.createElement("td", { className: "mono", style: faded }, fmtNum(t.diesel)), React.createElement("td", { className: "mono", style: faded }, fmtNum(t.waste)),
+      React.createElement("td", { className: "mono", style: faded, title: mileageChain[t.id] && mileageChain[t.id].legs > 1 ? `Cumulative: ${fmtNum(mileageChain[t.id].cumKm)} km over ${mileageChain[t.id].legs} back-to-back trips \u00f7 this trip's diesel` : (mileageChain[t.id] ? undefined : 'No diesel on this trip \u2014 its km count towards the next trip with diesel') }, mileageChain[t.id] && mileageChain[t.id].kmpl !== null ? fmtNum(mileageChain[t.id].kmpl) : '\u2014'), React.createElement("td", { style: faded }, t.outlet), React.createElement("td", { style: faded }, t.driver), React.createElement("td", { style: faded }, t.cleaner),
+      React.createElement("td", { style: Object.assign({ fontSize: 12 }, faded || {}) }, t.maintenance || '\u2014'),
+      React.createElement("td", null, del ? React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => undoTripDelete(t.id) }, "Undo") : React.createElement("button", { className: "icon-btn", title: "Mark for deletion", onClick: () => markTripDelete(t.id) }, React.createElement(IconTrash, { size: 14 }))));
+  };
+  const renderTripLogCard = () => React.createElement("div", { className: "card" },
+    React.createElement("div", { className: "card-head" }, React.createElement("h3", null, tripKl + " KL trip log"), React.createElement(MonthSelect, { value: tripMonth, onChange: setTripMonth })),
+    monthRows.length > 0 && React.createElement("div", { className: "empty-hint" }, "Click a trip's date to edit it, or use the bin to mark it for deletion. Nothing is changed until you press Save changes at the bottom. Back-to-back trips with no diesel show a dash; their km are added to the next trip that has diesel, and that trip's mileage is the cumulative km \u00f7 its diesel."),
+    monthRows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No trips logged for this vehicle in " + monthLabel(tripMonth) + ".") :
+    React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
+      React.createElement("thead", null, React.createElement("tr", null, ["Date", "Opening", "Closing", "Total KM", "Diesel", "Waste", "Mileage (km/L)", "Outlet", "Driver", "Cleaner", "Maintenance", ""].map((h) => React.createElement("th", { key: h }, h)))),
+      React.createElement("tbody", null, monthRows.map(renderTripRow)))),
+    pendingTripChanges > 0 && React.createElement("div", { className: "confirm-bar", style: { position: 'sticky', bottom: 0, zIndex: 5, marginTop: 10 } },
+      React.createElement(IconAlert, { size: 16 }),
+      React.createElement("span", null, `${changedTripIds.length} edited \u00b7 ${deletedTripIds.length} marked for deletion \u2014 not saved yet (this includes trips on the other vehicle / months).`),
+      React.createElement("button", { className: "btn btn-primary btn-sm", onClick: saveTripChanges }, React.createElement(IconSave, { size: 14 }), " Save changes"),
+      React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: discardTripChanges }, "Discard")));
+
   return React.createElement("div", { className: "page" },
     React.createElement(PageHeader, { title: "TT \u2014 Tanker Transport" }),
     React.createElement("div", { className: "tab-switch" }, ['trips', 'salary', 'history'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'trips' ? 'Trips' : s === 'salary' ? 'Salary' : 'History'))),
@@ -6317,19 +6445,7 @@ function TTTab({ config, persistConfig, advance, persistAdvance, ttData, persist
         React.createElement(Field, { label: "Maintenance (optional)" }, React.createElement("input", { className: "text-input", value: newTrip.maintenance, onChange: (e) => updateNewTrip({ maintenance: e.target.value }), placeholder: "e.g. tyre change, oil top-up" })),
         React.createElement("div", { className: "slot-actions", style: { marginTop: 10 } }, React.createElement("button", { className: "btn btn-primary", onClick: addTripEntry }, React.createElement(IconPlus, { size: 14 }), " Log trip"))
       ),
-      React.createElement("div", { className: "card" },
-        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, tripKl + " KL trip log"), React.createElement(MonthSelect, { value: tripMonth, onChange: setTripMonth })),
-        monthRows.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No trips logged for this vehicle in " + monthLabel(tripMonth) + ".") :
-        React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
-          React.createElement("thead", null, React.createElement("tr", null, ["Date", "Opening", "Closing", "Total KM", "Diesel", "Waste", "Mileage (km/L)", "Outlet", "Driver", "Cleaner", "Maintenance", ""].map((h) => React.createElement("th", { key: h }, h)))),
-          React.createElement("tbody", null, monthRows.map((t) => React.createElement("tr", { key: t.id, style: dupTripIds.has(t.id) ? { background: 'var(--amber-dim)' } : undefined, title: dupTripIds.has(t.id) ? 'Duplicate: same Opening and Closing KM as an earlier entry. Not counted in trip pay \u2014 use the bin to remove it.' : undefined },
-            React.createElement("td", null, fmtDate(t.date), dupTripIds.has(t.id) && React.createElement("div", { style: { fontSize: 11, color: 'var(--amber)' } }, 'Duplicate \u2014 not counted')), React.createElement("td", { className: "mono" }, fmtNum(t.openingKm)), React.createElement("td", { className: "mono" }, fmtNum(t.closingKm)),
-            React.createElement("td", { className: "mono" }, fmtNum(t.totalKm)), React.createElement("td", { className: "mono" }, fmtNum(t.diesel)), React.createElement("td", { className: "mono" }, fmtNum(t.waste)),
-            React.createElement("td", { className: "mono" }, ttMileageKmpl(t) === null ? '\u2014' : fmtNum(ttMileageKmpl(t))), React.createElement("td", null, t.outlet), React.createElement("td", null, t.driver), React.createElement("td", null, t.cleaner),
-            React.createElement("td", { style: { fontSize: 12 } }, t.maintenance || '\u2014'),
-            React.createElement("td", null, React.createElement("button", { className: "icon-btn", onClick: () => removeTripEntry(t.id) }, React.createElement(IconTrash, { size: 14 })))))))
-        )
-      )
+      renderTripLogCard(),
     ),
 
     sub === 'salary' && React.createElement("div", { className: "card" },
