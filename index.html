@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.05-2';
+const APP_BUILD = '2026.10.06-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -369,6 +369,59 @@ function mergeArraysById(localArr, cloudArr) {
         if (!existing || (r.savedAt || '') >= (existing.savedAt || '')) map[r.id] = r;
     });
     return Object.values(map);
+}
+// Meter readings are stored one object per day holding EVERY meter's reading. Merging them as whole
+// days (mergeByDateKey) meant that when two devices each had readings for different pumps on the same day,
+// one device's whole day replaced the other's and the missing pumps' readings vanished - so the next
+// morning's "Previous" reading was the day before's. Merge per METER instead: a meter present on either
+// side is kept; only if both sides hold a value for the same meter does the preferred side win, as before.
+function mergeMsReadings(localObj, cloudObj, preferCloudOnTie) {
+    const l = (localObj && typeof localObj === 'object') ? localObj : {};
+    const c = (cloudObj && typeof cloudObj === 'object') ? cloudObj : {};
+    const out = {};
+    new Set([...Object.keys(c), ...Object.keys(l)]).forEach((date) => {
+        const cd = (c[date] && typeof c[date] === 'object') ? c[date] : {};
+        const ld = (l[date] && typeof l[date] === 'object') ? l[date] : {};
+        const isSet = (v) => v !== undefined && v !== null && v !== '';
+        const merged = {};
+        new Set([...Object.keys(cd), ...Object.keys(ld)]).forEach((mid) => {
+            const cv = cd[mid], lv = ld[mid];
+            if (isSet(cv) && isSet(lv)) merged[mid] = preferCloudOnTie ? cv : lv;
+            else if (isSet(cv)) merged[mid] = cv;
+            else if (isSet(lv)) merged[mid] = lv;
+        });
+        out[date] = merged;
+    });
+    return out;
+}
+// Restores meter readings that went missing from the stored readings (see mergeMsReadings) from the MS
+// Daily entry drafts, which keep every checkpoint typed per pump and day. Only FILLS meters that have no
+// reading for that date - an existing reading is never replaced - and never writes to storage by itself.
+let healMsCache = { readings: null, drafts: null, config: null, out: null };
+function healMsReadings(config, readings, drafts) {
+    if (healMsCache.out && healMsCache.readings === readings && healMsCache.drafts === drafts && healMsCache.config === config) return healMsCache.out;
+    const base = (readings && typeof readings === 'object') ? readings : {};
+    let out = base; let copied = {};
+    const slots = (config && config.slots) || [];
+    Object.keys(drafts || {}).forEach((key) => {
+        const parts = key.split('::');
+        if (parts.length !== 2) return;
+        const date = parts[0]; const slot = slots.find((x) => x.id === parts[1]); const rec = drafts[key];
+        if (!slot || !rec || !rec.checkpoints) return;
+        (slot.meterIds || []).forEach((mid) => {
+            const arr = rec.checkpoints[mid];
+            if (!Array.isArray(arr)) return;
+            const last = arr.slice().reverse().find((v) => v !== undefined && v !== null && v !== '');
+            if (last === undefined) return;
+            const cur = out[date] && out[date][mid];
+            if (cur !== undefined && cur !== null && cur !== '') return;
+            if (out === base) out = Object.assign({}, base);
+            if (!copied[date]) { out[date] = Object.assign({}, out[date] || {}); copied[date] = true; }
+            out[date][mid] = last;
+        });
+    });
+    healMsCache = { readings, drafts, config, out };
+    return out;
 }
 // Merge two date-keyed objects (e.g. dieselData, dayClosing) by taking the union of every date.
 // A date present on only one side is always kept in full \u2014 this is what prevents a whole day's
@@ -880,7 +933,7 @@ function mergeLocalWithCloud(local, cloud, cloudIsNewer, cloudConfigWins) {
     return {
         version: 2, savedAt: new Date().toISOString(),
         config: Object.assign({}, defaultConfig, chosenConfig, { bankSettings: mergeBankSettings(chosenConfig.bankSettings) }),
-        msReadings: mergeByDateKey(s.msReadings, c.msReadings, cloudIsNewer),
+        msReadings: mergeMsReadings(s.msReadings, c.msReadings, cloudIsNewer),
         msDrafts: mergeByDateKey(s.msDrafts, c.msDrafts, cloudIsNewer),
         msLog: mergeArraysById(s.msLog, c.msLog),
         dieselData: mergeByDateKey(s.dieselData, c.dieselData, cloudIsNewer),
@@ -2266,7 +2319,8 @@ function App() {
     if (!unlocked) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement(PasswordGate, { onUnlock: unlock })));
     }
-    const shared = { config, persistConfig, msReadings, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
+    const msReadingsHealed = healMsReadings(config, msReadings, msDrafts);
+    const shared = { config, persistConfig, msReadings: msReadingsHealed, persistMsReadings, msDrafts, persistMsDrafts, msLog, persistMsLog,
         dieselData, persistDieselData, dieselLog, persistDieselLog, dayClosing, persistDayClosing,
         advance, persistAdvance, salaryRuns, persistSalaryRuns, bankRecon, persistBankRecon, bankStatements, persistBankStatements, dsrData, persistDsrData, ttData, persistTtData, workingDate, setWorkingDate, pushNow, showToast };
     const bannerStyle = (bg, fg) => ({ background: bg, color: fg, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' });
@@ -2799,6 +2853,12 @@ function MsDaily({ config, msReadings, persistMsReadings, msDrafts, persistMsDra
         const lastDefined = [...arr].reverse().find((v) => v !== undefined && v !== '');
         if (lastDefined !== undefined)
             persistMsReadings(Object.assign(Object.assign({}, msReadings), { [entryDate]: Object.assign(Object.assign({}, dayReadings), { [meterId]: lastDefined }) }));
+        else if (dayReadings[meterId] !== undefined) {
+            // Field emptied: drop the stored reading as well. Before, a half-typed value (e.g. "2") stayed behind
+            // and became the next day's "Previous" reading.
+            const rest = Object.assign({}, dayReadings); delete rest[meterId];
+            persistMsReadings(Object.assign(Object.assign({}, msReadings), { [entryDate]: rest }));
+        }
     };
     const shiftCount = rec.shiftCount || 1;
     const meterCalc = useMemo(() => pump ? computeMeterCheckpoints(config, msReadings, entryDate, pump, shiftCount, rec.checkpoints) : {}, [pump, msReadings, entryDate, shiftCount, rec.checkpoints]);    const saveShift = (i, force, auto) => {
