@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.06-1';
+const APP_BUILD = '2026.10.11-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -4703,6 +4703,11 @@ function AdvancePage({ config, advance, persistAdvance, pushNow, showToast }) {
     return React.createElement(React.Fragment, null, subTabSwitch, advSub === 'summary' ? summarySection : React.createElement(React.Fragment, null, React.createElement(AdvanceDriftNotice, { advance, persistAdvance, pushNow, showToast }), balanceSection, logSection), modalNode);
 }
 function computeDieselVolumeForDate(config, dieselData, date) {
+    const parts = computeDieselVolumeParts(config, dieselData, date);
+    return parts ? round2(parts.gross - parts.testing) : null;
+}
+// Diesel litres for a day before testing is taken off, plus the testing actually recorded that day.
+function computeDieselVolumeParts(config, dieselData, date) {
     const rec = dieselData[date];
     if (!rec)
         return null;
@@ -4727,22 +4732,27 @@ function computeDieselVolumeForDate(config, dieselData, date) {
     if (!anyReading)
         return null;
     const testing = rec.dieselTesting !== undefined ? (Number(rec.dieselTesting) || 0) : ((config.dieselPoints.length || 0) * 5);
-    return round2(total - testing);
+    return { gross: round2(total), testing };
+}
+// Testing the AUDIT sales report deducts per day, whatever was entered in MS Daily / Diesel Daily.
+const AUDIT_DAILY_TESTING = { ms: 110, power: 20, diesel: 50 };
+// Re-states a day's recorded net amount for a different net litre figure (same average rate).
+function auditAmount(recordedAmount, recordedNetLtr, auditNetLtr) {
+    return recordedNetLtr > 0 ? recordedAmount * auditNetLtr / recordedNetLtr : recordedAmount;
 }
 function computeSalesDataForMonth(config, msLog, dieselLog, dieselData, monthKey) {
     const dates = [...new Set([...msLog.map((r) => r.date), ...dieselLog.map((r) => r.date)])].filter((d) => monthKeyOf(d) === monthKey).sort();
     return dates.map((date) => {
         const msRecs = msLog.filter((r) => r.date === date);
         const dieselRec = dieselLog.find((r) => r.date === date);
-        let msLtr = 0, ms = 0, pwrLtr = 0, pwr = 0, oilQty = 0, pktQty = 0, msOil = 0;
+        // Per product: gross litres (meter difference), and what the app recorded (net of the testing entered, and its amount).
+        const acc = { p_ms: { gross: 0, recNet: 0, amt: 0 }, p_power: { gross: 0, recNet: 0, amt: 0 } };
+        let oilQty = 0, pktQty = 0, msOil = 0;
         msRecs.forEach((r) => (r.lineItems || []).forEach((li) => {
-            if (li.productId === 'p_ms') {
-                msLtr += (li.diff || 0) - (li.testing || 0);
-                ms += li.amount || 0;
-            }
-            else if (li.productId === 'p_power') {
-                pwrLtr += (li.diff || 0) - (li.testing || 0);
-                pwr += li.amount || 0;
+            if (acc[li.productId]) {
+                acc[li.productId].gross += li.diff || 0;
+                acc[li.productId].recNet += (li.diff || 0) - (li.testing || 0);
+                acc[li.productId].amt += li.amount || 0;
             }
             else if (li.productId === 'oil') {
                 oilQty += li.diff || 0;
@@ -4753,11 +4763,27 @@ function computeSalesDataForMonth(config, msLog, dieselLog, dieselData, monthKey
                 msOil += li.amount || 0;
             }
         }));
-        const hsd = dieselRec ? dieselRec.dieselAmt : 0;
+        const audit = (a, daily) => {
+            if (!(a.gross > 0)) return { test: 0, ltr: 0, amt: round2(a.amt) };
+            const net = Math.max(a.gross - daily, 0);
+            return { test: daily, ltr: net, amt: net > 0 ? auditAmount(a.amt, a.recNet, net) : 0 };
+        };
+        const msA = audit(acc.p_ms, AUDIT_DAILY_TESTING.ms);
+        const pwA = audit(acc.p_power, AUDIT_DAILY_TESTING.power);
+        // Diesel: gross litres from the point readings (or the saved record), minus the audit's daily testing.
+        const parts = computeDieselVolumeParts(config, dieselData, date);
+        const dGross = parts ? parts.gross : (dieselRec && Number(dieselRec.totalDieselVolume) > 0 ? Number(dieselRec.totalDieselVolume) : null);
+        const dRecTesting = parts ? parts.testing : (dieselRec ? Number(dieselRec.dieselTesting) || 0 : 0);
+        const dieselAmtRecorded = dieselRec ? dieselRec.dieselAmt : 0;
+        let hsdLtr = null, hsdTest = null, hsd = dieselAmtRecorded;
+        if (dGross !== null && dGross > 0) {
+            const net = Math.max(dGross - AUDIT_DAILY_TESTING.diesel, 0);
+            hsdTest = AUDIT_DAILY_TESTING.diesel; hsdLtr = round2(net);
+            hsd = net > 0 ? auditAmount(dieselAmtRecorded, dGross - dRecTesting, net) : 0;
+        }
         const hsdOil = dieselRec ? dieselRec.lubeAmt : 0;
-        const hsdLtr = computeDieselVolumeForDate(config, dieselData, date);
-        const total = ms + pwr + hsd + msOil + hsdOil;
-        return { date, oilQty: round2(oilQty), pktQty: round2(pktQty), msOil: round2(msOil), msLtr: round2(msLtr), ms: round2(ms), pwrLtr: round2(pwrLtr), pwr: round2(pwr), hsdOil: round2(hsdOil), hsdLtr, hsd: round2(hsd), total: round2(total) };
+        const total = msA.amt + pwA.amt + hsd + msOil + hsdOil;
+        return { date, oilQty: round2(oilQty), pktQty: round2(pktQty), msOil: round2(msOil), msLtr: round2(msA.ltr), msTest: msA.test, ms: round2(msA.amt), pwrLtr: round2(pwA.ltr), pwrTest: pwA.test, pwr: round2(pwA.amt), hsdOil: round2(hsdOil), hsdLtr, hsdTest, hsd: round2(hsd), total: round2(total) };
     });
 }
 function packetOilSoldOnDate(msLog, dateStr) {
@@ -4936,14 +4962,16 @@ function AuditTab({ config, msLog, dieselLog, dieselData, dayClosing }) {
     const downloadSalesPdf = () => {
         const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
         addPdfHeader(doc, 297, 'Sales Report');
-        const head = [["Date", "2T oil", "60 ml", "MS Oil (Rs.)", "MS LTR", "MS (Rs.)", "PWR LTR", "PWR (Rs.)", "HSD Oil (Rs.)", "HSD LTR", "HSD (Rs.)", "Total (Rs.)"]];
-        const body = salesRows.map((r) => [fmtDate(r.date), fmtNum(r.oilQty), fmtNum(r.pktQty), fmtPdf(r.msOil), fmtNum(r.msLtr), fmtPdf(r.ms), fmtNum(r.pwrLtr), fmtPdf(r.pwr), fmtPdf(r.hsdOil), r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014', fmtPdf(r.hsd), fmtPdf(r.total)]);
+        doc.setFontSize(7);
+        doc.text(`Testing taken per day: MS ${AUDIT_DAILY_TESTING.ms} L, Power ${AUDIT_DAILY_TESTING.power} L, Diesel ${AUDIT_DAILY_TESTING.diesel} L. LTR and Rs. columns are net of this testing.`, 6, 22.5);
+        const head = [["Date", "2T oil", "60 ml", "MS Oil (Rs.)", "MS LTR", "MS Testing", "MS (Rs.)", "PWR LTR", "PWR Testing", "PWR (Rs.)", "HSD Oil (Rs.)", "HSD LTR", "HSD Testing", "HSD (Rs.)", "Total (Rs.)"]];
+        const body = salesRows.map((r) => [fmtDate(r.date), fmtNum(r.oilQty), fmtNum(r.pktQty), fmtPdf(r.msOil), fmtNum(r.msLtr), r.msTest ? fmtNum(r.msTest) : '\u2014', fmtPdf(r.ms), fmtNum(r.pwrLtr), r.pwrTest ? fmtNum(r.pwrTest) : '\u2014', fmtPdf(r.pwr), fmtPdf(r.hsdOil), r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014', r.hsdTest ? fmtNum(r.hsdTest) : '\u2014', fmtPdf(r.hsd), fmtPdf(r.total)]);
         const totalRow = ["Total",
             fmtNum(salesRows.reduce((s, r) => s + r.oilQty, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pktQty, 0)),
-            fmtPdf(salesRows.reduce((s, r) => s + r.msOil, 0)), fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)),
-            fmtPdf(salesRows.reduce((s, r) => s + r.ms, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)),
+            fmtPdf(salesRows.reduce((s, r) => s + r.msOil, 0)), fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)), fmtNum(salesRows.reduce((s, r) => s + (r.msTest || 0), 0)),
+            fmtPdf(salesRows.reduce((s, r) => s + r.ms, 0)), fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)), fmtNum(salesRows.reduce((s, r) => s + (r.pwrTest || 0), 0)),
             fmtPdf(salesRows.reduce((s, r) => s + r.pwr, 0)), fmtPdf(salesRows.reduce((s, r) => s + r.hsdOil, 0)),
-            fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)), fmtPdf(salesRows.reduce((s, r) => s + r.hsd, 0)),
+            fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)), fmtNum(salesRows.reduce((s, r) => s + (r.hsdTest || 0), 0)), fmtPdf(salesRows.reduce((s, r) => s + r.hsd, 0)),
             fmtPdf(salesRows.reduce((s, r) => s + r.total, 0))];
         doc.autoTable({ head, body: [...body, totalRow], startY: 24, styles: { fontSize: 6.5, cellPadding: 1.2 }, headStyles: { fillColor: [40, 40, 40] }, footStyles: { fillColor: [230, 230, 230] }, margin: { left: 6, right: 6 } });
         doc.save(`Sales_Report_${month}.pdf`);
@@ -4965,24 +4993,28 @@ function AuditTab({ config, msLog, dieselLog, dieselData, dayClosing }) {
 
     const salesSection = sub === 'sales' && React.createElement("div", { className: "card" },
         React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Sales Data \u2014 " + monthLabel(month)), React.createElement("button", { className: "btn btn-primary", onClick: downloadSalesPdf }, "Download sales report (PDF)")),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Audit basis: testing is taken as MS ${AUDIT_DAILY_TESTING.ms} L, Power ${AUDIT_DAILY_TESTING.power} L and Diesel ${AUDIT_DAILY_TESTING.diesel} L per day (not the testing entered in MS Daily / Diesel Daily). LTR is the meter litres minus that testing, and the \u20b9 columns are worked out on the same net litres at the day's rate.`),
         React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" },
-            React.createElement("thead", null, React.createElement("tr", null, ["Date", "2T oil", "60 ml", "MS Oil", "MS LTR", "MS", "PWR LTR", "PWR", "HSD Oil", "HSD LTR", "HSD", "Total"].map((h) => React.createElement("th", { key: h }, h)))),
+            React.createElement("thead", null, React.createElement("tr", null, ["Date", "2T oil", "60 ml", "MS Oil", "MS LTR", "MS Testing", "MS", "PWR LTR", "PWR Testing", "PWR", "HSD Oil", "HSD LTR", "HSD Testing", "HSD", "Total"].map((h) => React.createElement("th", { key: h }, h)))),
             React.createElement("tbody", null, salesRows.map((r) => React.createElement("tr", { key: r.date },
                 React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.oilQty)), React.createElement("td", { className: "mono" }, fmtNum(r.pktQty)),
-                React.createElement("td", { className: "mono" }, fmt(r.msOil)), React.createElement("td", { className: "mono" }, fmtNum(r.msLtr)), React.createElement("td", { className: "mono" }, fmt(r.ms)),
-                React.createElement("td", { className: "mono" }, fmtNum(r.pwrLtr)), React.createElement("td", { className: "mono" }, fmt(r.pwr)), React.createElement("td", { className: "mono" }, fmt(r.hsdOil)),
-                React.createElement("td", { className: "mono" }, r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.hsd)), React.createElement("td", { className: "mono" }, fmt(r.total))))),
+                React.createElement("td", { className: "mono" }, fmt(r.msOil)), React.createElement("td", { className: "mono" }, fmtNum(r.msLtr)), React.createElement("td", { className: "mono" }, r.msTest ? fmtNum(r.msTest) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.ms)),
+                React.createElement("td", { className: "mono" }, fmtNum(r.pwrLtr)), React.createElement("td", { className: "mono" }, r.pwrTest ? fmtNum(r.pwrTest) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.pwr)), React.createElement("td", { className: "mono" }, fmt(r.hsdOil)),
+                React.createElement("td", { className: "mono" }, r.hsdLtr !== null ? fmtNum(r.hsdLtr) : '\u2014'), React.createElement("td", { className: "mono" }, r.hsdTest ? fmtNum(r.hsdTest) : '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.hsd)), React.createElement("td", { className: "mono" }, fmt(r.total))))),
             React.createElement("tfoot", null, React.createElement("tr", null,
                 React.createElement("td", null, React.createElement("b", null, "Total")),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.oilQty, 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pktQty, 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.msOil, 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.msLtr, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + (r.msTest || 0), 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.ms, 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + r.pwrLtr, 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + (r.pwrTest || 0), 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.pwr, 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsdOil, 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + (r.hsdLtr || 0), 0)))),
+                React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(salesRows.reduce((s, r) => s + (r.hsdTest || 0), 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.hsd, 0)))),
                 React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(salesRows.reduce((s, r) => s + r.total, 0)))))))),
         salesRows.some((r) => r.hsdLtr === null) && React.createElement("div", { className: "empty-hint", style: { marginTop: 8 } }, "HSD LTR shows \u2014 for any date with no diesel point readings saved at all."));
