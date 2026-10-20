@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.11-1';
+const APP_BUILD = '2026.10.20-2';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -3946,6 +3946,441 @@ function getCarriedForwardAmount(dayClosing, dateStr) {
         return Number(prevDc.depositAmount !== undefined ? prevDc.depositAmount : prevDc.newTotal) || 0;
     return 0;
 }
+// ===================== WhatsApp day-end share (3 dark-theme images) =====================
+// Pure canvas renderers: no React state, so they can be tested in isolation. Numbers come from the
+// model assembled in DayClosing (same variables the screen shows), nothing is recomputed differently.
+function waRs(n) {
+    let v = Number(n) || 0;
+    const neg = v < 0;
+    v = Math.abs(v);
+    const whole = Math.abs(v - Math.round(v)) < 0.005;
+    const d = whole ? 0 : 2;
+    const s = v.toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
+    return (neg ? '-' : '') + '₹' + s;
+}
+function waPainter(ctx, M) {
+    const W = 1080, PX = 48, CW = W - 2 * PX;
+    const C = { bg: '#10131a', card: '#171c26', cardLine: '#232a38', text: '#edeff3', muted: '#8a93a6', amber: '#e8a33d', green: '#4ade80', red: '#f87171', blue: '#60a5fa', zebra: '#141925', line: '#1f2634', rule: '#2a3140', tot: '#1d2433', faint: '#5c6578' };
+    const FONT = 'Arial, "Liberation Sans", "DejaVu Sans", sans-serif';
+    const P = { y: 0, C, W, PX, CW };
+    const font = (sz, b) => { ctx.font = (b ? 'bold ' : '') + sz + 'px ' + FONT; };
+    const spacing = (px) => { if ('letterSpacing' in ctx)
+        ctx.letterSpacing = px + 'px'; };
+    const fit = (str, maxW) => { str = String(str); if (ctx.measureText(str).width <= maxW)
+        return str; while (str.length > 1 && ctx.measureText(str + '…').width > maxW)
+        str = str.slice(0, -1); return str + '…'; };
+    const txt = (str, x, yy, color, align) => { ctx.fillStyle = color; ctx.textAlign = align || 'left'; ctx.fillText(str, x, yy); ctx.textAlign = 'left'; };
+    const rect = (x, yy, w, h, col) => { ctx.fillStyle = col; ctx.fillRect(x, yy, w, h); };
+    const rrect = (x, yy, w, h, r, fill, stroke) => {
+        ctx.beginPath();
+        ctx.moveTo(x + r, yy);
+        ctx.arcTo(x + w, yy, x + w, yy + h, r);
+        ctx.arcTo(x + w, yy + h, x, yy + h, r);
+        ctx.arcTo(x, yy + h, x, yy, r);
+        ctx.arcTo(x, yy, x + w, yy, r);
+        ctx.closePath();
+        if (fill) {
+            ctx.fillStyle = fill;
+            ctx.fill();
+        }
+        if (stroke) {
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    };
+    P.header = (title) => {
+        spacing(0.5);
+        font(34, true);
+        txt(fit(String(M.station || 'Fuel Station').toUpperCase(), CW), PX, 72, C.amber);
+        spacing(0);
+        font(22, false);
+        const a = title + ' — ';
+        txt(a, PX, 108, C.muted);
+        const aw = ctx.measureText(a).width;
+        font(22, true);
+        txt(fit(M.dateLine, CW - aw), PX + aw, 108, C.text);
+        rect(PX, 128, CW, 2, C.rule);
+        P.y = 130;
+    };
+    P.section = (label) => {
+        font(19, false);
+        spacing(2);
+        txt(label.toUpperCase(), PX, P.y + 26 + 17, C.muted);
+        spacing(0);
+        P.y += 26 + 17 + 14;
+    };
+    P.cards = (items, cols) => {
+        const gap = 14;
+        const w = (CW - gap * (cols - 1)) / cols;
+        const hasNote = items.some((it) => it.n);
+        const h = hasNote ? 18 + 15 + 10 + 34 + 8 + 14 + 18 : 18 + 15 + 10 + 34 + 22;
+        for (let i = 0; i < items.length; i += cols) {
+            const rowItems = items.slice(i, i + cols);
+            rowItems.forEach((it, j) => {
+                const x = PX + j * (w + gap), cy = P.y;
+                rrect(x + 0.5, cy + 0.5, w - 1, h - 1, 14, C.card, C.cardLine);
+                font(19, false);
+                txt(fit(it.l, w - 44), x + 22, cy + 18 + 15, C.muted);
+                let sz = 40;
+                const unit = it.u ? ' ' + it.u : '';
+                const meas = () => { font(sz, true); const vw = ctx.measureText(it.v).width; font(Math.round(sz * 0.55), false); return vw + (unit ? ctx.measureText(unit).width : 0); };
+                while (sz > 22 && meas() > w - 44)
+                    sz -= 2;
+                font(sz, true);
+                const vw = ctx.measureText(it.v).width;
+                txt(it.v, x + 22, cy + 18 + 15 + 10 + 34, it.c || C.text);
+                if (unit) {
+                    font(Math.round(sz * 0.55), false);
+                    txt(unit, x + 22 + vw, cy + 18 + 15 + 10 + 34, C.muted);
+                }
+                if (it.n) {
+                    let nz = 17;
+                    font(nz, false);
+                    while (nz > 13 && ctx.measureText(it.n).width > w - 44) {
+                        nz -= 1;
+                        font(nz, false);
+                    }
+                    txt(fit(it.n, w - 44), x + 22, cy + 18 + 15 + 10 + 34 + 8 + 14, C.muted);
+                }
+            });
+            P.y += h + (i + cols < items.length ? gap : 0);
+        }
+    };
+    P.rows = (list) => {
+        list.forEach((r, i) => {
+            const h = r.tot ? 58 : 50;
+            if (r.tot) {
+                rect(PX, P.y, CW, h, C.tot);
+                rect(PX, P.y, CW, 2, C.rule);
+            }
+            else {
+                if (i % 2 === 0)
+                    rect(PX, P.y, CW, h, C.zebra);
+                rect(PX, P.y + h - 1, CW, 1, C.line);
+            }
+            const base = P.y + h / 2 + (r.tot ? 9 : 8);
+            font(r.tot ? 26 : 23, !!r.tot);
+            const vw = ctx.measureText(r.v).width;
+            txt(r.v, PX + CW - 18, base, r.c || (r.tot ? C.amber : C.text), 'right');
+            font(r.tot ? 26 : 23, !!r.tot);
+            txt(fit(r.l, CW - 36 - vw - 24), PX + 18, base, r.lc || C.text);
+            P.y += h;
+        });
+    };
+    // cols: [{h, w (fraction), a: 'l'|'r'}], rows: arrays of string | {t, c, b, tag}, foot: array of string | {t, span, c}
+    P.table = (cols, rows, foot) => {
+        const xs = [];
+        let acc = PX;
+        cols.forEach((c) => { xs.push(acc); acc += c.w * CW; });
+        const colW = (i) => cols[i].w * CW;
+        const put = (cell, i, base, defFont, defBold, defColor, spanW) => {
+            const o = typeof cell === 'object' && cell !== null ? cell : { t: cell };
+            const t = o.t === undefined || o.t === null ? '' : String(o.t);
+            const wdt = spanW || colW(i);
+            const right = cols[i].a !== 'l';
+            const x = right ? xs[i] + wdt - 10 : xs[i] + 10;
+            if (o.tag) {
+                font(17, true);
+                const tw = ctx.measureText(t).width + 24;
+                rrect(x, base - 22, tw, 30, 8, '#232a38');
+                txt(t, x + 12, base - 1, '#c9d1e0');
+                return;
+            }
+            const bold = o.b !== undefined ? o.b : defBold;
+            let sz = defFont;
+            font(sz, bold);
+            while (sz > 15 && ctx.measureText(t).width > wdt - 20) { // shrink to fit before resorting to an ellipsis
+                sz -= 1;
+                font(sz, bold);
+            }
+            txt(fit(t, wdt - 20), x, base, o.c || defColor, right ? 'right' : 'left');
+        };
+        // header
+        font(17, true);
+        spacing(1);
+        cols.forEach((c, i) => {
+            const right = c.a !== 'l';
+            txt(c.h.toUpperCase(), right ? xs[i] + colW(i) - 10 : xs[i] + 10, P.y + 30, C.muted, right ? 'right' : 'left');
+        });
+        spacing(0);
+        rect(PX, P.y + 44, CW, 2, C.rule);
+        P.y += 46;
+        rows.forEach((r, ri) => {
+            if (ri % 2 === 1)
+                rect(PX, P.y, CW, 52, C.zebra);
+            rect(PX, P.y + 51, CW, 1, C.line);
+            r.forEach((cell, i) => put(cell, i, P.y + 34, 21, false, C.text));
+            P.y += 52;
+        });
+        if (foot) {
+            rect(PX, P.y, CW, 58, C.card);
+            rect(PX, P.y, CW, 2, C.rule);
+            let i = 0;
+            foot.forEach((cell) => {
+                const span = cell && cell.span ? cell.span : 1;
+                let wsum = 0;
+                for (let k = 0; k < span; k++)
+                    wsum += colW(i + k);
+                put(cell, i, P.y + 37, 21, true, C.text, wsum);
+                i += span;
+            });
+            P.y += 58;
+        }
+    };
+    P.note = (text, color) => {
+        font(21, false);
+        txt(fit(text, CW - 36), PX + 18, P.y + 36, color || C.muted);
+        P.y += 56;
+    };
+    P.pill = (text, kind) => {
+        P.y += 24;
+        font(20, true);
+        const w = Math.min(CW, ctx.measureText(text).width + 36);
+        const bg = kind === 'green' ? '#0f3321' : kind === 'red' ? '#3b1414' : '#3a2a0c';
+        const fg = kind === 'green' ? C.green : kind === 'red' ? C.red : C.amber;
+        rrect(PX, P.y, w, 42, 21, bg);
+        txt(fit(text, w - 36), PX + 18, P.y + 28, fg);
+        P.y += 42;
+    };
+    P.footer = () => {
+        P.y += 28;
+        font(16, false);
+        txt('Generated by Fuel Station app', PX, P.y + 12, C.faint);
+        txt(M.submittedLine, PX + CW, P.y + 12, C.faint, 'right');
+        P.y += 16;
+    };
+    return P;
+}
+function waBuildImage1(P, M) {
+    const C = P.C;
+    const pr = (k) => M.products[k] || { volume: 0, testing: 0, total: 0 };
+    const ms = pr('p_ms'), pw = pr('p_power');
+    const msNet = round2(ms.volume - ms.testing), pwNet = round2(pw.volume - pw.testing);
+    const hsdGross = M.dieselRec ? (Number(M.dieselRec.totalDieselVolume) || 0) : 0;
+    const hsdTest = M.dieselRec ? (Number(M.dieselRec.dieselTesting) || 0) : 0;
+    const hsdNet = round2(hsdGross - hsdTest);
+    const hsdAmt = M.dieselRec ? (Number(M.dieselRec.dieselAmt) || 0) : 0;
+    const lubeDiesel = M.dieselRec ? (Number(M.dieselRec.lubeAmt) || 0) : 0;
+    const msPowerAmt = ms.total + pw.total;
+    const lubesAll = lubeDiesel + pr('oil').total + pr('pktoil').total;
+    const totalSales = msPowerAmt + hsdAmt + lubesAll;
+    P.header('Day-End Summary & Expenses');
+    P.section('Sales in litres (net of testing)');
+    P.cards([
+        { l: 'MS (Petrol)', v: fmtNum(msNet), u: 'L', n: 'meter ' + fmtNum(ms.volume) + ' − test ' + fmtNum(ms.testing) },
+        { l: 'Power', v: fmtNum(pwNet), u: 'L', n: 'meter ' + fmtNum(pw.volume) + ' − test ' + fmtNum(pw.testing) },
+        { l: 'Total MS + Power', v: fmtNum(round2(msNet + pwNet)), u: 'L', c: C.amber },
+        { l: 'HSD (Diesel)', v: fmtNum(hsdNet), u: 'L', n: 'meter ' + fmtNum(hsdGross) + ' − test ' + fmtNum(hsdTest) },
+    ], 4);
+    P.section('Sales value');
+    P.rows([
+        { l: 'MS + Power', v: waRs(msPowerAmt) },
+        { l: 'HSD', v: waRs(hsdAmt) },
+        { l: 'Lubes & oils (diesel side + MS 2T / packet oil)', v: waRs(lubesAll) },
+        { l: 'Total sales', v: waRs(totalSales), tot: true },
+    ]);
+    P.section('Credit and receipts');
+    P.cards([
+        { l: 'Credit sales', v: waRs(M.creditSales), c: C.red },
+        { l: 'Receipts (credit recovery)', v: waRs(M.creditRecovery), c: C.green },
+    ], 2);
+    P.section('Digital payments');
+    const dig = [];
+    if (M.phonepeCombined > 0)
+        dig.push({ l: 'PhonePe total', v: waRs(M.phonepeCombined), c: C.blue, n: 'MS ' + waRs(M.phonepeMs) + ' + Diesel ' + waRs(M.phonepeDiesel) });
+    dig.push({ l: 'Paytm total', v: waRs(M.paytmCombined), c: C.blue, n: 'MS ' + waRs(M.paytmMs) + ' + Diesel ' + waRs(M.paytmDiesel) });
+    dig.push({ l: 'HP Pay / DTPlus total', v: waRs(M.hpPay), c: C.blue });
+    P.cards(dig, dig.length);
+    waExpensesBlock(P, M);
+    P.footer();
+    return P.y;
+}
+const WA_EXP_LABEL = { misc: 'Misc', tt: 'TT', advance: 'Advance', lube: 'Lube' };
+function waExpensesBlock(P, M) {
+    const C = P.C;
+    P.section('Expenses');
+    const list = (M.expenses || []).filter((e) => (Number(e.amount) || 0) !== 0 || e.desc || e.employeeName || e.lubeId);
+    if (list.length === 0) {
+        P.rows([{ l: 'No expenses recorded for this day', v: waRs(0), tot: true }]);
+        return;
+    }
+    const rows = [];
+    const byType = {};
+    let total = 0;
+    list.forEach((e, i) => {
+        const t = e.type || 'misc';
+        const amt = Number(e.amount) || 0;
+        total += amt;
+        if (!byType[t])
+            byType[t] = { n: 0, amt: 0 };
+        byType[t].n += 1;
+        byType[t].amt += amt;
+        let desc = e.desc || '';
+        if (t === 'lube') {
+            const lb = (M.lubes || []).find((l) => l.id === e.lubeId);
+            const nm = lb ? lb.name : '';
+            desc = nm && desc ? nm + ' – ' + desc : (nm || desc);
+        }
+        if (!desc && t === 'advance')
+            desc = 'Advance';
+        rows.push([String(i + 1), { tag: true, t: WA_EXP_LABEL[t] || t }, desc || '—', e.employeeName || '—', { t: waRs(amt), b: true }]);
+    });
+    P.table([{ h: '#', w: 0.07, a: 'l' }, { h: 'Type', w: 0.16, a: 'l' }, { h: 'Description', w: 0.37, a: 'l' }, { h: 'Employee', w: 0.22, a: 'l' }, { h: 'Amount', w: 0.18, a: 'r' }], rows, [{ t: 'Total expenses (' + list.length + (list.length === 1 ? ' entry)' : ' entries)'), span: 4 }, { t: waRs(total), c: C.amber }]);
+    P.y += 14;
+    const chips = Object.keys(byType).map((t) => ({ l: (WA_EXP_LABEL[t] || t) + ' · ' + byType[t].n + (byType[t].n === 1 ? ' entry' : ' entries'), v: waRs(byType[t].amt) }));
+    P.cards(chips, 3);
+}
+function waBuildImage3(P, M) {
+    const C = P.C;
+    P.header('Employee Sales & Cash Closing');
+    P.section('Employee-wise sales (litres net of testing · oil in units)');
+    const showPhonepe = M.empSums.phonepe > 0;
+    const dash = (v, f) => (Number(v) ? f(v) : '—');
+    const cols = showPhonepe
+        ? [{ h: 'Employee', w: 0.19, a: 'l' }, { h: 'MS', w: 0.09 }, { h: 'Power', w: 0.09 }, { h: '2T Oil', w: 0.08 }, { h: 'Pkt oil', w: 0.09 }, { h: 'PhonePe', w: 0.15 }, { h: 'Paytm', w: 0.14 }, { h: 'Total', w: 0.17 }]
+        : [{ h: 'Employee', w: 0.25, a: 'l' }, { h: 'MS', w: 0.11 }, { h: 'Power', w: 0.11 }, { h: '2T Oil', w: 0.1 }, { h: 'Pkt oil', w: 0.1 }, { h: 'Paytm', w: 0.15 }, { h: 'Total', w: 0.18 }];
+    const mkRow = (name, e, foot) => {
+        const r = [name, dash(e.ms, fmtNum), dash(e.power, fmtNum), dash(e.oil, fmtNum), dash(e.pktoil, fmtNum)];
+        if (showPhonepe)
+            r.push(dash(e.phonepe, waRs));
+        r.push(dash(e.paytm, waRs));
+        r.push(foot ? { t: waRs(e.total), c: C.amber } : { t: waRs(e.total), b: true });
+        return r;
+    };
+    const body = M.empRows.map(([name, e]) => mkRow(name, e, false));
+    const footRow = mkRow('Grand total', M.empSums, true);
+    P.table(cols, body, footRow);
+    P.section('Day-end cash');
+    const rows = [];
+    if (M.carriedIn > 0)
+        rows.push({ l: 'Carried forward from previous day (held)', v: '+ ' + waRs(M.carriedIn), c: C.green });
+    rows.push({ l: 'Net overall total (after credit, digital payments, expenses)', v: waRs(M.netOverallTotal) });
+    if (M.otherDed.on && M.otherDed.amt > 0)
+        rows.push({ l: 'Other deductions' + (M.otherDed.desc ? ' – ' + M.otherDed.desc : ''), v: '– ' + waRs(M.otherDed.amt), c: C.red });
+    else
+        rows.push({ l: 'Other deductions', v: 'none', c: C.muted });
+    if (M.physicalCash !== null) {
+        if (M.cashDiffFlagged) {
+            const short = M.cashDiff < 0;
+            rows.push({ l: 'Cash ' + (short ? 'shortage' : 'excess') + ' (physical vs expected)', v: (short ? '– ' : '+ ') + waRs(Math.abs(M.cashDiff)), c: short ? C.red : C.green });
+            M.cashDiffEntries.forEach((e) => {
+                rows.push({ l: '    ' + (short ? 'Charged to ' : 'Credited to ') + (e.employee || '—') + (e.desc ? ' (' + e.desc + ')' : ''), v: waRs(e.amount), c: C.muted, lc: C.muted });
+            });
+        }
+        else {
+            rows.push({ l: 'Cash difference / corrections', v: 'Physical cash matches (' + (M.cashDiff >= 0 ? '+' : '–') + waRs(Math.abs(M.cashDiff)) + ')', c: C.green });
+        }
+    }
+    rows.push({ l: M.physicalCash !== null ? 'Physical cash counted' : 'Closing cash (no physical count entered)', v: waRs(M.depositAmount), tot: true });
+    P.rows(rows);
+    const denomRows = [];
+    let denomSum = 0;
+    DENOM_ROWS.forEach(([key, lbl]) => {
+        const cnt = Number(M.denom && M.denom[key]) || 0;
+        if (cnt > 0) {
+            const val = cnt * DENOM_VALUE_MAP[key];
+            denomSum += val;
+            denomRows.push([lbl, fmtNum(cnt), { t: waRs(val), b: true }]);
+        }
+    });
+    if (denomRows.length) {
+        P.section('Denomination');
+        P.table([{ h: 'Note', w: 0.4, a: 'l' }, { h: 'Count', w: 0.25 }, { h: 'Value', w: 0.35 }], denomRows, ['Total', '', { t: waRs(denomSum), c: C.amber }]);
+    }
+    if (M.depositBank === 'CARRY_FORWARD')
+        P.pill('HELD — carried forward to next day, not deposited', 'amber');
+    else if (M.depositBank)
+        P.pill('DEPOSITED — ' + M.depositBank, 'green');
+    P.footer();
+    return P.y;
+}
+const WA_IMAGES = [
+    { key: 'summary', title: 'Day-End Summary & Expenses', build: waBuildImage1 },
+    { key: 'cash', title: 'Employee Sales & Cash Closing', build: waBuildImage3 },
+];
+function waRenderCanvas(build, M) {
+    const probe = document.createElement('canvas');
+    probe.width = 1080;
+    probe.height = 10;
+    const p1 = waPainter(probe.getContext('2d'), M);
+    build(p1, M);
+    const h = Math.ceil(p1.y) + 36;
+    const c = document.createElement('canvas');
+    c.width = 1080;
+    c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#10131a';
+    ctx.fillRect(0, 0, 1080, h);
+    const p2 = waPainter(ctx, M);
+    build(p2, M);
+    return c;
+}
+function renderDayEndImages(M) {
+    return Promise.all(WA_IMAGES.map((im, i) => new Promise((resolve, reject) => {
+        try {
+            const c = waRenderCanvas(im.build, M);
+            c.toBlob((blob) => {
+                if (!blob) {
+                    reject(new Error('Could not render image ' + (i + 1)));
+                    return;
+                }
+                resolve({ key: im.key, title: im.title, blob, fileName: `dayend-${i + 1}-${im.key}-${M.date}.png` });
+            }, 'image/png');
+        }
+        catch (e) {
+            reject(e);
+        }
+    })));
+}
+function WhatsAppShareModal({ model, onClose, showToast }) {
+    const [imgs, setImgs] = useState(null);
+    const [err, setErr] = useState('');
+    const [done, setDone] = useState({});
+    useEffect(() => {
+        let dead = false;
+        let urls = [];
+        renderDayEndImages(model).then((list) => {
+            if (dead)
+                return;
+            const full = list.map((it) => { const url = URL.createObjectURL(it.blob); urls.push(url); return Object.assign({}, it, { url, file: new File([it.blob], it.fileName, { type: 'image/png' }) }); });
+            setImgs(full);
+        }).catch((e) => { if (!dead)
+            setErr(String((e && e.message) || e)); });
+        return () => { dead = true; urls.forEach((u) => URL.revokeObjectURL(u)); };
+    }, []);
+    const caption = `${model.station} — Day-end ${model.dateLine}`;
+    const canShareFiles = !!(imgs && navigator.canShare && navigator.canShare({ files: imgs.map((i) => i.file) }));
+    const shareAll = async () => {
+        try {
+            await navigator.share({ files: imgs.map((i) => i.file), title: 'Day-end update', text: caption });
+        }
+        catch (e) {
+            if (e && e.name !== 'AbortError')
+                showToast('Could not open the share sheet — use Copy image or Download instead.', 'red');
+        }
+    };
+    const download = (im) => {
+        const a = document.createElement('a');
+        a.href = im.url;
+        a.download = im.fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    };
+    const downloadAll = () => { imgs.forEach((im, i) => setTimeout(() => download(im), i * 350)); };
+    const copyOne = (im, i) => {
+        if (!navigator.clipboard || !window.ClipboardItem || !navigator.clipboard.write) {
+            showToast('Copying images isn’t supported in this browser — use Download instead.', 'red');
+            return;
+        }
+        navigator.clipboard.write([new ClipboardItem({ 'image/png': im.blob })]).then(() => {
+            setDone((d) => Object.assign({}, d, { [i]: true }));
+            showToast(`Image ${i + 1} copied — paste it into the WhatsApp group (Ctrl+V).`);
+        }, () => showToast('Could not copy the image — use Download instead.', 'red'));
+    };
+    return React.createElement("div", { className: "modal-overlay" }, React.createElement("div", { className: "modal-box", style: { maxWidth: 620, width: '100%', display: 'block' } }, React.createElement("h3", null, "Send day-end update to WhatsApp"), React.createElement("div", { className: "empty-hint", style: { marginBottom: 10 } }, "On a phone: tap “Share all” and pick WhatsApp, then your group. On a computer: open WhatsApp Web, then for each image tap “Copy image” and paste it (Ctrl+V) into the group chat, and press send. WhatsApp can’t open a group directly from a link, so this last step is a manual paste."), err && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)' } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "Could not build the images: " + err)), !imgs && !err && React.createElement("div", { className: "empty-hint" }, "Preparing images…"), imgs && React.createElement("div", { className: "slot-actions", style: { marginBottom: 12 } }, canShareFiles && React.createElement("button", { className: "btn btn-primary", onClick: shareAll }, "Share all (phone)"), React.createElement("a", { className: "btn btn-secondary", href: "https://web.whatsapp.com/", target: "_blank", rel: "noopener noreferrer", style: { textDecoration: 'none' } }, "Open WhatsApp Web"), React.createElement("button", { className: "btn btn-secondary", onClick: downloadAll }, React.createElement(IconDownload, { size: 15 }), " Download all")), imgs && imgs.map((im, i) => React.createElement("div", { key: im.key, style: { marginBottom: 16 } }, React.createElement("div", { style: { fontWeight: 600, marginBottom: 6 } }, `${i + 1} · ${im.title}`), React.createElement("img", { src: im.url, alt: im.title, style: { width: '100%', borderRadius: 10, border: '1px solid var(--border)', display: 'block' } }), React.createElement("div", { className: "slot-actions", style: { marginTop: 8 } }, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => copyOne(im, i) }, done[i] ? '✓ Copied' : 'Copy image'), React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => download(im) }, React.createElement(IconDownload, { size: 14 }), " Download")))), React.createElement("div", { className: "modal-actions", style: { bottom: -22, paddingBottom: 22 } }, React.createElement("button", { className: "btn btn-secondary", onClick: onClose }, "Close"))));
+}
 function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistDayClosing, advance, persistAdvance, workingDate, setWorkingDate, pushNow, showToast }) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0;
     const date = workingDate, setDate = setWorkingDate;
@@ -3956,6 +4391,7 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
     const [empModal, setEmpModal] = useState(null); // { name, records, mode: 'phonepe'|'paytm'|'denom' }
     const [suggestFor, setSuggestFor] = useState(null);
     const [totalDenomModalOpen, setTotalDenomModalOpen] = useState(false);
+    const [waModel, setWaModel] = useState(null); // model snapshot for the WhatsApp share window (null = closed)
     const creditSales = dieselRec ? (dieselRec.creditSales || 0) : 0;
     const creditRecovery = dieselRec ? (dieselRec.creditRecovery || 0) : 0;
     const dieselHpPay = dieselRec ? (dieselRec.hpPay || 0) : 0;
@@ -4010,6 +4446,21 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
     const updateCashDiffEntry = (idx, patch) => update({ cashDiffEntries: cashDiffEntries.map((e, i) => i === idx ? Object.assign(Object.assign({}, e), patch) : e) });
     const addCashDiffEntry = () => update({ cashDiffEntries: [...cashDiffEntries, { employee: '', amount: '', desc: '' }] });
     const removeCashDiffEntry = (idx) => update({ cashDiffEntries: cashDiffEntries.filter((_, i) => i !== idx) });
+    const buildWaModel = (submittedAtIso) => {
+        const when = submittedAtIso || dc.submittedAt || '';
+        return { station: config.stationName || 'Fuel Station', date,
+            dateLine: fmtDate(date) + ' (' + new Date(date + 'T00:00:00').toLocaleDateString('en-IN', { weekday: 'long' }) + ')',
+            submittedLine: when ? 'Submitted ' + new Date(when).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not yet submitted',
+            products: ms.products, dieselRec: dieselRec || null, lubes: config.lubes,
+            creditSales, creditRecovery, hpPay: dieselHpPay,
+            phonepeCombined, phonepeMs: ms.phonepeTotal, phonepeDiesel: dieselPhonepe,
+            paytmCombined, paytmMs: ms.paytmTotal, paytmDiesel: dieselPaytm,
+            expenses: dieselRec ? (dieselRec.expenses || []) : [],
+            empRows: empRows, empSums: empSums,
+            carriedIn, netOverallTotal, otherDed: { on: !!dc.otherDedOn, desc: dc.otherDedDesc || '', amt: otherAmt },
+            physicalCash, cashDiff, cashDiffFlagged, cashDiffEntries: cashDiffFlagged ? cashDiffEntries : [],
+            depositAmount, denom: dc.physicalCashDenom || null, depositBank: dc.depositBank };
+    };
     const submit = () => {
         if (isDateLocked(date, config)) {
             showToast('This date is locked \u2014 turn on "Allow pre-dated changes" in Settings to edit dates older than yesterday.', 'red');
@@ -4065,95 +4516,8 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
         showToast('Day closing submitted for ' + fmtDate(date));
         if (pushNow)
             pushNow();
-    };
-    const shareReport = async () => {
-        const lines = [
-            ['Gross total (MS + Diesel + Lubes)', fmt(gross)],
-            ['Plus: credit recovery', '+ ' + fmt(creditRecovery)],
-            ['Less: credit sales', '\u2013 ' + fmt(creditSales)],
-            ['Less: PhonePe total', '\u2013 ' + fmt(phonepeCombined)],
-            ['Less: Paytm total', '\u2013 ' + fmt(paytmCombined)],
-            ['Less: expenses', '\u2013 ' + fmt(expensesTotal)],
-            ['Less: HP Pay / DTPlus', '\u2013 ' + fmt(dieselHpPay)],
-            ['Net overall total', fmt(netOverallTotal)],
-            ['Combined denomination', fmt(combinedDenom) + (matches ? ' (matches)' : ' (off by ' + fmt(off) + ')')],
-        ];
-        if (dc.otherDedOn)
-            lines.push(['Other deduction (' + (dc.otherDedDesc || '\u2013') + ')', '\u2013 ' + fmt(otherAmt)]);
-        lines.push(['New total', fmt(newTotal)]);
-        lines.push(['Deposit bank', dc.depositBank === 'CARRY_FORWARD' ? 'Carried forward to next day' : (dc.depositBank || '\u2013')]);
-        if (physicalCash !== null) {
-            lines.push(['Physical cash counted', fmt(physicalCash)]);
-            if (cashDiffFlagged)
-                cashDiffEntries.forEach((e) => lines.push([`  ${cashDiff < 0 ? 'Shortage' : 'Excess'} \u2013 ${e.employee}${e.desc ? ' (' + e.desc + ')' : ''}`, fmt(e.amount)]));
-        }
-        const width = 760;
-        const lineHeight = 34;
-        const headerHeight = 110;
-        const footerHeight = 30;
-        const height = headerHeight + lines.length * lineHeight + footerHeight + 20;
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#10131a';
-        ctx.fillRect(0, 0, width, height);
-        ctx.fillStyle = '#e8a33d';
-        ctx.font = 'bold 26px Arial';
-        ctx.fillText(config.stationName || 'Fuel Station', 30, 42);
-        ctx.fillStyle = '#8a93a6';
-        ctx.font = '16px Arial';
-        ctx.fillText('Day Closing Report \u2014 ' + fmtDate(date), 30, 68);
-        ctx.strokeStyle = '#2a3140';
-        ctx.beginPath();
-        ctx.moveTo(30, 84);
-        ctx.lineTo(width - 30, 84);
-        ctx.stroke();
-        let y = headerHeight;
-        lines.forEach(([label, value], i) => {
-            if (i % 2 === 0) {
-                ctx.fillStyle = '#171c26';
-                ctx.fillRect(20, y - 22, width - 40, lineHeight);
-            }
-            ctx.fillStyle = '#edeff3';
-            ctx.font = '16px Arial';
-            ctx.fillText(label, 30, y);
-            ctx.font = 'bold 16px Arial';
-            ctx.textAlign = 'right';
-            ctx.fillText(value, width - 30, y);
-            ctx.textAlign = 'left';
-            y += lineHeight;
-        });
-        ctx.fillStyle = '#4ade80';
-        ctx.font = 'bold 15px Arial';
-        ctx.textAlign = 'right';
-        ctx.fillText(dc.submitted ? 'Submitted' : '', width - 30, y + 10);
-        ctx.textAlign = 'left';
-        canvas.toBlob(async (blob) => {
-            if (!blob) {
-                showToast('Could not generate the report image.', 'red');
-                return;
-            }
-            const file = new File([blob], `day-closing-${date}.png`, { type: 'image/png' });
-            if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                try {
-                    await navigator.share({ files: [file], title: 'Day Closing Report', text: `${config.stationName || 'Fuel Station'} \u2014 ${fmtDate(date)}` });
-                    return;
-                }
-                catch (e) { /* user cancelled the share sheet \u2014 not an error */
-                    return;
-                }
-            }
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `day-closing-${date}.png`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            showToast('Image downloaded \u2014 attach it to your WhatsApp group manually (sharing isn\u2019t supported in this browser).');
-        }, 'image/png');
+        if (!dc.submitted)
+            setWaModel(buildWaModel(new Date().toISOString())); // first submission: offer the WhatsApp update straight away
     };
     const empRows = Object.entries(ms.employees);
     const empSums = empRows.reduce((acc, [, e]) => { acc.ms += e.ms; acc.power += e.power; acc.oil += e.oil; acc.pktoil += e.pktoil; acc.phonepe += e.phonepe; acc.paytm += e.paytm; acc.total += e.total; return acc; }, { ms: 0, power: 0, oil: 0, pktoil: 0, phonepe: 0, paytm: 0, total: 0 });
@@ -4181,7 +4545,7 @@ function DayClosing({ config, msReadings, msLog, dieselLog, dayClosing, persistD
         return React.createElement(React.Fragment, { key: r.key + '_frag' }, mainRow, priceSubRow);
 
     })), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", { colSpan: 7 }, React.createElement("b", null, "Grand total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(msLedgerAmountSum)))))), React.createElement("div", { className: "gauge-row" }, React.createElement(Gauge, { label: "MS PhonePe", value: ms.phonepeTotal, size: "sm" }), React.createElement(Gauge, { label: "MS Paytm", value: ms.paytmTotal, size: "sm" }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "2T Oil \u2014 Godown (100L container)")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Filled by \"Barrel used\" transfers from Diesel Daily. Drawn down automatically by the Receipt you enter for 2T Oil in the MS summary above."), React.createElement("div", { className: "gauge-row" }, React.createElement(Gauge, { label: "Godown opening", value: oilGodownOpening, size: "sm" }), React.createElement(Gauge, { label: "Barrel transfers today", value: oilBarrelTransfersToday, size: "sm" }), React.createElement(Gauge, { label: "Godown balance", value: oilGodownBalance, tone: "green", size: "sm" })), React.createElement("div", { style: { marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' } }, React.createElement("div", { style: { fontWeight: 500, marginBottom: 6 } }, "Correct drift (optional)"), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 8px' } }, "If a physical check shows the running Godown figure is off (barrel estimates add up over time), true it up here \u2014 applies from today forward, doesn't touch past days. This only takes effect once you click Submit below \u2014 typing a value here alone does not carry it into tomorrow's opening."), ((_u = (_t = dc.msLubeGodownAdjustment) === null || _t === void 0 ? void 0 : _t.oil) === null || _u === void 0 ? void 0 : _u.amount) && !dc.submitted && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--amber-dim)', color: 'var(--amber)', marginBottom: 8 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "You've entered a correction but haven't submitted this day yet \u2014 it won't carry forward until you do.")), React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Adjustment (+/\u2212 litres)" }, React.createElement(NumInput, { value: (_x = (_w = (_v = dc.msLubeGodownAdjustment) === null || _v === void 0 ? void 0 : _v.oil) === null || _w === void 0 ? void 0 : _w.amount) !== null && _x !== void 0 ? _x : '', onChange: (v) => { var _a; return update({ msLubeGodownAdjustment: Object.assign(Object.assign({}, dc.msLubeGodownAdjustment), { oil: Object.assign(Object.assign({}, (((_a = dc.msLubeGodownAdjustment) === null || _a === void 0 ? void 0 : _a.oil) || {})), { amount: v }) }) }); } })), React.createElement(Field, { label: "Note" }, React.createElement("input", { className: "text-input", value: ((_z = (_y = dc.msLubeGodownAdjustment) === null || _y === void 0 ? void 0 : _y.oil) === null || _z === void 0 ? void 0 : _z.note) || '', onChange: (e) => { var _a; return update({ msLubeGodownAdjustment: Object.assign(Object.assign({}, dc.msLubeGodownAdjustment), { oil: Object.assign(Object.assign({}, (((_a = dc.msLubeGodownAdjustment) === null || _a === void 0 ? void 0 : _a.oil) || {})), { note: e.target.value }) }) }); }, placeholder: "e.g. physical check" }))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Employee-wise totals")), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Employee", "MS", "Power", "Oil", "Packet oil", "PhonePe", "Paytm", "Total", "Denomination"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, empRows.map(([name, e]) => React.createElement("tr", { key: name }, React.createElement("td", null, name), React.createElement("td", { className: "mono" }, fmtNum(e.ms)), React.createElement("td", { className: "mono" }, fmtNum(e.power)), React.createElement("td", { className: "mono" }, fmtNum(e.oil)), React.createElement("td", { className: "mono" }, fmtNum(e.pktoil)), React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link", onClick: () => setEmpModal({ name, mode: 'phonepe' }) }, fmt(e.phonepe))), React.createElement("td", { className: "mono" }, React.createElement("button", { className: "btn-link", onClick: () => setEmpModal({ name, mode: 'paytm' }) }, fmt(e.paytm))), React.createElement("td", { className: "mono" }, fmt(e.total)), React.createElement("td", null, React.createElement("button", { className: "btn btn-secondary btn-xs", onClick: () => setEmpModal({ name, mode: 'denom' }) }, "View"))))), React.createElement("tfoot", null, React.createElement("tr", null, React.createElement("td", null, React.createElement("b", null, "Grand total")), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(empSums.ms))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(empSums.power))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(empSums.oil))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmtNum(empSums.pktoil))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(empSums.phonepe))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(empSums.paytm))), React.createElement("td", { className: "mono" }, React.createElement("b", null, fmt(empSums.total))), React.createElement("td", null)))), React.createElement("button", { className: "btn btn-secondary", onClick: () => setTotalDenomModalOpen(true) }, `MS denomination grand total: ${fmt(ms.denomVal)}`)), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Diesel and lube summary")), !dieselRec ? React.createElement("div", { className: "empty-hint" }, "No Diesel Daily entry saved for this date yet.") :
-        React.createElement(React.Fragment, null, React.createElement("div", { className: "gauge-row" }, React.createElement(Gauge, { label: "Diesel total", value: dieselTotal, size: "sm" }), React.createElement(Gauge, { label: "Lube total", value: lubeTotal, size: "sm" }), React.createElement(Gauge, { label: "Diesel PhonePe", value: dieselPhonepe, size: "sm" }), React.createElement(Gauge, { label: "Diesel Paytm", value: dieselPaytm, size: "sm" })), React.createElement("div", { className: "empty-hint" }, `Credit sales: ${fmt(creditSales)} \u00b7 Credit recovery: ${fmt(creditRecovery)} \u00b7 Expenses: ${fmt(expensesTotal)} \u00b7 HP Pay/DTPlus: ${fmt(dieselHpPay)} \u00b7 Diesel denomination: ${fmt(dieselDenomVal)} (all set in Diesel Daily)`), React.createElement("div", { className: "denom-total-row", style: { background: dieselMatches === null ? 'transparent' : dieselMatches ? 'var(--green-bg)' : 'var(--red-bg)' } }, React.createElement("span", null, "Diesel cash total" + (dieselMatches === null ? '' : dieselMatches ? ' \u2013 matches denomination' : ` \u2013 off by ${fmt(dieselOff)}`)), React.createElement("span", null, fmt(dieselCashTotal))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Overall total (final)")), carriedIn > 0 && React.createElement("div", { className: "denom-total-row", style: { background: 'var(--surface-1)' } }, React.createElement("span", null, "Carried forward from previous day (held, not deposited)"), React.createElement("span", null, '+ ' + fmt(carriedIn))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Gross total (MS + Diesel + Lubes)"), React.createElement("span", null, fmt(gross))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Plus: credit recovery"), React.createElement("span", null, '+ ' + fmt(creditRecovery))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: credit sales"), React.createElement("span", null, '\u2013 ' + fmt(creditSales))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: PhonePe total"), React.createElement("span", null, '\u2013 ' + fmt(phonepeCombined))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: Paytm total"), React.createElement("span", null, '\u2013 ' + fmt(paytmCombined))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: expenses"), React.createElement("span", null, '\u2013 ' + fmt(expensesTotal))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: HP Pay / DTPlus"), React.createElement("span", null, '\u2013 ' + fmt(dieselHpPay))), React.createElement("div", { className: "denom-total-row", style: { fontWeight: 600 } }, React.createElement("span", null, "Net overall total"), React.createElement("span", null, fmt(netOverallTotal))), React.createElement("div", { className: "denom-total-row", style: { background: matches ? 'var(--green-bg)' : 'var(--red-bg)' } }, React.createElement("span", null, "Combined denomination (MS + Diesel)" + (matches ? ' \u2013 matches net overall total' : ` \u2013 off by ${fmt(off)}`)), React.createElement("span", null, fmt(combinedDenom))), React.createElement("label", { className: "toggle", style: { marginTop: 10 } }, React.createElement("input", { type: "checkbox", checked: dc.otherDedOn, onChange: (e) => update({ otherDedOn: e.target.checked }) }), " Other deductions"), dc.otherDedOn && React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: dc.otherDedDesc, onChange: (e) => update({ otherDedDesc: e.target.value }) })), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: dc.otherDedAmt, onChange: (v) => update({ otherDedAmt: v }) }))), React.createElement("div", { className: "gauge-row", style: { alignItems: 'flex-end' } }, React.createElement(Gauge, { label: "New total", value: newTotal, tone: "green" }), React.createElement(Field, { label: "Physical cash counted" }, React.createElement(NumInput, { value: (_0 = dc.physicalCash) !== null && _0 !== void 0 ? _0 : '', onChange: (v) => update({ physicalCash: v }) }), React.createElement(DenomBlock, { denom: dc.physicalCashDenom, finalCash: newTotal, onSave: (d) => update({ physicalCashDenom: d, physicalCash: denomTotal(d) }) })), React.createElement(Field, { label: "Deposit bank" }, React.createElement("select", { className: "select-input", value: dc.depositBank, onChange: (e) => update({ depositBank: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), ["SBI", "BOB", "TMB"].map((b) => React.createElement("option", { key: b, value: b }, b)), React.createElement("option", { value: "CARRY_FORWARD" }, "Carry forward (holiday \u2014 hold for next day)")))), physicalCash !== null && Math.abs(depositAmount - newTotal) > 0.5 && React.createElement("div", { className: "denom-total-row", style: { background: 'var(--surface-1)' } }, React.createElement("span", null, "Amount actually deposited / carried forward (physical cash, not the theoretical total \u2014 the difference is already accounted for above)"), React.createElement("span", null, fmt(depositAmount))), cashDiffFlagged && React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' } }, React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)' } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, `Physical cash is ${cashDiff < 0 ? 'short' : 'over'} by ${fmt(Math.abs(cashDiff))} \u2014 account for it below (split across more than one person if needed).`)), cashDiffEntries.map((e, idx) => React.createElement("div", { key: idx, className: "form-grid", style: { marginTop: 8, alignItems: 'flex-end' } }, React.createElement(NameAutocomplete, { label: "Employee", value: e.employee, onChange: (v) => updateCashDiffEntry(idx, { employee: v }), employees: config.employees, fieldKey: `dc_cashdiff_emp_${idx}`, suggestFor, setSuggestFor }), React.createElement(Field, { label: cashDiff < 0 ? "Amount (added to advance)" : "Amount (recovered from advance)" }, React.createElement(NumInput, { value: e.amount, onChange: (v) => updateCashDiffEntry(idx, { amount: v }) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: e.desc || '', onChange: (ev) => updateCashDiffEntry(idx, { desc: ev.target.value }) })), cashDiffEntries.length > 1 && React.createElement("button", { className: "icon-btn", onClick: () => removeCashDiffEntry(idx) }, React.createElement(IconTrash, { size: 14 })))), React.createElement("div", { className: "slot-actions", style: { marginTop: 4 } }, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addCashDiffEntry }, React.createElement(IconPlus, { size: 14 }), " Add another entry")), React.createElement("div", { className: "denom-total-row", style: { marginTop: 8, background: cashDiffReconciled ? 'var(--green-bg)' : 'var(--red-bg)' } }, React.createElement("span", null, `Entered: ${fmt(enteredTotal)} of ${fmt(requiredTotal)} required`), React.createElement("span", null, cashDiffReconciled ? '\u2713 Accounted for (within \u20b915)' : `Off by ${fmt(Math.abs(enteredTotal - requiredTotal))}`))), dc.depositBank === 'CARRY_FORWARD' && React.createElement("div", { className: "empty-hint" }, "This amount won't be marked as deposited \u2014 it will automatically be added to tomorrow's total instead."), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: submit }, dc.submitted ? 'Submitted \u2013 update' : 'Submit'), dc.submitted && React.createElement("button", { className: "btn btn-secondary", onClick: shareReport }, React.createElement(IconDownload, { size: 15 }), " Share Report")))), empModal && React.createElement(EmployeeBreakdownModal, { empModal, records: ms.employeeRecords[empModal.name] || [], onClose: () => setEmpModal(null) }), totalDenomModalOpen && React.createElement(TotalDenomModal, { counts: ms.denomCounts, total: ms.denomVal, onClose: () => setTotalDenomModalOpen(false) }));
+        React.createElement(React.Fragment, null, React.createElement("div", { className: "gauge-row" }, React.createElement(Gauge, { label: "Diesel total", value: dieselTotal, size: "sm" }), React.createElement(Gauge, { label: "Lube total", value: lubeTotal, size: "sm" }), React.createElement(Gauge, { label: "Diesel PhonePe", value: dieselPhonepe, size: "sm" }), React.createElement(Gauge, { label: "Diesel Paytm", value: dieselPaytm, size: "sm" })), React.createElement("div", { className: "empty-hint" }, `Credit sales: ${fmt(creditSales)} \u00b7 Credit recovery: ${fmt(creditRecovery)} \u00b7 Expenses: ${fmt(expensesTotal)} \u00b7 HP Pay/DTPlus: ${fmt(dieselHpPay)} \u00b7 Diesel denomination: ${fmt(dieselDenomVal)} (all set in Diesel Daily)`), React.createElement("div", { className: "denom-total-row", style: { background: dieselMatches === null ? 'transparent' : dieselMatches ? 'var(--green-bg)' : 'var(--red-bg)' } }, React.createElement("span", null, "Diesel cash total" + (dieselMatches === null ? '' : dieselMatches ? ' \u2013 matches denomination' : ` \u2013 off by ${fmt(dieselOff)}`)), React.createElement("span", null, fmt(dieselCashTotal))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Overall total (final)")), carriedIn > 0 && React.createElement("div", { className: "denom-total-row", style: { background: 'var(--surface-1)' } }, React.createElement("span", null, "Carried forward from previous day (held, not deposited)"), React.createElement("span", null, '+ ' + fmt(carriedIn))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Gross total (MS + Diesel + Lubes)"), React.createElement("span", null, fmt(gross))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Plus: credit recovery"), React.createElement("span", null, '+ ' + fmt(creditRecovery))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: credit sales"), React.createElement("span", null, '\u2013 ' + fmt(creditSales))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: PhonePe total"), React.createElement("span", null, '\u2013 ' + fmt(phonepeCombined))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: Paytm total"), React.createElement("span", null, '\u2013 ' + fmt(paytmCombined))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: expenses"), React.createElement("span", null, '\u2013 ' + fmt(expensesTotal))), React.createElement("div", { className: "denom-total-row" }, React.createElement("span", null, "Less: HP Pay / DTPlus"), React.createElement("span", null, '\u2013 ' + fmt(dieselHpPay))), React.createElement("div", { className: "denom-total-row", style: { fontWeight: 600 } }, React.createElement("span", null, "Net overall total"), React.createElement("span", null, fmt(netOverallTotal))), React.createElement("div", { className: "denom-total-row", style: { background: matches ? 'var(--green-bg)' : 'var(--red-bg)' } }, React.createElement("span", null, "Combined denomination (MS + Diesel)" + (matches ? ' \u2013 matches net overall total' : ` \u2013 off by ${fmt(off)}`)), React.createElement("span", null, fmt(combinedDenom))), React.createElement("label", { className: "toggle", style: { marginTop: 10 } }, React.createElement("input", { type: "checkbox", checked: dc.otherDedOn, onChange: (e) => update({ otherDedOn: e.target.checked }) }), " Other deductions"), dc.otherDedOn && React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: dc.otherDedDesc, onChange: (e) => update({ otherDedDesc: e.target.value }) })), React.createElement(Field, { label: "Amount" }, React.createElement(NumInput, { value: dc.otherDedAmt, onChange: (v) => update({ otherDedAmt: v }) }))), React.createElement("div", { className: "gauge-row", style: { alignItems: 'flex-end' } }, React.createElement(Gauge, { label: "New total", value: newTotal, tone: "green" }), React.createElement(Field, { label: "Physical cash counted" }, React.createElement(NumInput, { value: (_0 = dc.physicalCash) !== null && _0 !== void 0 ? _0 : '', onChange: (v) => update({ physicalCash: v }) }), React.createElement(DenomBlock, { denom: dc.physicalCashDenom, finalCash: newTotal, onSave: (d) => update({ physicalCashDenom: d, physicalCash: denomTotal(d) }) })), React.createElement(Field, { label: "Deposit bank" }, React.createElement("select", { className: "select-input", value: dc.depositBank, onChange: (e) => update({ depositBank: e.target.value }) }, React.createElement("option", { value: "" }, "\u2014 select \u2014"), ["SBI", "BOB", "TMB"].map((b) => React.createElement("option", { key: b, value: b }, b)), React.createElement("option", { value: "CARRY_FORWARD" }, "Carry forward (holiday \u2014 hold for next day)")))), physicalCash !== null && Math.abs(depositAmount - newTotal) > 0.5 && React.createElement("div", { className: "denom-total-row", style: { background: 'var(--surface-1)' } }, React.createElement("span", null, "Amount actually deposited / carried forward (physical cash, not the theoretical total \u2014 the difference is already accounted for above)"), React.createElement("span", null, fmt(depositAmount))), cashDiffFlagged && React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' } }, React.createElement("div", { className: "confirm-bar", style: { background: 'var(--red-bg)', color: 'var(--red)' } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, `Physical cash is ${cashDiff < 0 ? 'short' : 'over'} by ${fmt(Math.abs(cashDiff))} \u2014 account for it below (split across more than one person if needed).`)), cashDiffEntries.map((e, idx) => React.createElement("div", { key: idx, className: "form-grid", style: { marginTop: 8, alignItems: 'flex-end' } }, React.createElement(NameAutocomplete, { label: "Employee", value: e.employee, onChange: (v) => updateCashDiffEntry(idx, { employee: v }), employees: config.employees, fieldKey: `dc_cashdiff_emp_${idx}`, suggestFor, setSuggestFor }), React.createElement(Field, { label: cashDiff < 0 ? "Amount (added to advance)" : "Amount (recovered from advance)" }, React.createElement(NumInput, { value: e.amount, onChange: (v) => updateCashDiffEntry(idx, { amount: v }) })), React.createElement(Field, { label: "Description" }, React.createElement("input", { className: "text-input", value: e.desc || '', onChange: (ev) => updateCashDiffEntry(idx, { desc: ev.target.value }) })), cashDiffEntries.length > 1 && React.createElement("button", { className: "icon-btn", onClick: () => removeCashDiffEntry(idx) }, React.createElement(IconTrash, { size: 14 })))), React.createElement("div", { className: "slot-actions", style: { marginTop: 4 } }, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: addCashDiffEntry }, React.createElement(IconPlus, { size: 14 }), " Add another entry")), React.createElement("div", { className: "denom-total-row", style: { marginTop: 8, background: cashDiffReconciled ? 'var(--green-bg)' : 'var(--red-bg)' } }, React.createElement("span", null, `Entered: ${fmt(enteredTotal)} of ${fmt(requiredTotal)} required`), React.createElement("span", null, cashDiffReconciled ? '\u2713 Accounted for (within \u20b915)' : `Off by ${fmt(Math.abs(enteredTotal - requiredTotal))}`))), dc.depositBank === 'CARRY_FORWARD' && React.createElement("div", { className: "empty-hint" }, "This amount won't be marked as deposited \u2014 it will automatically be added to tomorrow's total instead."), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: submit }, dc.submitted ? 'Submitted \u2013 update' : 'Submit'), dc.submitted && React.createElement("button", { className: "btn btn-secondary", onClick: () => setWaModel(buildWaModel()) }, React.createElement(IconDownload, { size: 15 }), " Share Report")))), empModal && React.createElement(EmployeeBreakdownModal, { empModal, records: ms.employeeRecords[empModal.name] || [], onClose: () => setEmpModal(null) }), totalDenomModalOpen && React.createElement(TotalDenomModal, { counts: ms.denomCounts, total: ms.denomVal, onClose: () => setTotalDenomModalOpen(false) }), waModel && React.createElement(WhatsAppShareModal, { model: waModel, showToast, onClose: () => setWaModel(null) }));
 }
 function EmployeeBreakdownModal({ empModal, records, onClose }) {
     const { name, mode } = empModal;
