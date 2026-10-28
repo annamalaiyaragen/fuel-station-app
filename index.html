@@ -318,7 +318,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.20-2';
+const APP_BUILD = '2026.10.27-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -5457,6 +5457,32 @@ function parseTransactionLine(line, cfg) {
         return { ok: false, reason: `Date "${dateRaw}" doesn't match a recognizable date format \u2014 check the column.` };
     return { ok: true, date: dateNorm, amount: round2(amount) };
 }
+// One row per physical terminal reading for a single date. On the MS side, several shifts of one pump on the
+// SAME terminal are cumulative running totals (so only the LAST shift of that pump+terminal counts), but a shift
+// that has no terminal (or a different one) is a separate entry \u2014 it must never overwrite the shift that
+// actually carried the sound box (that was dropping SB 6 / SB 7 amounts whenever a later shift had none selected).
+function terminalReadingsFromRecords(type, msRecs, dieselRecs) {
+    const isPaytm = type === 'paytm';
+    const nightF = isPaytm ? 'paytmNightClosing' : 'phonepeNightClosing';
+    const openF = isPaytm ? 'paytmOpening' : 'phonepeOpening';
+    const mornF = isPaytm ? 'paytmMorningClosing' : 'phonepeMorningClosing';
+    const idF = isPaytm ? 'paytmTerminalId' : 'phonepeTerminalId';
+    const rows = [];
+    const by = {};
+    msRecs.forEach((r) => {
+        const key = (r.slotId || '') + '::' + (r[idF] || '');
+        if (!by[key] || (r.shiftIndex || 0) > (by[key].shiftIndex || 0))
+            by[key] = r;
+    });
+    Object.values(by).forEach((r) => rows.push({ source: 'ms', slotLabel: r.slotLabel || '', terminalId: r[idF] || '', night: Number(r[nightF]) || 0, opening: Number(r[openF]) || 0, morning: Number(r[mornF]) || 0, morningRaw: r[mornF] }));
+    dieselRecs.forEach((r) => {
+        if (isPaytm && r.paytmDetails && Object.keys(r.paytmDetails).length > 0)
+            Object.entries(r.paytmDetails).forEach(([id, d]) => rows.push({ source: 'diesel', slotLabel: '', terminalId: id, night: Number(d.nightClosing) || 0, opening: Number(d.opening) || 0, morning: Number(d.morningClosing) || 0, morningRaw: d.morningClosing }));
+        else
+            rows.push({ source: 'diesel', slotLabel: '', terminalId: r[idF] || '', night: Number(r[nightF]) || 0, opening: Number(r[openF]) || 0, morning: Number(r[mornF]) || 0, morningRaw: r[mornF] });
+    });
+    return rows;
+}
 function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
     const out = [];
     if (type === 'deposit') {
@@ -5464,37 +5490,15 @@ function bookEntriesFor(bank, type, dayClosing, msLog, dieselLog) {
             out.push({ id: 'dc_' + date, date, amount: round2(dc.depositAmount !== undefined ? dc.depositAmount : dc.newTotal) }); });
     }
     else if (type === 'phonepe' || type === 'paytm') {
-        const field = type === 'phonepe' ? 'phonepeNightClosing' : 'paytmNightClosing';
-        // If a day is split into multiple shifts on the SAME terminal (same pump), each shift's
-        // reading is a cumulative running total, not an independent amount \u2014 summing all of them
-        // double-counts. So per pump per date, only the LAST shift's reading is used; different
-        // pumps (genuinely separate terminals) still add together normally.
-        const msLastShiftTotals = (fieldName) => {
-            const byDatePump = {};
-            msLog.forEach((r) => {
-                const key = r.date + '::' + (r.slotId || '');
-                if (!byDatePump[key] || (r.shiftIndex || 0) > (byDatePump[key].shiftIndex || 0))
-                    byDatePump[key] = r;
-            });
-            const t = {};
-            Object.values(byDatePump).forEach((r) => { t[r.date] = (t[r.date] || 0) + (r[fieldName] || 0); });
-            return t;
-        };
-        const dieselTotals = (fieldName) => {
-            const t = {};
-            dieselLog.forEach((r) => { t[r.date] = (t[r.date] || 0) + (r[fieldName] || 0); });
-            return t;
-        };
-        const msNight = msLastShiftTotals(field);
-        const dieselNight = dieselTotals(field);
-        // Both PhonePe and Paytm now use the same same-day-only pattern: MS + Diesel Night Closing
-        // combined, no previous-day Morning Closing component \u2014 that addition was causing redundant
-        // totals since Diesel Daily started capturing multiple terminals.
-        const totals = {};
-        Object.keys(msNight).forEach((d) => { totals[d] = (totals[d] || 0) + msNight[d]; });
-        Object.keys(dieselNight).forEach((d) => { totals[d] = (totals[d] || 0) + dieselNight[d]; });
-        Object.entries(totals).forEach(([date, amount]) => { if (amount > 0)
-            out.push({ id: type + '_' + date, date, amount: round2(amount) }); });
+        // Book amount for a day = every terminal's same-day Night Closing, MS + Diesel (see terminalReadingsFromRecords).
+        const msBy = {}, dlBy = {};
+        msLog.forEach((r) => { (msBy[r.date] = msBy[r.date] || []).push(r); });
+        dieselLog.forEach((r) => { (dlBy[r.date] = dlBy[r.date] || []).push(r); });
+        new Set(Object.keys(msBy).concat(Object.keys(dlBy))).forEach((date) => {
+            const amount = terminalReadingsFromRecords(type, msBy[date] || [], dlBy[date] || []).reduce((sum, r) => sum + r.night, 0);
+            if (amount > 0)
+                out.push({ id: type + '_' + date, date, amount: round2(amount) });
+        });
     }
     else if (type === 'hppay') {
         dieselLog.forEach((r) => { if (r.hpPay)
@@ -6108,37 +6112,12 @@ function BankReconTab(props) {
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Bank Reconciliation" }), React.createElement("div", { className: "tab-switch" }, ['reconcile', 'settings'].map((s) => React.createElement("button", { key: s, className: sub === s ? 'active' : '', onClick: () => setSub(s) }, s === 'reconcile' ? 'Reconcile' : 'Settings'))), sub === 'reconcile' && React.createElement(BankReconcilePane, props), sub === 'settings' && React.createElement(BankSettingsPane, props));
 }
 function getBookEntryDetail(type, msLog, dieselLog, config, date) {
-    const field = type === 'phonepe' ? 'phonepeNightClosing' : 'paytmNightClosing';
-    const openingField = type === 'phonepe' ? 'phonepeOpening' : 'paytmOpening';
-    const morningField = type === 'phonepe' ? 'phonepeMorningClosing' : 'paytmMorningClosing';
-    const terminalIdField = type === 'phonepe' ? 'phonepeTerminalId' : 'paytmTerminalId';
     const terminalLabel = (id) => { const t = (config.terminals || []).find((x) => x.id === id); return t ? `${t.label} (${t.terminalNumber})` : (id || 'Unnamed terminal'); };
-    // MS side: last shift per pump for this date (matches the same rule used to build the book total)
-    const byPump = {};
-    msLog.filter((r) => r.date === date).forEach((r) => {
-        const key = r.slotId || '';
-        if (!byPump[key] || (r.shiftIndex || 0) > (byPump[key].shiftIndex || 0))
-            byPump[key] = r;
-    });
-    const msRows = Object.values(byPump).map((r) => ({
-        label: r.slotLabel || terminalLabel(r[terminalIdField]),
-        opening: Number(r[openingField]) || 0,
-        nightClosing: Number(r[field]) || 0,
-        morningClosing: r[morningField],
-    }));
-    // Diesel side
-    const dieselRow = dieselLog.find((r) => r.date === date);
-    let dieselRows = [];
-    if (dieselRow) {
-        if (type === 'paytm') {
-            dieselRows = Object.entries(dieselRow.paytmDetails || {}).map(([terminalId, d]) => ({
-                label: terminalLabel(terminalId), opening: Number(d.opening) || 0, nightClosing: Number(d.nightClosing) || 0, morningClosing: d.morningClosing,
-            }));
-        }
-        else if (dieselRow.phonepeDetail) {
-            dieselRows = [{ label: terminalLabel(dieselRow.phonepeDetail.terminalId) || 'Diesel PhonePe', opening: Number(dieselRow.phonepeOpening) || 0, nightClosing: Number(dieselRow.phonepeNightClosing) || 0, morningClosing: dieselRow.phonepeMorningClosing }];
-        }
-    }
+    const dayMs = msLog.filter((r) => r.date === date), dayDl = dieselLog.filter((r) => r.date === date);
+    const today = terminalReadingsFromRecords(type, dayMs, dayDl);
+    const rowOf = (r) => ({ label: r.source === 'ms' ? ((r.slotLabel ? r.slotLabel + ' \u2014 ' : '') + (r.terminalId ? terminalLabel(r.terminalId) : 'no terminal selected')) : terminalLabel(r.terminalId), opening: r.opening, nightClosing: r.night, morningClosing: r.morningRaw });
+    const msRows = today.filter((r) => r.source === 'ms').map(rowOf);
+    const dieselRows = today.filter((r) => r.source === 'diesel').map(rowOf);
     const msNightTotal = round2(msRows.reduce((s, r) => s + r.nightClosing, 0));
     const dieselNightTotal = round2(dieselRows.reduce((s, r) => s + r.nightClosing, 0));
     const grandTotal = round2(msNightTotal + dieselNightTotal);
