@@ -83,6 +83,13 @@ html.theme-light {
 .data-table th { text-align:left; color: var(--text-muted); font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:0.03em; padding:8px 10px; border-bottom:1px solid var(--border); }
 .data-table td { padding:9px 10px; border-bottom:1px solid rgba(255,255,255,0.04); }
 .data-table tbody tr:hover { background: var(--surface-2); }
+.scroll-box { overflow-y:auto; overflow-x:auto; border:1px solid var(--border); border-radius:10px; }
+.scroll-box .data-table thead th { position:sticky; top:0; background:var(--surface); z-index:1; }
+.page-nums { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+.page-nums button { min-width:34px; padding:5px 9px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-primary); border-radius:6px; cursor:pointer; font-size:13px; }
+.page-nums button.active { background:var(--amber); color:#1a1a1a; border-color:var(--amber); font-weight:600; }
+.page-nums button:disabled { opacity:.4; cursor:default; }
+.page-nums { margin-top:10px; }
 .mono { font-family:'JetBrains Mono', monospace; }
 .pill { display:inline-block; padding:2px 9px; border-radius:99px; font-size:11px; font-weight:600; }
 .pill-green { background: var(--green-bg); color: var(--green); }
@@ -318,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.27-1';
+const APP_BUILD = '2026.10.29-2';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -947,37 +954,32 @@ function mergeLocalWithCloud(local, cloud, cloudIsNewer, cloudConfigWins) {
     };
 }
 // ---- Bank statement duplicate detection ----
-// Statements have no unique transaction id, so "the same transaction" has to be recognised from its
-// content. The old check was an exact text match on date|description|balance, which missed the same
-// transaction whenever the text differed trivially between two pastes/devices (extra or non-breaking
-// spaces, letter case, a balance stored as 1550979.5 vs "1550979.50", ...). Now:
-//   - descriptions are normalised (case, whitespace) and amounts are compared as numbers to 2 decimals;
-//   - two rows are the same transaction if date + balance match AND (description matches after
-//     normalisation, OR credit matches and the descriptions start the same way). A running balance
-//     after a given transaction is effectively unique, so date+balance is a very strong signal.
-const bsNormDesc = (d) => String(d == null ? '' : d).replace(/ /g, ' ').toUpperCase().replace(/\s+/g, ' ').trim();
+// Statements have no unique transaction id, so "the same transaction" is recognised from its content:
+// DATE + DESCRIPTION + AMOUNT (credit and debit), exactly identical after normalising case / spaces / punctuation.
+// The bank's description carries a reference number, so two genuinely different transactions never share all
+// three \u2014 identical means duplicate. The running balance is not part of the test (the bank no longer supplies
+// one). The single exception: if BOTH rows carry a balance and the balances differ, the bank itself is showing
+// two separate postings (this only happens in older statements), so they are kept apart.
+const bsNormDesc = (d) => String(d == null ? '' : d).replace(/ /g, ' ').toUpperCase().replace(/\s+/g, ' ').trim();
 const bsAlnum = (d) => bsNormDesc(d).replace(/[^A-Z0-9]/g, '');
 const bsAmt = (n) => { const v = Number(String(n == null ? '' : n).replace(/,/g, '')); return isFinite(v) ? v.toFixed(2) : String(n == null ? '' : n); };
-const bsBucketKey = (e) => e.date + '|' + bsAmt(e.balance);
+const bsHasBal = (e) => { const v = Number(String(e && e.balance != null ? e.balance : '').replace(/,/g, '')); return isFinite(v) && v !== 0; };
+const bsTxnKey = (e) => e.date + '|' + bsAlnum(e.desc) + '|' + bsAmt(e.credit) + '|' + bsAmt(e.debit);
 function bsSameTxn(a, b) {
-    if (!a || !b || a.date !== b.date || bsAmt(a.balance) !== bsAmt(b.balance))
+    if (!a || !b || typeof a.date !== 'string' || bsTxnKey(a) !== bsTxnKey(b))
         return false;
-    const x = bsAlnum(a.desc), y = bsAlnum(b.desc);
-    if (x === y)
-        return true;
-    if (bsAmt(a.credit) !== bsAmt(b.credit))
+    if (bsHasBal(a) && bsHasBal(b) && bsAmt(a.balance) !== bsAmt(b.balance))
         return false;
-    const n = Math.min(x.length, y.length, 10);
-    return n >= 6 && x.slice(0, n) === y.slice(0, n);
+    return true;
 }
 // Index over a list of statement rows for fast "is this transaction already here?" lookups.
 function bsIndex(list) {
     const map = new Map();
     const api = {
-        add(e) { const k = bsBucketKey(e); if (!map.has(k)) map.set(k, []); map.get(k).push(e); },
-        find(e) { const arr = map.get(bsBucketKey(e)); return arr ? arr.find((x) => bsSameTxn(x, e)) : undefined; },
+        add(e) { const k = bsTxnKey(e); if (!map.has(k)) map.set(k, []); map.get(k).push(e); },
+        find(e) { const arr = map.get(bsTxnKey(e)); return arr ? arr.find((x) => bsSameTxn(x, e)) : undefined; },
     };
-    (list || []).forEach((e) => api.add(e));
+    (list || []).forEach((e) => { if (e && typeof e.date === 'string') api.add(e); });
     return api;
 }
 // When two rows turn out to be the same transaction, keep one and carry over anything the other had
@@ -996,6 +998,8 @@ function bsAppendNew(existing, incoming) {
     const added = [];
     let duplicates = 0;
     (incoming || []).forEach((r) => {
+        if (!r || typeof r.date !== 'string')
+            return;
         const hit = idx.find(r);
         if (hit) { duplicates++; return; }
         idx.add(r);
@@ -1003,21 +1007,40 @@ function bsAppendNew(existing, incoming) {
     });
     return { added, duplicates };
 }
-// Collapses duplicates already inside one list, keeping the first occurrence (order preserved).
+// Collapses duplicates already inside one list. Rows that carry a balance are settled first, so when a copy
+// with a balance and a copy without one exist, the balanced row is the one kept (and it inherits any party /
+// month / note typed on the other). Order of the remaining rows is preserved.
 function bsDedupeList(list) {
-    const idx = bsIndex([]);
-    const out = [];
-    let removed = 0;
-    (list || []).forEach((e) => {
-        if (!e || typeof e.date !== 'string')
-            return;
-        const hit = idx.find(e);
-        if (hit) { bsFillBlanks(hit, e); removed++; return; }
-        const copy = Object.assign({}, e);
-        idx.add(copy);
-        out.push(copy);
+    const rows = (list || []).filter((e) => e && typeof e.date === 'string').map((e) => Object.assign({}, e));
+    const drop = new Set();
+    const kept = bsIndex([]);
+    const fuzzy = new Map(); // same day + same non-zero balance + same credit + descriptions starting the same way
+    const fuzzyHit = (e) => {
+        const x = bsAlnum(e.desc);
+        return (fuzzy.get(e.date + '|' + bsAmt(e.balance)) || []).find((r) => {
+            const y = bsAlnum(r.desc);
+            if (bsAmt(r.credit) !== bsAmt(e.credit))
+                return false;
+            const n = Math.min(x.length, y.length, 10);
+            return n >= 6 && x.slice(0, n) === y.slice(0, n);
+        });
+    };
+    [true, false].forEach((withBalance) => {
+        rows.forEach((e, i) => {
+            if (bsHasBal(e) !== withBalance)
+                return;
+            const hit = kept.find(e) || (withBalance ? fuzzyHit(e) : undefined);
+            if (hit) { bsFillBlanks(hit, e); drop.add(i); return; }
+            kept.add(e);
+            if (withBalance) {
+                const k = e.date + '|' + bsAmt(e.balance);
+                if (!fuzzy.has(k))
+                    fuzzy.set(k, []);
+                fuzzy.get(k).push(e);
+            }
+        });
     });
-    return { list: out, removed };
+    return { list: rows.filter((_, i) => !drop.has(i)), removed: drop.size };
 }
 // Bank statements merge: union of both sides, duplicates recognised as above. When the same
 // transaction exists on both sides, keep this side's row but fill any field that is blank here and
@@ -2714,6 +2737,19 @@ function Dashboard({ config, msLog, dieselLog, dieselData, dayClosing, advance, 
     const dc = dayClosing[viewDate];
     // Sheet4-style daily summary, last 31 days, MS and Diesel side by side
     const last31 = daysBack(31);
+    // All three sections show 7 days at a time (newest first); the arrows step back through the month and move all three together.
+    const DASH_STEP = 7;
+    const [dashPage, setDashPage] = useState(0);
+    const dashPages = Math.ceil(last31.length / DASH_STEP);
+    const dashWindow = last31.slice().reverse().slice(dashPage * DASH_STEP, (dashPage + 1) * DASH_STEP);
+    const dashWinSet = new Set(dashWindow);
+    const byNewest = (a, b) => b.date.localeCompare(a.date) || (b.savedAt || '').localeCompare(a.savedAt || '');
+    const dashMsRows = msLog.filter((r) => dashWinSet.has(r.date)).sort(byNewest);
+    const dashDieselRows = dieselLog.filter((r) => dashWinSet.has(r.date)).sort(byNewest);
+    const dashPager = React.createElement("div", { className: "page-nums", style: { marginTop: 0, flexWrap: 'nowrap' } },
+        React.createElement("button", { disabled: dashPage <= 0, onClick: () => setDashPage(dashPage - 1), title: "Newer 7 days" }, "\u2039"),
+        React.createElement("span", { style: { fontSize: 12.5, color: 'var(--text-muted)', whiteSpace: 'nowrap', padding: '0 4px' } }, fmtDate(dashWindow[dashWindow.length - 1]) + ' \u2013 ' + fmtDate(dashWindow[0])),
+        React.createElement("button", { disabled: dashPage >= dashPages - 1, onClick: () => setDashPage(dashPage + 1), title: "Older 7 days" }, "\u203a"));
     const dailySummary = last31.map((date) => {
         const msTotal = msLog.filter((r) => r.date === date).reduce((s, r) => s + (r.total || 0), 0);
         const dieselRec = dieselLog.find((r) => r.date === date);
@@ -2721,10 +2757,10 @@ function Dashboard({ config, msLog, dieselLog, dieselData, dayClosing, advance, 
         return { date, msTotal, dieselTotal, combined: msTotal + dieselTotal };
     }).filter((r) => r.msTotal || r.dieselTotal);
     return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Dashboard", action: React.createElement(CalendarDatePicker, { value: viewDate, onChange: setViewDate, maxDate: todayStr() }) }), React.createElement("div", { className: "stat-row" }, React.createElement(Gauge, { label: `MS Sales \u2014 ${fmtDate(viewDate)}`, value: msAmount, tone: "amber" }), React.createElement(Gauge, { label: `Diesel + Lube Sales \u2014 ${fmtDate(viewDate)}`, value: dieselAmount, tone: "amber" }), React.createElement(Gauge, { label: "Day Closing Net Total", value: dc ? dc.netOverallTotal : 0, tone: "green" })), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Quick links")), React.createElement("div", { className: "quick-links" }, [['ms', 'MS Daily'], ['diesel', 'Diesel Daily'], ['dayclosing', 'Day Closing'], ['salary', 'Salary'], ['audit', 'Audit'], ['bank', 'Bank Reconciliation'], ['master', 'Master Data']]
-        .map(([id, label]) => React.createElement("button", { key: id, className: "btn btn-secondary", onClick: () => setTab(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Daily summary \u2014 last 31 days")), dailySummary.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No entries saved yet.") :
-        React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "MS Total", "Diesel + Lube Total", "Combined"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, [...dailySummary].reverse().map((r) => React.createElement("tr", { key: r.date }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmt(r.msTotal)), React.createElement("td", { className: "mono" }, fmt(r.dieselTotal)), React.createElement("td", { className: "mono" }, fmt(r.combined))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "MS Daily log (detailed)")), msLog.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No entries saved yet.") :
-        React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Pump", "Cashier", "Total", "Final Cash", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, [...msLog].sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || '')).slice(0, 40).map((r) => React.createElement("tr", { key: r.id }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", null, r.slotLabel), React.createElement("td", null, r.cashier || '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.total)), React.createElement("td", { className: "mono" }, fmt(r.finalCash)), React.createElement("td", null, React.createElement(Pill, { tone: r.status === 'OK' ? 'green' : 'red' }, r.status))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Diesel Daily log (detailed)")), dieselLog.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No entries saved yet.") :
-        React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Cashier", "Pump boy", "Diesel + Lube Total", "Final Cash"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, [...dieselLog].sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || '')).slice(0, 40).map((r) => React.createElement("tr", { key: r.id }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", null, r.cashier || '\u2014'), React.createElement("td", null, r.pumpBoy || '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.combinedTotal)), React.createElement("td", { className: "mono" }, fmt(r.finalCash))))))));
+        .map(([id, label]) => React.createElement("button", { key: id, className: "btn btn-secondary", onClick: () => setTab(id) }, label)))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Daily summary \u2014 last 31 days"), dashPager), dailySummary.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No entries saved yet.") :
+        React.createElement("div", { className: "scroll-box", style: { maxHeight: 290 } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "MS Total", "Diesel + Lube Total", "Combined"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, [...dailySummary].reverse().filter((r) => dashWinSet.has(r.date)).map((r) => React.createElement("tr", { key: r.date }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmt(r.msTotal)), React.createElement("td", { className: "mono" }, fmt(r.dieselTotal)), React.createElement("td", { className: "mono" }, fmt(r.combined)))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "MS Daily log (detailed)"), dashPager), msLog.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No entries saved yet.") :
+        React.createElement("div", { className: "scroll-box", style: { maxHeight: 540 } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Pump", "Cashier", "Total", "Final Cash", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, dashMsRows.map((r) => React.createElement("tr", { key: r.id }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", null, r.slotLabel), React.createElement("td", null, r.cashier || '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.total)), React.createElement("td", { className: "mono" }, fmt(r.finalCash)), React.createElement("td", null, React.createElement(Pill, { tone: r.status === 'OK' ? 'green' : 'red' }, r.status)))))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Diesel Daily log (detailed)"), dashPager), dieselLog.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No entries saved yet.") :
+        React.createElement("div", { className: "scroll-box", style: { maxHeight: 290 } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Cashier", "Pump boy", "Diesel + Lube Total", "Final Cash"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, dashDieselRows.map((r) => React.createElement("tr", { key: r.id }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", null, r.cashier || '\u2014'), React.createElement("td", null, r.pumpBoy || '\u2014'), React.createElement("td", { className: "mono" }, fmt(r.combinedTotal)), React.createElement("td", { className: "mono" }, fmt(r.finalCash)))))))));
 }
 function getPrevReading(config, readings, meterId, dateStr) {
     var _a, _b;
@@ -5840,7 +5876,8 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
         return true;
     };
 
-    const filteredEntries = React.useMemo(() => entries.filter((e) => entryMatchesFilters(e, filters)), [entries, filters]);
+    // Newest first (a later row on the same date also comes first), purely for display \u2014 stored order is unchanged.
+    const filteredEntries = React.useMemo(() => entries.map((e, i) => [e, i]).filter(([e]) => entryMatchesFilters(e, filters)).sort((a, b) => b[0].date.localeCompare(a[0].date) || b[1] - a[1]).map(([e]) => e), [entries, filters]);
 
     const updateEntry = (id, patch) => {
         const touchesData = 'party' in patch || 'paymentMonths' in patch;
@@ -5891,7 +5928,7 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
 
     const runUpdate = () => {
         // Rows already marked green were exported before \u2014 never send them to the receipt entry again.
-        const checked = filteredEntries.filter((e) => e.enteredInCreditSoftware && rowStatus(e) !== 'green');
+        const checked = filteredEntries.filter((e) => e.enteredInCreditSoftware && rowStatus(e) !== 'green').reverse(); // export stays oldest-first
         if (checked.length === 0) {
             showToast('No rows are checked.', 'red');
             return;
@@ -6102,8 +6139,8 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
         React.createElement("div", { className: "card" },
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 duplicate check")),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, dupScan.removed === 0
-                ? `No duplicate transactions found in the ${entries.length} stored ${bank} rows. (Rows count as duplicates when date and running balance match and the description matches, ignoring spacing/case.)`
-                : `${dupScan.removed} duplicate row${dupScan.removed === 1 ? ' is' : 's are'} already stored in ${bank} (same date, same running balance, same description). Removing keeps the first copy and carries over any party / month / note typed on the other.`),
+                ? `No duplicate transactions found in the ${entries.length} stored ${bank} rows. (Rows count as duplicates when date, description and amount are exactly the same \u2014 the bank balance is not used.)`
+                : `${dupScan.removed} duplicate row${dupScan.removed === 1 ? ' is' : 's are'} already stored in ${bank} (same date, description and amount). Removing keeps the first copy and carries over any party / month / note typed on the other.`),
             dupScan.removed > 0 && React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: removeExistingDuplicates }, `Remove ${dupScan.removed} duplicate${dupScan.removed === 1 ? '' : 's'}`))));
 }
 
@@ -6172,6 +6209,31 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
     const stateKey = bank + '_' + type;
     const st = bankRecon[stateKey] || { entries: [], statuses: {}, proposals: [], lastSucceeded: null };
     const bookAll = useMemo(() => bookEntriesFor(bank, type, dayClosing, msLog, dieselLog), [bank, type, dayClosing, msLog, dieselLog]);
+    // ---- View window: newest first, 30 days per page (or a From/To date filter). Reconciliation itself still uses bookAll. ----
+    const REC_PAGE = 30;
+    const [recFrom, setRecFrom] = useState('');
+    const [recTo, setRecTo] = useState('');
+    const [recPage, setRecPage] = useState(1);
+    useEffect(() => { setRecPage(1); }, [type, recFrom, recTo]);
+    const recView = useMemo(() => {
+        const inRange = (d) => (!recFrom || d >= recFrom) && (!recTo || d <= recTo);
+        const book = bookAll.filter((b) => inRange(b.date)).slice().sort((x, y) => y.date.localeCompare(x.date));
+        const pages = Math.max(1, Math.ceil(book.length / REC_PAGE));
+        const pg = Math.min(recPage, pages);
+        const bookView = book.slice((pg - 1) * REC_PAGE, pg * REC_PAGE);
+        // bank entries: same window as this page of book entries (first page open-ended upward, last page open-ended downward)
+        const hiExcl = pg > 1 && book[(pg - 1) * REC_PAGE - 1] ? book[(pg - 1) * REC_PAGE - 1].date : null;
+        const lo = pg < pages && bookView.length ? bookView[bookView.length - 1].date : null;
+        const bank = (st.entries || []).map((e, i) => [e, i]).filter(([e]) => inRange(e.date) && (!lo || e.date >= lo) && (!hiExcl || e.date < hiExcl))
+            .sort((x, y) => y[0].date.localeCompare(x[0].date) || y[1] - x[1]).map(([e]) => e);
+        return { bookView, bankView: bank, pages, pg, total: book.length, newest: bookView.length ? bookView[0].date : '', oldest: bookView.length ? bookView[bookView.length - 1].date : '' };
+    }, [bookAll, st.entries, recFrom, recTo, recPage]);
+    const recToolbar = React.createElement(React.Fragment, null, React.createElement("div", { className: "card-toolbar", style: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginTop: 14 } },
+        React.createElement(Field, { label: "From" }, React.createElement("input", { type: "date", className: "text-input", value: recFrom, max: recTo || undefined, onChange: (e) => setRecFrom(e.target.value) })),
+        React.createElement(Field, { label: "To" }, React.createElement("input", { type: "date", className: "text-input", value: recTo, min: recFrom || undefined, onChange: (e) => setRecTo(e.target.value) })),
+        (recFrom || recTo) && React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => { setRecFrom(''); setRecTo(''); } }, "Clear dates"),
+        React.createElement("div", { style: { flex: 1, minWidth: 180, fontSize: 12.5, color: 'var(--text-muted)' } }, recView.total ? `Showing ${recView.oldest ? fmtDate(recView.oldest) : ''} \u2192 ${recView.newest ? fmtDate(recView.newest) : ''} \u00b7 ${recView.total} day${recView.total === 1 ? '' : 's'} \u00b7 newest first` : 'No book entries in this range')),
+        recView.pages > 1 && React.createElement("div", { className: "page-nums" }, React.createElement("button", { disabled: recView.pg <= 1, onClick: () => setRecPage(recView.pg - 1) }, "\u2039 Newer"), Array.from({ length: recView.pages }, (_, i) => i + 1).map((n) => React.createElement("button", { key: n, className: n === recView.pg ? 'active' : '', onClick: () => setRecPage(n) }, n)), React.createElement("button", { disabled: recView.pg >= recView.pages, onClick: () => setRecPage(recView.pg + 1) }, "Older \u203a")));
     const updSt = (patch) => persistBankRecon(Object.assign(Object.assign({}, bankRecon), { [stateKey]: Object.assign(Object.assign({}, st), patch) }));
     const parse = (textOverride) => {
         const cfg = config.bankSettings[bank][type];
@@ -6303,7 +6365,7 @@ function BankReconcilePane({ config, dayClosing, msLog, dieselLog, bankRecon, pe
         const lastSucceeded = !st.lastSucceeded || maxDate > st.lastSucceeded ? maxDate : st.lastSucceeded;
         updSt({ proposals, statuses, lastSucceeded });
     };
-    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: type, onChange: (e) => setType(e.target.value) }, BANK_TXN_TYPES.map((t) => React.createElement("option", { key: t.key, value: t.key }, t.label)))), React.createElement(Field, { label: "Bank (set in Settings)" }, React.createElement("span", { className: "readonly-value" }, bank))), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Pulls entries from ${bank}'s stored Bank Statement (added via Data Parsing) dated after whatever's already been reconciled \u2014 not the whole history each time.`), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: importFromBankStatement }, `Import from ${bank}'s Bank Statement`)), parseMsg && React.createElement("div", { className: "empty-hint" }, parseMsg), React.createElement("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 } }, React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Book entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, bookAll.map((b) => React.createElement(React.Fragment, { key: b.id }, React.createElement("tr", null, React.createElement("td", null, fmtDate(b.date)), React.createElement("td", { className: "mono" }, (type === 'phonepe' || type === 'paytm') ? React.createElement("button", { className: "btn-link", onClick: () => setDetailDate(b.date) }, fmt(b.amount)) : fmt(b.amount)), React.createElement("td", null, React.createElement(Pill, { tone: st.statuses[b.id] === 'confirmed' ? 'green' : st.statuses[b.id] === 'approx' ? 'amber' : st.statuses[b.id] === 'flagged' ? 'red' : st.statuses[b.id] === 'ignored' ? 'muted' : 'muted', onClick: st.statuses[b.id] === 'flagged' ? () => setExpandedFlag(expandedFlag === b.id ? null : b.id) : undefined, style: st.statuses[b.id] === 'flagged' ? { cursor: 'pointer' } : {} }, st.statuses[b.id] || 'pending'))), expandedFlag === b.id && React.createElement("tr", null, React.createElement("td", { colSpan: 3, style: { background: 'var(--surface-2)', padding: 12 } }, React.createElement("textarea", { className: "text-input", rows: 2, placeholder: "Add a note about why this doesn't match (optional)", value: (st.notes || {})[b.id] || '', onChange: (e) => updateNote(b.id, e.target.value) }), React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } }, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => ignoreBookEntry(b.id) }, "Ignore"), React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => tallyBookEntry(b.id) }, "Tally (mark reconciled)"))))))))), detailDate && (type === 'phonepe' || type === 'paytm') && React.createElement(BookEntryDetailModal, { date: detailDate, type, msLog, dieselLog, config, onClose: () => setDetailDate(null) }), React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Parsed bank entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, st.entries.map((e) => React.createElement("tr", { key: e.id, style: e.consumed ? { opacity: 0.5 } : {} }, React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { className: "mono" }, fmt(e.amount) + (e.consumed ? ' \u2713' : '')))))))), React.createElement("div", { className: "slot-actions", style: { marginTop: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: runReconciliation }, "Run reconciliation"), React.createElement("span", { style: { marginLeft: 12, fontSize: 13, color: 'var(--text-muted)' } }, "Last succeeded date: ", React.createElement("b", null, st.lastSucceeded ? fmtDate(st.lastSucceeded) : 'None yet'))), reconcileMsg && React.createElement("div", { className: "empty-hint" }, reconcileMsg), st.proposals.filter((p) => !p.confirmed).map((p, idx) => React.createElement("div", { key: idx, className: "confirm-bar", style: { background: p.approx ? 'var(--amber-dim)' : 'var(--surface-2)', color: p.approx ? 'var(--amber)' : 'var(--text-primary)', border: '1px solid var(--border)', flexDirection: 'column', alignItems: 'stretch', gap: 6 } }, React.createElement("span", null, `${p.approx ? 'Approximate match' : p.bookIds.length > 1 ? 'Cumulative match' : 'Match'}: book ${fmt(p.bookTotal)} on ${fmtDate(p.bookDate)} \u2194 bank ${fmt(p.total)} on ${fmtDate(p.bankDate)}` + (p.bookTotal !== p.total ? ` (off by ${fmt(Math.abs(p.bookTotal - p.total))})` : '')), p.desc && React.createElement("span", { style: { fontSize: 12.5 } }, p.desc), React.createElement("div", { style: { display: 'flex', gap: 8 } }, React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => confirmProposal(idx) }, "OK, confirm match"), p.approx && React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => rejectProposal(idx) }, "Reject \u2014 leave flagged")))));
+    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "form-grid" }, React.createElement(Field, { label: "Type" }, React.createElement("select", { className: "select-input", value: type, onChange: (e) => setType(e.target.value) }, BANK_TXN_TYPES.map((t) => React.createElement("option", { key: t.key, value: t.key }, t.label)))), React.createElement(Field, { label: "Bank (set in Settings)" }, React.createElement("span", { className: "readonly-value" }, bank))), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Pulls entries from ${bank}'s stored Bank Statement (added via Data Parsing) dated after whatever's already been reconciled \u2014 not the whole history each time.`), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: importFromBankStatement }, `Import from ${bank}'s Bank Statement`)), parseMsg && React.createElement("div", { className: "empty-hint" }, parseMsg), recToolbar, React.createElement("div", { style: { display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 14 } }, React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Book entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount", "Status"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, recView.bookView.map((b) => React.createElement(React.Fragment, { key: b.id }, React.createElement("tr", null, React.createElement("td", null, fmtDate(b.date)), React.createElement("td", { className: "mono" }, (type === 'phonepe' || type === 'paytm') ? React.createElement("button", { className: "btn-link", onClick: () => setDetailDate(b.date) }, fmt(b.amount)) : fmt(b.amount)), React.createElement("td", null, React.createElement(Pill, { tone: st.statuses[b.id] === 'confirmed' ? 'green' : st.statuses[b.id] === 'approx' ? 'amber' : st.statuses[b.id] === 'flagged' ? 'red' : st.statuses[b.id] === 'ignored' ? 'muted' : 'muted', onClick: st.statuses[b.id] === 'flagged' ? () => setExpandedFlag(expandedFlag === b.id ? null : b.id) : undefined, style: st.statuses[b.id] === 'flagged' ? { cursor: 'pointer' } : {} }, st.statuses[b.id] || 'pending'))), expandedFlag === b.id && React.createElement("tr", null, React.createElement("td", { colSpan: 3, style: { background: 'var(--surface-2)', padding: 12 } }, React.createElement("textarea", { className: "text-input", rows: 2, placeholder: "Add a note about why this doesn't match (optional)", value: (st.notes || {})[b.id] || '', onChange: (e) => updateNote(b.id, e.target.value) }), React.createElement("div", { style: { display: 'flex', gap: 8, marginTop: 8 } }, React.createElement("button", { className: "btn btn-secondary btn-sm", onClick: () => ignoreBookEntry(b.id) }, "Ignore"), React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => tallyBookEntry(b.id) }, "Tally (mark reconciled)"))))))))), detailDate && (type === 'phonepe' || type === 'paytm') && React.createElement(BookEntryDetailModal, { date: detailDate, type, msLog, dieselLog, config, onClose: () => setDetailDate(null) }), React.createElement("div", { style: { flex: 1, minWidth: 260 } }, React.createElement("h4", null, "Parsed bank entries"), React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Amount"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, recView.bankView.map((e) => React.createElement("tr", { key: e.id, style: e.consumed ? { opacity: 0.5 } : {} }, React.createElement("td", null, fmtDate(e.date)), React.createElement("td", { className: "mono" }, fmt(e.amount) + (e.consumed ? ' \u2713' : '')))))))), React.createElement("div", { className: "slot-actions", style: { marginTop: 14 } }, React.createElement("button", { className: "btn btn-primary", onClick: runReconciliation }, "Run reconciliation"), React.createElement("span", { style: { marginLeft: 12, fontSize: 13, color: 'var(--text-muted)' } }, "Last succeeded date: ", React.createElement("b", null, st.lastSucceeded ? fmtDate(st.lastSucceeded) : 'None yet'))), reconcileMsg && React.createElement("div", { className: "empty-hint" }, reconcileMsg), st.proposals.filter((p) => !p.confirmed).map((p, idx) => React.createElement("div", { key: idx, className: "confirm-bar", style: { background: p.approx ? 'var(--amber-dim)' : 'var(--surface-2)', color: p.approx ? 'var(--amber)' : 'var(--text-primary)', border: '1px solid var(--border)', flexDirection: 'column', alignItems: 'stretch', gap: 6 } }, React.createElement("span", null, `${p.approx ? 'Approximate match' : p.bookIds.length > 1 ? 'Cumulative match' : 'Match'}: book ${fmt(p.bookTotal)} on ${fmtDate(p.bookDate)} \u2194 bank ${fmt(p.total)} on ${fmtDate(p.bankDate)}` + (p.bookTotal !== p.total ? ` (off by ${fmt(Math.abs(p.bookTotal - p.total))})` : '')), p.desc && React.createElement("span", { style: { fontSize: 12.5 } }, p.desc), React.createElement("div", { style: { display: 'flex', gap: 8 } }, React.createElement("button", { className: "btn btn-primary btn-sm", onClick: () => confirmProposal(idx) }, "OK, confirm match"), p.approx && React.createElement("button", { className: "btn btn-ghost btn-sm", onClick: () => rejectProposal(idx) }, "Reject \u2014 leave flagged")))));
 }
 function BankSettingsPane({ config, persistConfig }) {
     const [local, setLocal] = useState(config.bankSettings);
