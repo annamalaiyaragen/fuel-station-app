@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.10.29-2';
+const APP_BUILD = '2026.11.17-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -964,13 +964,30 @@ const bsNormDesc = (d) => String(d == null ? '' : d).replace(/ /g, ' ').toUpperC
 const bsAlnum = (d) => bsNormDesc(d).replace(/[^A-Z0-9]/g, '');
 const bsAmt = (n) => { const v = Number(String(n == null ? '' : n).replace(/,/g, '')); return isFinite(v) ? v.toFixed(2) : String(n == null ? '' : n); };
 const bsHasBal = (e) => { const v = Number(String(e && e.balance != null ? e.balance : '').replace(/,/g, '')); return isFinite(v) && v !== 0; };
-const bsTxnKey = (e) => e.date + '|' + bsAlnum(e.desc) + '|' + bsAmt(e.credit) + '|' + bsAmt(e.debit);
+// Amounts are compared to the nearest rupee: the same transaction is sometimes imported once with paise
+// (536701.49, balance 3573839.44) and once rounded to whole rupees (536701, 3573839). They are still one
+// transaction, so figures within 51 paise count as equal. Separate postings (e.g. two IMPS charges the same
+// day) differ by far more than that in their balances, so they stay apart.
+const bsNum = (n) => { const v = Number(String(n == null ? '' : n).replace(/,/g, '')); return isFinite(v) ? v : null; };
+const bsRound = (n) => { const v = bsNum(n); return v === null ? String(n == null ? '' : n) : String(Math.round(v)); };
+const bsNear = (a, b) => { const x = bsNum(a), y = bsNum(b); return x === null || y === null ? bsAmt(a) === bsAmt(b) : Math.abs(x - y) <= 0.51; };
+const bsFrac = (n) => { const v = bsNum(n); return v !== null && Math.abs(v - Math.round(v)) > 0.001; };
+const bsTxnKey = (e) => e.date + '|' + bsAlnum(e.desc) + '|' + bsRound(e.credit) + '|' + bsRound(e.debit);
 function bsSameTxn(a, b) {
     if (!a || !b || typeof a.date !== 'string' || bsTxnKey(a) !== bsTxnKey(b))
         return false;
-    if (bsHasBal(a) && bsHasBal(b) && bsAmt(a.balance) !== bsAmt(b.balance))
+    if (!bsNear(a.credit, b.credit) || !bsNear(a.debit, b.debit))
+        return false;
+    if (bsHasBal(a) && bsHasBal(b) && !bsNear(a.balance, b.balance))
         return false;
     return true;
+}
+// When the same transaction exists once with paise and once rounded, the figures with paise are the real ones.
+// Returns the fields of `target` that should be replaced by those of `from` (or null if nothing to improve).
+function bsPrecisionPatch(target, from) {
+    const patch = {};
+    ['credit', 'debit', 'balance'].forEach((f) => { if (bsFrac(from[f]) && !bsFrac(target[f]) && bsNum(target[f]) !== null && bsNum(target[f]) !== 0) patch[f] = from[f]; });
+    return Object.keys(patch).length ? patch : null;
 }
 // Index over a list of statement rows for fast "is this transaction already here?" lookups.
 function bsIndex(list) {
@@ -997,15 +1014,21 @@ function bsAppendNew(existing, incoming) {
     const idx = bsIndex(existing);
     const added = [];
     let duplicates = 0;
+    const upgrades = new Map(); // id of an already-stored row -> exact (paise) figures from the pasted copy
     (incoming || []).forEach((r) => {
         if (!r || typeof r.date !== 'string')
             return;
         const hit = idx.find(r);
-        if (hit) { duplicates++; return; }
+        if (hit) {
+            duplicates++;
+            const patch = bsPrecisionPatch(hit, r);
+            if (patch) { if (added.indexOf(hit) !== -1) Object.assign(hit, patch); else if (hit.id) upgrades.set(hit.id, Object.assign(upgrades.get(hit.id) || {}, patch)); }
+            return;
+        }
         idx.add(r);
         added.push(r);
     });
-    return { added, duplicates };
+    return { added, duplicates, upgrades };
 }
 // Collapses duplicates already inside one list. Rows that carry a balance are settled first, so when a copy
 // with a balance and a copy without one exist, the balanced row is the one kept (and it inherits any party /
@@ -1030,7 +1053,7 @@ function bsDedupeList(list) {
             if (bsHasBal(e) !== withBalance)
                 return;
             const hit = kept.find(e) || (withBalance ? fuzzyHit(e) : undefined);
-            if (hit) { bsFillBlanks(hit, e); drop.add(i); return; }
+            if (hit) { bsFillBlanks(hit, e); const patch = bsPrecisionPatch(hit, e); if (patch) Object.assign(hit, patch); drop.add(i); return; }
             kept.add(e);
             if (withBalance) {
                 const k = e.date + '|' + bsAmt(e.balance);
@@ -2370,7 +2393,7 @@ function App() {
     if (mustConnectFirst) {
         return React.createElement("div", { className: "fuel-app" }, React.createElement("div", { className: "page", style: { margin: 'auto' } }, React.createElement("div", { className: "card", style: { maxWidth: 380, textAlign: 'center' } }, React.createElement(IconFuel, { size: 30 }), React.createElement("h3", { style: { marginTop: 10 } }, "Connect Google Drive to continue"), React.createElement("div", { className: "empty-hint" }, "You're online, so this app requires connecting to Google Drive before you can use it \u2014 this keeps your data backed up from the start of every session."), React.createElement("button", { className: "btn btn-primary", onClick: connectDrive }, "Connect Google Drive"), connectError && React.createElement("div", { className: "empty-hint", style: { marginTop: 12, color: 'var(--red, #e5484d)' } }, connectError), connectError && React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 8 }, onClick: () => setSkipDriveGate(true) }, "Continue without Drive for now"), connectError && React.createElement("div", { className: "empty-hint", style: { marginTop: 6, fontSize: 12 } }, "Data is saved on this device meanwhile. Connect from Settings later \u2014 it will merge safely with what is on Drive."))));
     }
-    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates, deviceName }), React.createElement("main", { className: "main" }, ...banners, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme, deviceName, setDeviceName, getToken: getCachedOrFreshToken, getState: () => latestStateRef.current, restoreFromSnapshot })), tab === 'reports' && React.createElement(ReportsTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }), nameModal);
+    return React.createElement("div", { className: "fuel-app" }, React.createElement(Sidebar, { tab, setTab, stationName: config.stationName, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, checkForUpdates, deviceName }), React.createElement("main", { className: "main" }, ...banners, tab === 'dashboard' && React.createElement(Dashboard, Object.assign(Object.assign({}, shared), { setTab })), tab === 'ms' && React.createElement(MsDaily, shared), tab === 'diesel' && React.createElement(DieselDaily, shared), tab === 'dayclosing' && React.createElement(DayClosing, shared), tab === 'salary' && React.createElement(SalaryTab, shared), tab === 'audit' && React.createElement(AuditTab, shared), tab === 'bank' && React.createElement(BankReconTab, shared), tab === 'bankstatement' && React.createElement(BankStatementTab, shared), tab === 'dataparsing' && React.createElement(DataParsingTab, shared), tab === 'tt' && React.createElement(TTTab, shared), tab === 'master' && React.createElement(MasterDataGate, shared), tab === 'settings' && React.createElement(SettingsGate, Object.assign(Object.assign({}, shared), { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, exportData, importData, theme, setTheme, deviceName, setDeviceName, getToken: getCachedOrFreshToken, getState: () => latestStateRef.current, restoreFromSnapshot })), tab === 'reports' && React.createElement(ReportsTab, shared), tab === 'dsr' && React.createElement(DSRTab, shared)), toast && React.createElement("div", { className: `toast toast-${toast.tone}` }, toast.msg), React.createElement(CheckUpdatesDialog, { state: checkDialog, onUpdate: updateFromCheckDialog, onClose: () => setCheckDialog(null) }), nameModal);
 }
 function DeviceNameModal({ onSave, onSkip }) {
     const [name, setName] = useState('');
@@ -2701,6 +2724,7 @@ function Sidebar({ tab, setTab, stationName, driveConnected, uploadStatus, downl
         { id: 'salary', label: 'Salary', Icon: IconUsers },
         { id: 'audit', label: 'Audit', Icon: IconChart },
         { id: 'tt', label: 'TT', Icon: IconWallet },
+        { id: 'dsr', label: 'DSR', Icon: IconDroplet },
         { id: 'reports', label: 'Reports', Icon: IconPrint },
         { id: 'bank', label: 'Bank Reconciliation', Icon: IconBank },
         { id: 'bankstatement', label: 'Bank Statement', Icon: IconBank },
@@ -6077,11 +6101,12 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
     const appendRecords = (records, sourceLabel) => {
         // Duplicate-safe: compares against everything already stored (normalised text + numeric amounts),
         // and also drops repeated rows inside the pasted text itself.
-        const { added, duplicates } = bsAppendNew(entries, records);
+        const { added, duplicates, upgrades } = bsAppendNew(entries, records);
         const newEntries = added.map((r) => Object.assign({ id: uid('bs') }, r));
-        const merged = [...entries, ...newEntries].sort((a, b) => a.date.localeCompare(b.date));
+        const base = upgrades.size ? entries.map((e) => upgrades.has(e.id) ? Object.assign({}, e, upgrades.get(e.id)) : e) : entries;
+        const merged = [...base, ...newEntries].sort((a, b) => a.date.localeCompare(b.date));
         persistBankStatements(Object.assign(Object.assign({}, bankStatements), { [bank]: merged }));
-        showToast(`${sourceLabel}: added ${newEntries.length} new transaction(s), ${duplicates} duplicate(s) skipped.`);
+        showToast(`${sourceLabel}: added ${newEntries.length} new transaction(s), ${duplicates} duplicate(s) skipped` + (upgrades.size ? `, ${upgrades.size} stored row(s) updated with exact paise` : '') + '.');
         return newEntries.length;
     };
     // Duplicates that are ALREADY in the stored record (added before this check was tightened, or
@@ -6140,7 +6165,7 @@ function DataParsingTab({ bankStatements, persistBankStatements, showToast }) {
             React.createElement("div", { className: "card-head" }, React.createElement("h3", null, bank + " \u2014 duplicate check")),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, dupScan.removed === 0
                 ? `No duplicate transactions found in the ${entries.length} stored ${bank} rows. (Rows count as duplicates when date, description and amount are exactly the same \u2014 the bank balance is not used.)`
-                : `${dupScan.removed} duplicate row${dupScan.removed === 1 ? ' is' : 's are'} already stored in ${bank} (same date, description and amount). Removing keeps the first copy and carries over any party / month / note typed on the other.`),
+                : `${dupScan.removed} duplicate row${dupScan.removed === 1 ? ' is' : 's are'} already stored in ${bank} (same date, description and amount, to the nearest rupee). Removing keeps the first copy and carries over any party / month / note typed on the other.`),
             dupScan.removed > 0 && React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", onClick: removeExistingDuplicates }, `Remove ${dupScan.removed} duplicate${dupScan.removed === 1 ? '' : 's'}`))));
 }
 
@@ -6433,7 +6458,7 @@ function SettingsTab({ config, persistConfig, persistMsReadings, persistMsDrafts
         setConfirmText('');
         showToast('Everything has been wiped \u2014 starting from a clean slate.');
     };
-    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement(DeviceCard, { deviceName, setDeviceName }), React.createElement(StorageMeterCard, { exportData }), React.createElement(BackupArchiveCard, { getToken, getState, restoreFromSnapshot, showToast, driveConnected }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement lock")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on (recommended), Party / Month / Note / checkbox are read-only for updated (green) rows on the Bank Statement page, and the delete icon is locked for every entry. Turn it off only while you need to correct a mistake, then turn it back on. Editing Party or Month of an unlocked green row sends it back to yellow."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: config.lockUpdatedBankEntries !== false, onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { lockUpdatedBankEntries: e.target.checked })) }), " Lock updated entries and deleting")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "Settings" }), React.createElement(CloudBackupPanel, { configuredClientId, driveReady, driveConnected, uploadStatus, downloadStatus, lastUploadAt, lastDownloadAt, connectDrive, disconnectDrive, pushNow, checkForUpdates, checkDialog, msLog, dieselLog, dayClosing, advance, salaryRuns }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Appearance")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This is a per-device setting \u2014 it's stored only in this browser and won't sync or change how the app looks on any other device."), React.createElement("div", { className: "tab-switch" }, [['dark', 'Dark'], ['light', 'Light']].map(([id, label]) => React.createElement("button", { key: id, className: theme === id ? 'active' : '', onClick: () => setTheme(id) }, label)))), React.createElement(DeviceCard, { deviceName, setDeviceName }), React.createElement(StationConnCard, { showToast }), React.createElement(StorageMeterCard, { exportData }), React.createElement(BackupArchiveCard, { getToken, getState, restoreFromSnapshot, showToast, driveConnected }), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Bank Statement lock")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "When on (recommended), Party / Month / Note / checkbox are read-only for updated (green) rows on the Bank Statement page, and the delete icon is locked for every entry. Turn it off only while you need to correct a mistake, then turn it back on. Editing Party or Month of an unlocked green row sends it back to yellow."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: config.lockUpdatedBankEntries !== false, onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { lockUpdatedBankEntries: e.target.checked })) }), " Lock updated entries and deleting")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Pre-dated changes")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "By default, only yesterday's and today's entries can be saved or submitted \u2014 anything older is locked, whether it's a manual edit or an automatic change, to keep already-closed days from being altered by mistake. Turn this on temporarily if you genuinely need to correct an older date."), React.createElement("label", { className: "toggle" }, React.createElement("input", { type: "checkbox", checked: !!config.allowPreDatedChanges,
         onChange: (e) => persistConfig(Object.assign(Object.assign({}, config), { allowPreDatedChanges: e.target.checked })) }), " Allow pre-dated changes")), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Move data to a new device or hosted copy")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Since your data lives only in this browser, moving to a new hosted copy (like GitHub Pages) or a different device won't bring it along automatically. Export a backup here, then Import it on the new copy \u2014 do this once, and Google Drive will keep them in sync from then on."), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-primary", onClick: exportData }, React.createElement(IconDownload, { size: 15 }), " Export backup (.json)"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { var _a; return (_a = fileInputRef.current) === null || _a === void 0 ? void 0 : _a.click(); } }, "Import backup (.json)"), React.createElement("input", { ref: fileInputRef, type: "file", accept: "application/json", style: { display: 'none' },
         onChange: (e) => { var _a; const f = (_a = e.target.files) === null || _a === void 0 ? void 0 : _a[0]; if (f)
             importData(f); e.target.value = ''; } }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Master reset")), React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "This permanently wipes every MS Daily, Diesel Daily, Day Closing, Salary, Advance, and Bank Reconciliation entry you've saved, and resets Master Data (employees, pumps, products, lubes, opening readings, bank parsing settings) back to the built-in defaults. There is no undo \u2014 make sure any data you care about is backed up (Google Drive, or otherwise) before doing this."), !confirmingReset && React.createElement("button", { className: "btn btn-danger", onClick: () => setConfirmingReset(true) }, "Wipe all data and master data"), confirmingReset && React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: 10 } }, React.createElement("div", { className: "confirm-bar" }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, "Type RESET below to confirm \u2014 this cannot be undone.")), React.createElement("input", { className: "text-input", style: { maxWidth: 200 }, value: confirmText, onChange: (e) => setConfirmText(e.target.value), placeholder: "Type RESET" }), React.createElement("div", { className: "btn-group" }, React.createElement("button", { className: "btn btn-danger", disabled: confirmText !== 'RESET', onClick: doMasterReset }, "Confirm wipe"), React.createElement("button", { className: "btn btn-ghost", onClick: () => { setConfirmingReset(false); setConfirmText(''); } }, "Cancel")))));
@@ -6632,6 +6657,383 @@ function DSRReport({ config, msLog, dieselLog, dsrData, persistDsrData }) {
         var _a, _b, _c, _d, _e, _f;
         return React.createElement("tr", { key: r.date, style: r.variation !== null && Math.abs(r.variation) > 25 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", null, React.createElement(NumInput, { value: (_c = (_b = (_a = dsrData[r.date]) === null || _a === void 0 ? void 0 : _a[tankId]) === null || _b === void 0 ? void 0 : _b.receipt) !== null && _c !== void 0 ? _c : '', onChange: (v) => setField(r.date, 'receipt', v) })), React.createElement("td", { className: "mono" }, fmtNum(r.totalStock)), React.createElement("td", { className: "mono" }, fmtNum(r.salesByMeter)), React.createElement("td", { className: "mono" }, fmtNum(r.pumpTest)), React.createElement("td", { className: "mono" }, fmtNum(r.netSales)), React.createElement("td", { className: "mono" }, fmtNum(r.cumSales)), React.createElement("td", { className: "mono" }, fmtNum(r.closingStock)), React.createElement("td", null, React.createElement(NumInput, { value: (_f = (_e = (_d = dsrData[r.date]) === null || _d === void 0 ? void 0 : _d[tankId]) === null || _e === void 0 ? void 0 : _e.dipStock) !== null && _f !== void 0 ? _f : '', onChange: (v) => setField(r.date, 'dipStock', v) })), React.createElement("td", { className: "mono" }, r.variation !== null ? ((r.variation > 0 ? '+' : '') + fmtNum(r.variation)) : '\u2014'), React.createElement("td", { className: "mono" }, r.cumVariation !== null ? ((r.cumVariation > 0 ? '+' : '') + fmtNum(r.cumVariation)) : '\u2014'));
     })))), React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Opening Stock carries from the previous day's physical Dip reading (not the computed Closing Stock) \u2014 exactly matching a statutory stock register. Rows with a variation beyond \u00b125 are highlighted."));
+}
+/* ---------- DSR tab: capture station-system decantation + tank dip data ---------- */
+// The station's five tanks as they appear in the registers (book pump numbers verified against the meter readings in the tool).
+const DSR_LAYOUT = [
+    { name: 'MS O16', stationNo: 3, product: 'MS', productId: 'p_ms', kl: 16, pumps: [{ no: 'I', nozzleId: 'm5a' }, { no: 'II', nozzleId: 'm4a' }, { no: 'III', nozzleId: 'm3a' }, { no: 'IV', nozzleId: 'm2b' }, { no: 'V', nozzleId: 'm6b' }, { no: 'VI', nozzleId: 'm6a' }, { no: 'VII', nozzleId: 'm1' }] },
+    { name: 'MS N16', stationNo: 1, product: 'MS', productId: 'p_ms', kl: 16, pumps: [{ no: 'I', nozzleId: 'm3b' }, { no: 'II', nozzleId: 'm2a' }, { no: 'III', nozzleId: 'm7a' }, { no: 'IV', nozzleId: 'm7b' }] },
+    { name: 'HSD 1', stationNo: 2, product: 'HSD', productId: 'p_diesel', kl: 22, pumps: [{ no: 'I', nozzleId: 'dp1' }, { no: 'II', nozzleId: 'dp2' }, { no: 'III', nozzleId: 'dp3' }] },
+    { name: 'HSD 2', stationNo: 4, product: 'HSD', productId: 'p_diesel', kl: 22, pumps: [{ no: 'VII', nozzleId: 'dp4' }, { no: 'VIII', nozzleId: 'dp5' }] },
+    { name: 'Power', stationNo: 5, product: 'Power', productId: 'p_power', kl: 9, pumps: [{ no: 'VII', nozzleId: 'm5b' }, { no: 'VIII', nozzleId: 'm4b' }] },
+];
+const STATION_TANKS = DSR_LAYOUT.slice().sort((a, b) => a.stationNo - b.stationNo).map((l) => ({ no: l.stationNo, product: l.product, productId: l.productId, name: l.name }));
+const ROMAN_ORDER = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
+function dsrMonthDates(monthKey) { const [y, m] = monthKey.split('-'); const n = new Date(Number(y), Number(m), 0).getDate(); const out = []; for (let d = 1; d <= n; d++) out.push(`${monthKey}-${String(d).padStart(2, '0')}`); return out; }
+// Observed density + temperature -> density at 15 C (ASTM D1250 / IS 3366 Table 53B style; same result family as the printed tables, may differ by ~0.2-0.3).
+function dsrAlpha(r) { if (r < 770.5) return (346.4228 + 0.4388 * r) / (r * r); if (r < 787.5) return -0.00336312 + 2680.3206 / (r * r); if (r < 838.5) return 594.5418 / (r * r); return (186.9696 + 0.4862 * r) / (r * r); }
+function dsrRho15(obs, temp) {
+    const o = Number(obs), t = Number(temp);
+    if (!o || temp === '' || temp === undefined || temp === null || isNaN(t))
+        return null;
+    const dT = t - 15;
+    let r = o;
+    for (let i = 0; i < 40; i++) { const a = dsrAlpha(r); r = o / Math.exp(-a * dT * (1 + 0.8 * a * dT)); }
+    return Math.round(r * 10) / 10;
+}
+const DSR_DEFAULTS = { boundaryHour: 9, receiptBasis: 'decanted' };
+function dsrSettings(config) { return Object.assign({}, DSR_DEFAULTS, (config && config.dsrSettings) || {}); }
+function dsrAddDays(dateStr, n) { const d = new Date(dateStr + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+// "08-11-2026 10:22:06" -> "2026-11-08T10:22:06"
+function dsrStationDT(s) { const m = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(String(s || '').trim()); return m ? `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}` : null; }
+const DSR_DT_RE = '(\\d{2}-\\d{2}-\\d{4}\\s\\d{2}:\\d{2}:\\d{2})';
+const DSR_NUM = '(-?[\\d,]*\\.?\\d+)';
+const DSR_RECEIPT_RE = new RegExp('^(\\d+) ' + DSR_DT_RE + ' (\\d+) (\\S+) ' + DSR_DT_RE + ' (.+?) (\\S+) ' + DSR_NUM + ' ' + DSR_NUM + ' ' + DSR_NUM + ' ' + DSR_NUM + ' ' + DSR_NUM + '$');
+const DSR_INV_RE = new RegExp('^(\\d+) ' + DSR_DT_RE + ' (\\d+) ' + DSR_NUM + ' ' + DSR_NUM + ' ' + DSR_NUM + ' ' + DSR_NUM + ' ' + DSR_NUM + ' ' + DSR_NUM + '$');
+const dsrN = (s) => Number(String(s).replace(/,/g, '')) || 0;
+// Reads text copied from the station system's "TT Receipt Report" and/or "Tank Inventory Report" tables.
+function parseStationText(text) {
+    const receipts = [], readings = [];
+    let skipped = 0;
+    String(text || '').split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean).forEach((line) => {
+        let m = DSR_RECEIPT_RE.exec(line);
+        if (m) {
+            receipts.push({ deliveryId: m[1], at: dsrStationDT(m[2]), tankNo: Number(m[3]), invoiceNo: m[4], invoiceAt: dsrStationDT(m[5]), supplier: m[6], truck: String(m[7]).toUpperCase(), density: dsrN(m[8]), shortage: dsrN(m[9]), entered: dsrN(m[10]), decanted: dsrN(m[11]), diff: dsrN(m[12]) });
+            return;
+        }
+        m = DSR_INV_RE.exec(line);
+        if (m) {
+            readings.push({ id: m[1], at: dsrStationDT(m[2]), tankNo: Number(m[3]), height: dsrN(m[4]), volume: dsrN(m[5]), waterHeight: dsrN(m[6]), waterVolume: dsrN(m[7]), temp: dsrN(m[8]), ullage: dsrN(m[9]) });
+            return;
+        }
+        if (/\d{2}-\d{2}-\d{4}/.test(line))
+            skipped += 1; // looked like data but wasn't a recognised row
+    });
+    return { receipts, readings, skipped };
+}
+// Business day D runs from D boundaryHour:00 to D+1 boundaryHour:00 (shift change).
+// Deliveries in that window belong to D; the tank reading at D+1 boundary is D's closing dip (and D+1's opening).
+function dsrBuildForDate(parsed, date, boundaryHour) {
+    const hh = String(boundaryHour).padStart(2, '0');
+    const start = `${date}T${hh}:00:00`, end = `${dsrAddDays(date, 1)}T${hh}:00:00`;
+    const out = { start, end, receipts: {}, dips: {}, openings: {}, warnings: [] };
+    parsed.receipts.filter((r) => r.at >= start && r.at < end).sort((a, b) => a.at.localeCompare(b.at)).forEach((r) => { (out.receipts[r.tankNo] = out.receipts[r.tankNo] || []).push(r); });
+    const pick = (target) => {
+        const res = {};
+        STATION_TANKS.forEach((t) => {
+            const cand = parsed.readings.filter((r) => r.tankNo === t.no && r.at <= target).sort((a, b) => b.at.localeCompare(a.at))[0];
+            if (!cand)
+                return;
+            const gapMin = (new Date(target).getTime() - new Date(cand.at).getTime()) / 60000;
+            if (gapMin <= 45)
+                res[t.no] = Object.assign({ exact: gapMin === 0, gapMin }, cand);
+        });
+        return res;
+    };
+    out.dips = pick(end);
+    out.openings = pick(start);
+    STATION_TANKS.forEach((t) => { if (!out.dips[t.no] && parsed.readings.length)
+        out.warnings.push(`No tank ${t.no} reading found at ${end.slice(11, 16)} on ${fmtDate(end.slice(0, 10))} — run the Tank Inventory report through that time.`); });
+    Object.values(out.dips).forEach((d) => { if (!d.exact)
+        out.warnings.push(`Tank ${d.tankNo}: using the ${d.at.slice(11, 16)} reading (${d.gapMin} min before ${end.slice(11, 16)}).`); });
+    return out;
+}
+/* ---------- Station automation system link (needs the "Station System Pull" Chrome extension) ---------- */
+const STATION_CONN_KEY = 'fs_station_conn'; // this device only: never part of the Drive backup or exports
+function stationConnLoad() { try { const v = JSON.parse(window.localStorage.getItem(STATION_CONN_KEY) || 'null'); return Object.assign({ ip: '', user: '', password: '' }, v || {}); } catch (e) { return { ip: '', user: '', password: '' }; } }
+function stationConnSave(c) { try { window.localStorage.setItem(STATION_CONN_KEY, JSON.stringify({ ip: String(c.ip || '').trim(), user: c.user || '', password: c.password || '' })); return true; } catch (e) { return false; } }
+function stationConnClear() { try { window.localStorage.removeItem(STATION_CONN_KEY); } catch (e) { } }
+function stationBridge(type, payload, timeoutMs) {
+    return new Promise((resolve) => {
+        const id = 'req_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        const target = /^https?:$/.test(window.location.protocol) ? window.location.origin : '*';
+        let done = false;
+        const onMsg = (ev) => {
+            const m = ev.data;
+            if (ev.source !== window || !m || m.source !== 'fs-ext' || m.id !== id)
+                return;
+            done = true;
+            window.removeEventListener('message', onMsg);
+            clearTimeout(timer);
+            resolve(m);
+        };
+        const timer = setTimeout(() => { if (!done) { window.removeEventListener('message', onMsg); resolve({ ok: false, code: 'NO_EXTENSION', error: type === 'PING' ? 'not detected' : 'The Station System Pull Chrome extension did not answer. It must be installed and enabled in this Chrome (Settings → Station automation system has the steps).' }); } }, timeoutMs);
+        window.addEventListener('message', onMsg);
+        try { window.postMessage({ source: 'fs-tool', type, id, payload }, target); }
+        catch (e) { done = true; clearTimeout(timer); window.removeEventListener('message', onMsg); resolve({ ok: false, code: 'NO_EXTENSION', error: String(e && e.message || e) }); }
+    });
+}
+function useStationExtension() {
+    const [ext, setExt] = useState({ checked: false, found: false, version: '' });
+    const check = () => { stationBridge('PING', {}, 1500).then((m) => setExt({ checked: true, found: m.type === 'PONG', version: m.version || '' })); };
+    useEffect(() => { check(); }, []);
+    return [ext, check];
+}
+function StationConnCard({ showToast }) {
+    const [conn, setConn] = useState(stationConnLoad());
+    const [ext, recheck] = useStationExtension();
+    const [busy, setBusy] = useState(false);
+    const [result, setResult] = useState(null);
+    const saved = stationConnLoad();
+    const dirty = conn.ip !== saved.ip || conn.user !== saved.user || conn.password !== saved.password;
+    const upd = (k, v) => setConn((c) => Object.assign({}, c, { [k]: v }));
+    const save = () => { if (stationConnSave(conn)) { showToast('Station system details saved on this device.'); setConn(stationConnLoad()); } else showToast('Could not save — browser storage is unavailable.', 'red'); };
+    const clearAll = () => { stationConnClear(); setConn(stationConnLoad()); setResult(null); showToast('Station system details removed from this device.'); };
+    const test = async () => { setBusy(true); setResult(null); const m = await stationBridge('STATION_TEST', { ip: conn.ip, user: conn.user, password: conn.password }, 30000); setResult(m); setBusy(false); recheck(); };
+    return React.createElement("div", { className: "card" },
+        React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station automation system"), ext.checked && React.createElement(Pill, { tone: ext.found ? 'green' : 'red' }, ext.found ? 'Chrome extension connected' + (ext.version ? ' (v' + ext.version + ')' : '') : 'Chrome extension not detected')),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Used by DSR → Daily Entry → “Pull from station system”. These details are kept only in this browser on this device — they are not part of the Google Drive backup or any export. The password is stored as plain text on this device, so only keep it on a computer you trust. The IP can be changed here whenever the station system's address changes. You can also leave everything blank and type them in at each pull instead."),
+        React.createElement("div", { className: "form-grid" },
+            React.createElement(Field, { label: "IP address", hint: "e.g. 192.168.31.188" }, React.createElement("input", { className: "text-input", value: conn.ip, placeholder: "192.168.x.x", onChange: (e) => upd('ip', e.target.value) })),
+            React.createElement(Field, { label: "User ID" }, React.createElement("input", { className: "text-input", value: conn.user, autoComplete: "off", onChange: (e) => upd('user', e.target.value) })),
+            React.createElement(Field, { label: "Password" }, React.createElement("input", { className: "text-input", type: "password", value: conn.password, autoComplete: "new-password", onChange: (e) => upd('password', e.target.value) }))),
+        React.createElement("div", { className: "slot-actions", style: { gap: 8, flexWrap: "wrap" } }, React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save"), React.createElement("button", { className: "btn btn-secondary", disabled: busy || !conn.ip.trim(), onClick: test }, busy ? 'Testing…' : 'Test connection'), React.createElement("button", { className: "btn btn-secondary", onClick: clearAll }, "Remove saved details")),
+        result && React.createElement("div", { className: "empty-hint", style: { color: result.ok ? 'var(--green)' : 'var(--red)' } }, result.ok ? result.message : result.error),
+        React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Chrome extension: unzip “station-pull-extension”, open chrome://extensions, switch on Developer mode, press Load unpacked and pick that folder. It only talks to local network addresses and only to this tool's page, and it only reads the TT receipt and tank dip reports."));
+}
+function StationPullPanel({ date, boundaryHour, onPulled }) {
+    const [conn, setConn] = useState(stationConnLoad());
+    const [keep, setKeep] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState(null);
+    const [ext] = useStationExtension();
+    const upd = (k, v) => setConn((c) => Object.assign({}, c, { [k]: v }));
+    const go = async () => {
+        setBusy(true); setMsg(null);
+        const m = await stationBridge('STATION_PULL', { ip: conn.ip, user: conn.user, password: conn.password, date, boundaryHour }, 90000);
+        setBusy(false);
+        if (!m.ok) { setMsg({ tone: 'red', text: m.error || 'The pull failed.' }); return; }
+        if (keep)
+            stationConnSave(conn);
+        setMsg({ tone: 'green', text: `Pulled ${m.receipts.length} deliver${m.receipts.length === 1 ? 'y' : 'ies'} and ${m.readings.length} tank reading${m.readings.length === 1 ? '' : 's'} from the station system` + (m.loggedInByExtension ? ' (logged in with the ID you gave)' : '') + '. Check the preview below, then save.' + ((m.warnings || []).length ? ' ' + m.warnings.join(' ') : '') });
+        onPulled({ receipts: m.receipts, readings: m.readings, skipped: 0 });
+    };
+    return React.createElement("div", { style: { border: '1px solid var(--border)', borderRadius: 10, padding: 12, marginBottom: 14 } },
+        React.createElement("div", { className: "card-head", style: { marginBottom: 6 } }, React.createElement("h3", null, "Pull from the station system"), ext.checked && React.createElement(Pill, { tone: ext.found ? 'green' : 'red' }, ext.found ? 'Chrome extension connected' : 'Chrome extension not detected')),
+        React.createElement("div", { className: "form-grid" },
+            React.createElement(Field, { label: "IP address" }, React.createElement("input", { className: "text-input", value: conn.ip, placeholder: "192.168.x.x", onChange: (e) => upd('ip', e.target.value) })),
+            React.createElement(Field, { label: "User ID", hint: "only needed if you are not already logged in to the station system" }, React.createElement("input", { className: "text-input", value: conn.user, autoComplete: "off", onChange: (e) => upd('user', e.target.value) })),
+            React.createElement(Field, { label: "Password" }, React.createElement("input", { className: "text-input", type: "password", value: conn.password, autoComplete: "new-password", onChange: (e) => upd('password', e.target.value) }))),
+        React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 8px' } }, React.createElement("input", { type: "checkbox", checked: keep, onChange: (e) => setKeep(e.target.checked) }), "Save these in Settings on this device (or manage them under Settings → Station automation system)"),
+        React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", disabled: busy || !conn.ip.trim(), onClick: go }, busy ? 'Pulling…' : `Pull ${fmtDate(date)}`)),
+        msg && React.createElement("div", { className: "empty-hint", style: { color: msg.tone === 'green' ? 'var(--green)' : 'var(--red)' } }, msg.text));
+}
+function DSRTab(props) {
+    const { config, persistConfig, msLog, dieselLog, dsrData, persistDsrData, showToast } = props;
+    const [sub, setSub] = useState('daily');
+    const tanks = config.tanks || [];
+    const unmapped = tanks.filter((t) => !t.stationTankNo).length;
+    const tabs = [['daily', 'Daily Entry'], ['register', 'DSR'], ['meters', 'Meter Readings'], ['dip', 'Dip & Stock'], ['density', 'Density'], ['mapping', 'Tank mapping & settings']];
+    return React.createElement("div", { className: "page" }, React.createElement(PageHeader, { title: "DSR — Daily Stock Register", subtitle: "Tank-wise receipts, sales, dip stock and variation" }),
+        React.createElement("div", { className: "tab-switch" }, tabs.map(([id, label]) => React.createElement("button", { key: id, className: sub === id ? 'active' : '', onClick: () => setSub(id) }, label))),
+        unmapped > 0 && sub !== 'mapping' && React.createElement("div", { className: "confirm-bar", style: { background: 'var(--amber-dim)', color: 'var(--amber)', marginTop: 12 } }, React.createElement(IconAlert, { size: 16 }), React.createElement("span", null, tanks.length === 0 ? "No tanks set up yet — open “Tank mapping & settings” to create the station's tanks." : `${unmapped} tank${unmapped === 1 ? '' : 's'} not matched to a station tank number yet — open “Tank mapping & settings”.`)),
+        sub === 'daily' && React.createElement(DSRDailyEntry, props),
+        sub === 'register' && React.createElement(DSRReport, props),
+        sub === 'meters' && React.createElement(DSRMeters, props),
+        sub === 'dip' && React.createElement(DSRDipStock, props),
+        sub === 'density' && React.createElement(DSRDensity, props),
+        sub === 'mapping' && React.createElement(DSRMapping, props));
+}
+function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, showToast }) {
+    const st = dsrSettings(config);
+    const tanks = config.tanks || [];
+    const [date, setDate] = useState(yesterdayStr());
+    const [text, setText] = useState('');
+    const [parsed, setParsed] = useState(null);
+    const [alsoOpening, setAlsoOpening] = useState(true);
+    const plan = useMemo(() => parsed ? dsrBuildForDate(parsed, date, st.boundaryHour) : null, [parsed, date, st.boundaryHour]);
+    const tankFor = (no) => tanks.find((t) => Number(t.stationTankNo) === no);
+    const readText = () => setParsed(parseStationText(text));
+    const saved = dsrData[date] || {};
+    const rows = STATION_TANKS.map((s) => {
+        const t = tankFor(s.no);
+        const dels = plan ? (plan.receipts[s.no] || []) : [];
+        const entered = dels.reduce((a, d) => a + d.entered, 0), decanted = dels.reduce((a, d) => a + d.decanted, 0);
+        return { s, t, dels, entered, decanted, dip: plan ? plan.dips[s.no] : null, opening: plan ? plan.openings[s.no] : null };
+    });
+    const apply = () => {
+        let next = Object.assign({}, dsrData);
+        const prev = dsrAddDays(date, -1);
+        let tankCount = 0;
+        rows.forEach((r) => {
+            if (!r.t)
+                return;
+            const cur = Object.assign({}, (next[date] || {})[r.t.id] || {});
+            if (r.dels.length || r.dip) {
+                const receipt = st.receiptBasis === 'decanted' ? r.decanted : r.entered;
+                if (r.dels.length) {
+                    cur.receipt = round2(receipt);
+                    cur.decanted = round2(r.decanted);
+                    cur.invoiceQty = round2(r.entered);
+                    cur.deliveries = r.dels.map((d) => ({ id: d.deliveryId, at: d.at, invoiceNo: d.invoiceNo, truck: d.truck, density: d.density, entered: d.entered, decanted: d.decanted }));
+                }
+                else if (cur.deliveries === undefined && (cur.receipt === undefined || cur.receipt === ''))
+                    cur.receipt = 0;
+                if (r.dip) {
+                    cur.dipStock = round2(r.dip.volume);
+                    cur.dipAt = r.dip.at;
+                    cur.dipCm = round2(r.dip.height / 10);
+                    cur.water = r.dip.waterVolume;
+                }
+                next[date] = Object.assign({}, (next[date] || {}), { [r.t.id]: cur });
+                tankCount += 1;
+            }
+            if (alsoOpening && r.opening) {
+                const pd = Object.assign({}, (next[prev] || {})[r.t.id] || {});
+                if (pd.dipStock === undefined || pd.dipStock === '') {
+                    pd.dipStock = round2(r.opening.volume);
+                    pd.dipAt = r.opening.at;
+                    pd.dipCm = round2(r.opening.height / 10);
+                    next[prev] = Object.assign({}, (next[prev] || {}), { [r.t.id]: pd });
+                }
+            }
+        });
+        persistDsrData(next);
+        showToast(`DSR saved for ${fmtDate(date)} — ${tankCount} tank${tankCount === 1 ? '' : 's'}.`);
+        setParsed(null);
+        setText('');
+    };
+    const mappedAny = rows.some((r) => r.t);
+    const savable = plan && mappedAny && rows.some((r) => r.t && (r.dels.length || r.dip));
+    const tankLabel = (r) => (r.t ? r.t.name : 'not mapped') + ` · station tank ${r.s.no} (${r.s.product})`;
+    return React.createElement(React.Fragment, null,
+        React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station data for one day"), React.createElement(CalendarDatePicker, { value: date, onChange: (d) => { setDate(d); setParsed(null); }, maxDate: todayStr() })),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Business day ${fmtDate(date)} runs from ${String(st.boundaryHour).padStart(2, '0')}:00 to ${String(st.boundaryHour).padStart(2, '0')}:00 the next morning. Receipts are deliveries decanted in that window; Dip Stock is each tank's reading at ${String(st.boundaryHour).padStart(2, '0')}:00 on ${fmtDate(dsrAddDays(date, 1))}. On the station system, open the TT Receipt Report and the Tank Inventory Report, run them for that period, select each table, copy, and paste both here.`),
+            React.createElement(StationPullPanel, { date, boundaryHour: st.boundaryHour, onPulled: (p) => setParsed(p) }),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 6px' } }, "Or paste the tables by hand:"),
+            React.createElement("textarea", { className: "text-input", rows: 6, style: { width: '100%', fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, placeholder: "Paste TT Receipt rows and Tank Inventory rows here…", value: text, onChange: (e) => { setText(e.target.value); setParsed(null); } }),
+            React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", disabled: !text.trim(), onClick: readText }, "Read pasted data")),
+            parsed && React.createElement("div", { className: "empty-hint" }, `Found ${parsed.receipts.length} delivery line${parsed.receipts.length === 1 ? '' : 's'} and ${parsed.readings.length} tank reading${parsed.readings.length === 1 ? '' : 's'}` + (parsed.skipped ? `; ${parsed.skipped} line${parsed.skipped === 1 ? '' : 's'} not recognised` : '') + '.')),
+        plan && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Preview — ${fmtDate(date)}`)),
+            React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tank", "Deliveries decanted", "Invoice qty", "Decanted", "Receipt to save", `Dip at ${String(st.boundaryHour).padStart(2, '0')}:00 next day`, "Water"].map((h) => React.createElement("th", { key: h }, h)))),
+                React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.s.no }, React.createElement("td", null, tankLabel(r)), React.createElement("td", null, r.dels.length ? r.dels.map((d) => `${d.at.slice(11, 16)} · ${d.truck} · inv ${d.invoiceNo}`).join('; ') : '—'),
+                    React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(r.entered) : '—'), React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(r.decanted) : '—'),
+                    React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(st.receiptBasis === 'decanted' ? r.decanted : r.entered) : '0'),
+                    React.createElement("td", { className: "mono" }, r.dip ? fmtNum(r.dip.volume) : '—'), React.createElement("td", { className: "mono" }, r.dip && r.dip.waterVolume ? fmtNum(r.dip.waterVolume) + ' L' : '—')))))),
+            plan.warnings.map((w, i) => React.createElement("div", { key: i, className: "empty-hint", style: { color: 'var(--amber)' } }, w)),
+            !mappedAny && React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, "No tanks are matched to station tank numbers yet — open “Tank mapping & settings” first."),
+            React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } }, React.createElement("input", { type: "checkbox", checked: alsoOpening, onChange: (e) => setAlsoOpening(e.target.checked) }), `Also save the ${String(st.boundaryHour).padStart(2, '0')}:00 reading on ${fmtDate(date)} as ${fmtDate(dsrAddDays(date, -1))}'s dip (only where that day has none) — gives the register its opening stock`),
+            React.createElement("div", { className: "slot-actions", style: { marginTop: 12 } }, React.createElement("button", { className: "btn btn-primary", disabled: !savable, onClick: apply }, "Save to DSR"), React.createElement("button", { className: "btn btn-secondary", onClick: () => setParsed(null) }, "Cancel"))),
+        React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Saved for ${fmtDate(date)}`)),
+            tanks.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No tanks set up yet.") :
+                React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tank", "Receipt", "Decanted", "Deliveries", "Dip stock", "Dip taken"].map((h) => React.createElement("th", { key: h }, h)))),
+                    React.createElement("tbody", null, tanks.map((t) => { const d = saved[t.id] || {}; return React.createElement("tr", { key: t.id }, React.createElement("td", null, t.name), React.createElement("td", { className: "mono" }, d.receipt !== undefined && d.receipt !== '' ? fmtNum(d.receipt) : '—'), React.createElement("td", { className: "mono" }, d.decanted !== undefined ? fmtNum(d.decanted) : '—'), React.createElement("td", null, (d.deliveries || []).length ? d.deliveries.map((x) => x.truck + ' ' + x.at.slice(11, 16)).join(', ') : '—'), React.createElement("td", { className: "mono" }, d.dipStock !== undefined && d.dipStock !== '' ? fmtNum(d.dipStock) : '—'), React.createElement("td", null, d.dipAt ? fmtDate(d.dipAt.slice(0, 10)) + ' ' + d.dipAt.slice(11, 16) : '—')); })))),
+            React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Values here show up in the Register tab, where you can still correct any figure by hand.")));
+}
+function DSRPicker({ tanks, tankId, setTankId, month, setMonth, tankLabel }) {
+    return React.createElement("div", { className: "btn-group" }, tankLabel !== false && React.createElement("select", { className: "select-input", value: tankId, onChange: (e) => setTankId(e.target.value) }, tanks.map((t) => React.createElement("option", { key: t.id, value: t.id }, t.name))), React.createElement(MonthSelect, { value: month, onChange: setMonth }));
+}
+function dsrTankPumps(t) {
+    const list = (t.pumps && t.pumps.length) ? t.pumps.slice() : (t.nozzleIds || []).map((id) => ({ no: '', nozzleId: id }));
+    return list.sort((a, b) => ROMAN_ORDER.indexOf(a.no) - ROMAN_ORDER.indexOf(b.no));
+}
+function dsrNozzleLabel(config, id) { const m = (config.meters || []).find((x) => x.id === id); if (m) return m.label; const d = (config.dieselPoints || []).find((x) => x.id === id); return d ? d.label : id; }
+// Opening Meter Readings register: the reading at the start of day D is the closing reading saved for D-1.
+function DSRMeters({ config, msReadings, dieselData }) {
+    const tanks = config.tanks || [];
+    const [tankId, setTankId] = useState((tanks[0] && tanks[0].id) || '');
+    const [month, setMonth] = useState(monthKeyOf(todayStr()));
+    const tank = tanks.find((t) => t.id === tankId) || tanks[0];
+    if (!tank)
+        return React.createElement("div", { className: "card" }, React.createElement("div", { className: "empty-hint" }, "No tanks set up yet \u2014 open \u201CTank mapping & settings\u201D and create the station's tanks."));
+    const pumps = dsrTankPumps(tank);
+    const reading = (date, nozzleId) => {
+        const prev = dsrAddDays(date, -1);
+        const ms = msReadings && msReadings[prev] && msReadings[prev][nozzleId];
+        if (ms !== undefined && ms !== '')
+            return ms;
+        const dp = dieselData && dieselData[prev] && dieselData[prev].pointsClosing && dieselData[prev].pointsClosing[nozzleId];
+        return dp !== undefined && dp !== '' ? dp : '';
+    };
+    const dates = dsrMonthDates(month);
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement(DSRPicker, { tanks, tankId: tank.id, setTankId, month, setMonth }) }),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Opening Meter Readings \u2014 ${tank.name} \u00B7 ${month}. Each row is the reading at the start of that day (the previous day's closing reading from MS Daily / Diesel Daily).`),
+        React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Date"), pumps.map((p) => React.createElement("th", { key: p.nozzleId }, `Pump ${p.no || '?'}`, React.createElement("div", { style: { fontWeight: 400, fontSize: 10.5, color: 'var(--text-muted)' } }, dsrNozzleLabel(config, p.nozzleId)))))),
+            React.createElement("tbody", null, dates.map((d) => React.createElement("tr", { key: d }, React.createElement("td", null, d.slice(8)), pumps.map((p) => React.createElement("td", { key: p.nozzleId, className: "mono" }, reading(d, p.nozzleId) || '\u2014'))))))));
+}
+// Dip & Stock register: one row per day, Dip (cm) and Stock (litres) for each tank, plus total stock.
+function DSRDipStock({ config, dsrData }) {
+    const tanks = config.tanks || [];
+    const [month, setMonth] = useState(monthKeyOf(todayStr()));
+    if (tanks.length === 0)
+        return React.createElement("div", { className: "card" }, React.createElement("div", { className: "empty-hint" }, "No tanks set up yet \u2014 open \u201CTank mapping & settings\u201D and create the station's tanks."));
+    const rec = (date, t) => (dsrData[dsrAddDays(date, -1)] || {})[t.id] || {};
+    const dates = dsrMonthDates(month);
+    const heads = [];
+    tanks.forEach((t) => { heads.push(React.createElement("th", { key: t.id + 'd' }, t.name, React.createElement("div", { style: { fontWeight: 400, fontSize: 10.5 } }, "Dip (cm)")), React.createElement("th", { key: t.id + 's' }, t.name, React.createElement("div", { style: { fontWeight: 400, fontSize: 10.5 } }, "Stock (L)"))); });
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement(DSRPicker, { tanks, tankId: '', setTankId: () => { }, month, setMonth, tankLabel: false }) }),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Dip & Stock \u2014 ${month}. Each row is the tank reading at the start of that day (the shift-change reading), taken from the station system through Daily Entry.`),
+        React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Date"), ...heads, React.createElement("th", null, "Total stock"))),
+            React.createElement("tbody", null, dates.map((d) => { let total = 0, any = false; const cells = []; tanks.forEach((t) => { const r = rec(d, t); const has = r.dipStock !== undefined && r.dipStock !== ''; if (has) { total += Number(r.dipStock) || 0; any = true; } cells.push(React.createElement("td", { key: t.id + 'd', className: "mono" }, r.dipCm !== undefined ? fmtNum(r.dipCm) : '\u2014'), React.createElement("td", { key: t.id + 's', className: "mono" }, has ? fmtNum(Math.round(r.dipStock)) : '\u2014')); }); return React.createElement("tr", { key: d }, React.createElement("td", null, d.slice(8)), ...cells, React.createElement("td", { className: "mono" }, any ? fmtNum(Math.round(total)) : '\u2014')); })))));
+}
+// Density register: challan details come from the station's TT receipt; temperatures and observed densities are typed in; 15 C values are calculated.
+function DSRDensity({ config, dsrData, persistDsrData }) {
+    const tanks = config.tanks || [];
+    const [tankId, setTankId] = useState((tanks[0] && tanks[0].id) || '');
+    const [month, setMonth] = useState(monthKeyOf(todayStr()));
+    const tank = tanks.find((t) => t.id === tankId) || tanks[0];
+    if (!tank)
+        return React.createElement("div", { className: "card" }, React.createElement("div", { className: "empty-hint" }, "No tanks set up yet \u2014 open \u201CTank mapping & settings\u201D and create the station's tanks."));
+    const setDen = (date, group, field, value) => {
+        const dayRec = Object.assign({}, dsrData[date] || {});
+        const tRec = Object.assign({}, dayRec[tank.id] || {});
+        const den = Object.assign({}, tRec.density || {});
+        den[group] = Object.assign({}, den[group] || {}, { [field]: value });
+        tRec.density = den;
+        dayRec[tank.id] = tRec;
+        persistDsrData(Object.assign({}, dsrData, { [date]: dayRec }));
+    };
+    const dates = dsrMonthDates(month);
+    const in3 = (date, group, den) => [
+        React.createElement("td", { key: group + 'd' }, React.createElement(NumInput, { value: (den[group] && den[group].obs) !== undefined ? den[group].obs : '', placeholder: '', onChange: (v) => setDen(date, group, 'obs', v) })),
+        React.createElement("td", { key: group + 't' }, React.createElement(NumInput, { value: (den[group] && den[group].temp) !== undefined ? den[group].temp : '', placeholder: '', onChange: (v) => setDen(date, group, 'temp', v) })),
+    ];
+    const conv = (den, group) => { const g = den[group]; return g ? dsrRho15(g.obs, g.temp) : null; };
+    const show = (v) => v === null || v === undefined ? '\u2014' : v.toFixed(1);
+    const hdr = (t) => React.createElement("th", { key: t }, t);
+    return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement(DSRPicker, { tanks, tankId: tank.id, setTankId, month, setMonth }) }),
+        React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Density Register \u2014 ${tank.name} \u00B7 ${month}. Type the observed density and temperature; the 15\u00B0C values and the difference are calculated. Invoice, quantity and challan density come from the station's TT receipt report.`),
+        React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null,
+            React.createElement("tr", null, React.createElement("th", { rowSpan: 2 }, "Date"), React.createElement("th", { colSpan: 3 }, "Morning density observed"), React.createElement("th", { colSpan: 3 }, "As per challan"), React.createElement("th", { colSpan: 3 }, "Observed (receipt)"), React.createElement("th", { rowSpan: 2 }, "Diff (challan \u2212 observed)"), React.createElement("th", { colSpan: 3 }, "After decantation & dispensing 150 L")),
+            React.createElement("tr", null, ["Density", "Temp", "At 15\u00B0C", "Invoice no.", "Qty (L)", "Density at 15\u00B0C", "Density", "Temp", "At 15\u00B0C", "Density", "Temp", "At 15\u00B0C"].map(hdr))),
+            React.createElement("tbody", null, dates.map((d) => {
+                const r = (dsrData[d] || {})[tank.id] || {};
+                const den = r.density || {};
+                const del = (r.deliveries || [])[0];
+                const challan = del ? del.density : null;
+                const recv = conv(den, 'r');
+                const diff = challan !== null && recv !== null ? challan - recv : null;
+                return React.createElement("tr", { key: d }, React.createElement("td", null, d.slice(8)), ...in3(d, 'm', den), React.createElement("td", { className: "mono" }, show(conv(den, 'm'))),
+                    React.createElement("td", { className: "mono" }, del ? del.invoiceNo + ((r.deliveries || []).length > 1 ? ` (+${r.deliveries.length - 1})` : '') : '\u2014'), React.createElement("td", { className: "mono" }, del ? fmtNum(r.invoiceQty) : '\u2014'), React.createElement("td", { className: "mono" }, del ? Number(challan).toFixed(1) : '\u2014'),
+                    ...in3(d, 'r', den), React.createElement("td", { className: "mono" }, show(recv)), React.createElement("td", { className: "mono" }, diff === null ? '\u2014' : ((diff > 0 ? '+' : '') + diff.toFixed(1))),
+                    ...in3(d, 'a', den), React.createElement("td", { className: "mono" }, show(conv(den, 'a'))));
+            })))));
+}
+function DSRMapping({ config, persistConfig, showToast }) {
+    const st = dsrSettings(config);
+    const tanks = config.tanks || [];
+    const [local, setLocal] = useState({ tanks, boundaryHour: st.boundaryHour, receiptBasis: st.receiptBasis });
+    useEffect(() => { setLocal({ tanks: config.tanks || [], boundaryHour: dsrSettings(config).boundaryHour, receiptBasis: dsrSettings(config).receiptBasis }); }, [config.tanks, config.dsrSettings]);
+    const dirty = JSON.stringify(local.tanks) !== JSON.stringify(config.tanks || []) || local.boundaryHour !== st.boundaryHour || local.receiptBasis !== st.receiptBasis;
+    const nozzleCount = (t) => (t.nozzleIds || []).length;
+    const setNo = (idx, v) => setLocal((c) => Object.assign({}, c, { tanks: c.tanks.map((t, i) => i === idx ? Object.assign({}, t, { stationTankNo: v ? Number(v) : undefined }) : t) }));
+    const layoutFields = (l) => ({ pumps: l.pumps.map((p) => ({ no: p.no, nozzleId: p.nozzleId })), nozzleIds: l.pumps.map((p) => p.nozzleId) });
+    const createStation = () => setLocal((c) => Object.assign({}, c, { tanks: DSR_LAYOUT.map((l) => Object.assign({ id: uid('tank'), name: l.name, productId: l.productId, stationTankNo: l.stationNo, capacityKL: l.kl }, layoutFields(l))) }));
+    const applyLayout = () => setLocal((c) => Object.assign({}, c, { tanks: c.tanks.map((t) => { const l = DSR_LAYOUT.find((x) => x.stationNo === Number(t.stationTankNo)); return l ? Object.assign({}, t, layoutFields(l)) : t; }) }));
+    const save = () => { persistConfig(Object.assign({}, config, { tanks: local.tanks, dsrSettings: { boundaryHour: Math.min(23, Math.max(0, Number(local.boundaryHour) || 0)), receiptBasis: local.receiptBasis } })); showToast('DSR tank mapping and settings saved.'); };
+    const productName = (id) => { const p = (config.products || []).find((x) => x.id === id); return p ? p.name : id; };
+    return React.createElement(React.Fragment, null,
+        React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station tanks → tool tanks"), React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save")),
+            React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, "Match each tank in the tool to the tank number the station system uses (its Tank Inventory report lists 1 MS, 2 HSD, 3 MS, 4 HSD, 5 Power). Which nozzles feed each tank is still set in Master Data → Tanks — the register needs that to work out sales."),
+            local.tanks.length === 0 ? React.createElement("div", null, React.createElement("div", { className: "empty-hint" }, "No tanks set up yet."), React.createElement("button", { className: "btn btn-secondary", onClick: createStation }, "Create the station's 5 tanks")) :
+                React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tank in tool", "Product", "Station tank no.", "Pumps (book no. \u2192 tool nozzle)"].map((h) => React.createElement("th", { key: h }, h)))),
+                    React.createElement("tbody", null, local.tanks.map((t, idx) => React.createElement("tr", { key: t.id }, React.createElement("td", null, t.name), React.createElement("td", null, productName(t.productId)),
+                        React.createElement("td", null, React.createElement("select", { className: "select-input", value: t.stationTankNo || '', onChange: (e) => setNo(idx, e.target.value) }, React.createElement("option", { value: "" }, "— not matched —"), STATION_TANKS.map((s) => React.createElement("option", { key: s.no, value: s.no }, `${s.no} (${s.product})`)))),
+                        React.createElement("td", null, dsrTankPumps(t).length ? dsrTankPumps(t).map((p) => (p.no ? p.no + " = " : "") + dsrNozzleLabel(config, p.nozzleId)).join("; ") : React.createElement(Pill, { tone: "red" }, "none — use the button below"))))))), React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-secondary", onClick: applyLayout }, "Fill in pumps from the book layout"))),
+        React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Settings")),
+            React.createElement("div", { className: "form-grid" },
+                React.createElement(Field, { label: "Shift change hour (business day starts/ends)", hint: "Dip Stock = tank reading at this hour the next morning" }, React.createElement("input", { className: "text-input", type: "number", min: 0, max: 23, value: local.boundaryHour, onChange: (e) => setLocal((c) => Object.assign({}, c, { boundaryHour: e.target.value === '' ? '' : Number(e.target.value) })) })),
+                React.createElement(Field, { label: "Receipt column uses", hint: "Decanted = the volume the station system measured going into each tank (default)" }, React.createElement("select", { className: "select-input", value: local.receiptBasis, onChange: (e) => setLocal((c) => Object.assign({}, c, { receiptBasis: e.target.value })) }, React.createElement("option", { value: "decanted" }, "Measured decanted volume"), React.createElement("option", { value: "invoice" }, "Invoice quantity (entered receipt)"))))));
 }
 const RATES_TT = { '12_Driver': 1200, '20_Driver': 1500, '12_Cleaner': 900, '20_Cleaner': 1000 };
 function ttUid() { return 'tt_' + Math.random().toString(36).slice(2, 10); }
