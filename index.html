@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.11.22-1';
+const APP_BUILD = '2026.11.22-4';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -6687,6 +6687,105 @@ function dsrRho15(obs, temp) {
     for (let i = 0; i < 40; i++) { const a = dsrAlpha(r); r = o / Math.exp(-a * dT * (1 + 0.8 * a * dT)); }
     return Math.round(r * 10) / 10;
 }
+// Volume correction factor to 15 C for a product of density rho15 (kg/m3) sitting at temperature temp (C).
+function dsrVcf(rho15, temp) { const a = dsrAlpha(rho15), d = Number(temp) - 15; return Math.exp(-a * d * (1 + 0.8 * a * d)); }
+// Density at 15 C -> density observed at temp (inverse of dsrRho15).
+function dsrObsFromRho15(rho15, temp) { return rho15 * dsrVcf(rho15, temp); }
+// Density of the tank after a delivery: the old stock (volume at the 9 am reading, density from the morning check) is blended with each
+// delivery (invoice quantity, density observed on receipt or else the challan density) by mass, at 15 C. Returns null with a reason when
+// something needed is missing. The result is an estimate to a few tenths of a kg/m3 plus the hydrometer's own +-1.
+function dsrMixAfter(dsrData, tankId, date) {
+    const rec = (dsrData[date] || {})[tankId] || {};
+    const dels = (rec.deliveries || []).filter((d) => Number(d.decanted || d.entered || d.invoiceQty) > 0 || (rec.deliveries.length === 1 && Number(rec.invoiceQty) > 0));
+    if (!dels.length)
+        return { reason: 'no delivery' };
+    const den = rec.density || {};
+    if (!den.m || !den.m.obs || den.m.temp === '' || den.m.temp === undefined)
+        return { reason: 'morning density not entered' };
+    const open = ((dsrData[dsrAddDays(date, -1)] || {})[tankId] || {}).dipStock;
+    const rho0 = dsrRho15(den.m.obs, den.m.temp);
+    let rho = rho0, vol = null, tNow = Number(den.m.temp), tankTemp = Number(den.m.temp);
+    const notes = [];
+    for (let i = 0; i < dels.length; i++) {
+        const d = dels[i];
+        // product delivered: invoice density; the observed receipt density only if the invoice has none
+        let rd = Number(d.density) || null, rt = null;
+        if (dels.length === 1 && den.r && den.r.obs && den.r.temp !== '' && den.r.temp !== undefined) {
+            rt = Number(den.r.temp);
+            if (!rd)
+                rd = dsrRho15(den.r.obs, den.r.temp);
+        }
+        if (!rd)
+            return { reason: 'no density for the delivery' };
+        // stock already in the tank (at 15 C): the tank volume near the decanting time, else the 9 am opening stock (plus earlier deliveries)
+        let v0, vSrc;
+        if (d.preVol > 0) {
+            v0 = Number(d.preVol) * dsrVcf(rho, d.preTemp > 0 ? d.preTemp : tankTemp);
+            vSrc = `tank ${fmtNum(Math.round(d.preVol))} L at the ${String(d.preAt || '').slice(11, 16)} reading`;
+        }
+        else if (vol !== null) {
+            v0 = vol;
+            vSrc = 'stock after the earlier delivery';
+        }
+        else {
+            if (open === undefined || open === '' || !(Number(open) > 0))
+                return { reason: 'no tank volume near decanting and no 9 am opening stock' };
+            v0 = Number(open) * dsrVcf(rho, den.m.temp);
+            vSrc = `9 am stock ${fmtNum(Math.round(Number(open)))} L`;
+        }
+        // delivered volume: what was decanted into the tank (read at the tank temperature) brought to 15 C; the invoice quantity is already at 15 C
+        const tAfter = d.postTemp > 0 ? Number(d.postTemp) : (rt !== null ? rt : tankTemp);
+        const q = Number(d.decanted) > 0 ? Number(d.decanted) * dsrVcf(rd, tAfter) : (Number(d.entered || d.invoiceQty || rec.invoiceQty) || 0);
+        if (!(q > 0))
+            return { reason: 'no delivered quantity' };
+        const before = rho;
+        rho = (v0 * rho + q * rd) / (v0 + q);
+        vol = v0 + q;
+        tNow = (v0 * (d.preTemp > 0 ? Number(d.preTemp) : tankTemp) + q * tAfter) / (v0 + q);
+        tankTemp = d.postTemp > 0 ? Number(d.postTemp) : tNow;
+        notes.push(`${vSrc} at ${before.toFixed(1)} + ${fmtNum(Math.round(q))} L decanted at ${rd.toFixed(1)} (invoice) → ${rho.toFixed(1)}`);
+    }
+    const lastPost = dels[dels.length - 1].postTemp;
+    const temp = Math.round((lastPost > 0 ? Number(lastPost) : tNow) * 2) / 2;
+    return { rho15: Math.round(rho * 10) / 10, obs: Math.round(dsrObsFromRho15(rho, temp) * 10) / 10, temp, note: notes.join('; ') + ' (densities at 15°C)' };
+}
+// Expected morning density for day D: the tank's density can only move by a few tenths overnight, so it is the density the tank had at the end
+// of the previous day - the "after decantation" value if that day had a delivery, otherwise that day's morning value. Walks back over days
+// with no entry. Returns { rho15, temp, from } or { reason }.
+function dsrExpectedMorning(dsrData, tankId, date) {
+    for (let k = 1; k <= 15; k++) {
+        const d = dsrAddDays(date, -k);
+        const rec = (dsrData[d] || {})[tankId];
+        if (!rec)
+            continue;
+        const den = rec.density || {};
+        const hadDelivery = (rec.deliveries || []).length > 0;
+        let rho15 = null, temp = null;
+        if (hadDelivery) {
+            if (den.a && den.a.obs && den.a.temp !== '' && den.a.temp !== undefined) {
+                rho15 = dsrRho15(den.a.obs, den.a.temp);
+                temp = Number(den.a.temp);
+            }
+            else {
+                const m = dsrMixAfter(dsrData, tankId, d);
+                if (m.rho15) {
+                    rho15 = m.rho15;
+                    temp = m.temp;
+                }
+            }
+        }
+        else if (den.m && den.m.obs && den.m.temp !== '' && den.m.temp !== undefined) {
+            rho15 = dsrRho15(den.m.obs, den.m.temp);
+            temp = Number(den.m.temp);
+        }
+        if (rho15 === null)
+            return { reason: `no density found for ${d.slice(8)}` };
+        // tank temperature at 9 am on D when the station reading stored it (it is saved on the previous day's record), else the temperature of the source value
+        const t9 = (rec.dipTemp > 0) ? Number(rec.dipTemp) : temp;
+        return { rho15, temp: Math.round(t9 * 2) / 2 };
+    }
+    return { reason: 'no earlier day with a density' };
+}
 const DSR_DEFAULTS = { boundaryHour: 9, receiptBasis: 'invoice', pumpTestPerPump: 10 };
 // The Receipt column is always the invoice quantity (as in the printed register); the decanted volume is kept alongside for reference only.
 function dsrSettings(config) { return Object.assign({}, DSR_DEFAULTS, (config && config.dsrSettings) || {}, { receiptBasis: 'invoice' }); }
@@ -6724,7 +6823,29 @@ function dsrBuildForDate(parsed, date, boundaryHour) {
     const hh = String(boundaryHour).padStart(2, '0');
     const start = `${date}T${hh}:00:00`, end = `${dsrAddDays(date, 1)}T${hh}:00:00`;
     const out = { start, end, receipts: {}, dips: {}, openings: {}, warnings: [] };
-    parsed.receipts.filter((r) => r.at >= start && r.at < end).sort((a, b) => a.at.localeCompare(b.at)).forEach((r) => { (out.receipts[r.tankNo] = out.receipts[r.tankNo] || []).push(r); });
+    const minutes = (a, b) => (new Date(a).getTime() - new Date(b).getTime()) / 60000;
+    // Stock in the tank just before a delivery: the last reading at least 15 min before the receipt record (decanting takes a while), run forward
+    // to the receipt time at the rate the tank was falling over the two readings before it. Also the tank temperature after the delivery.
+    const tankAround = (r) => {
+        const rd = parsed.readings.filter((x) => x.tankNo === r.tankNo).sort((a, b) => a.at.localeCompare(b.at));
+        const before = rd.filter((x) => minutes(r.at, x.at) >= 15);
+        const b1 = before[before.length - 1];
+        const res = {};
+        if (b1 && minutes(r.at, b1.at) <= 120) {
+            const b0 = before[before.length - 2];
+            const span = b0 ? minutes(b1.at, b0.at) : 0;
+            const rate = b0 && span > 0 && span <= 90 && b0.volume > b1.volume ? (b0.volume - b1.volume) / span : 0;
+            res.preVol = Math.round((b1.volume - rate * minutes(r.at, b1.at)) * 100) / 100;
+            res.preAt = b1.at;
+            if (b1.temp > 0)
+                res.preTemp = b1.temp;
+        }
+        const after = rd.filter((x) => minutes(x.at, r.at) > 0)[0];
+        if (after && minutes(after.at, r.at) <= 90 && after.temp > 0)
+            res.postTemp = after.temp;
+        return res;
+    };
+    parsed.receipts.filter((r) => r.at >= start && r.at < end).sort((a, b) => a.at.localeCompare(b.at)).forEach((r) => { (out.receipts[r.tankNo] = out.receipts[r.tankNo] || []).push(Object.assign({}, r, tankAround(r))); });
     const pick = (target) => {
         const res = {};
         STATION_TANKS.forEach((t) => {
@@ -6822,7 +6943,7 @@ function dsrApplyDay(dsrData, date, rows, alsoOpening) {
                 cur.receipt = round2(r.entered);
                 cur.decanted = round2(r.decanted);
                 cur.invoiceQty = round2(r.entered);
-                cur.deliveries = r.dels.map((d) => ({ id: d.deliveryId, at: d.at, invoiceNo: d.invoiceNo, truck: d.truck, density: d.density, entered: d.entered, decanted: d.decanted }));
+                cur.deliveries = r.dels.map((d) => { const o = { id: d.deliveryId, at: d.at, invoiceNo: d.invoiceNo, truck: d.truck, density: d.density, entered: d.entered, decanted: d.decanted }; if (d.preVol !== undefined) { o.preVol = d.preVol; o.preAt = d.preAt; } if (d.preTemp !== undefined) o.preTemp = d.preTemp; if (d.postTemp !== undefined) o.postTemp = d.postTemp; return o; });
             }
             else if (cur.deliveries === undefined && (cur.receipt === undefined || cur.receipt === ''))
                 cur.receipt = 0;
@@ -6831,6 +6952,8 @@ function dsrApplyDay(dsrData, date, rows, alsoOpening) {
                 cur.dipAt = r.dip.at;
                 cur.dipCm = round2(r.dip.height / 10);
                 cur.water = r.dip.waterVolume;
+                if (Number(r.dip.temp) > 0)
+                    cur.dipTemp = round2(r.dip.temp);
             }
             next[date] = Object.assign({}, (next[date] || {}), { [r.t.id]: cur });
             tankCount += 1;
@@ -6841,6 +6964,8 @@ function dsrApplyDay(dsrData, date, rows, alsoOpening) {
                 pd.dipStock = round2(r.opening.volume);
                 pd.dipAt = r.opening.at;
                 pd.dipCm = round2(r.opening.height / 10);
+                if (Number(r.opening.temp) > 0)
+                    pd.dipTemp = round2(r.opening.temp);
                 next[prev] = Object.assign({}, (next[prev] || {}), { [r.t.id]: pd });
             }
         }
@@ -7047,6 +7172,9 @@ function DSRDensity({ config, dsrData, persistDsrData }) {
     const tanks = config.tanks || [];
     const [tankId, setTankId] = useState((tanks[0] && tanks[0].id) || '');
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
+    const [overwrite, setOverwrite] = useState(false);
+    const [fillMsg, setFillMsg] = useState('');
+    const showMsg = (t) => setFillMsg(t);
     const tank = tanks.find((t) => t.id === tankId) || tanks[0];
     if (!tank)
         return React.createElement("div", { className: "card" }, React.createElement("div", { className: "empty-hint" }, "No tanks set up yet \u2014 open \u201CTank mapping & settings\u201D and create the station's tanks."));
@@ -7055,20 +7183,58 @@ function DSRDensity({ config, dsrData, persistDsrData }) {
         const tRec = Object.assign({}, dayRec[tank.id] || {});
         const den = Object.assign({}, tRec.density || {});
         den[group] = Object.assign({}, den[group] || {}, { [field]: value });
+        if (group === 'a' || group === 'm')
+            den[group].calc = false;
         tRec.density = den;
         dayRec[tank.id] = tRec;
         persistDsrData(Object.assign({}, dsrData, { [date]: dayRec }));
     };
     const dates = dsrMonthDates(month);
+    const fillMixed = () => {
+        let next = Object.assign({}, dsrData), nm = 0, na = 0;
+        const skipped = [];
+        dates.forEach((d) => {
+            if (!(next[d] || {})[tank.id])
+                return;
+            const setGroup = (g, val) => {
+                const r = next[d][tank.id];
+                next[d] = Object.assign({}, next[d], { [tank.id]: Object.assign({}, r, { density: Object.assign({}, r.density || {}, { [g]: val }) }) });
+            };
+            // 1. morning density: the previous day's closing density
+            const cm = (next[d][tank.id].density || {}).m;
+            if (!(cm && cm.obs) || cm.calc || overwrite) {
+                const e = dsrExpectedMorning(next, tank.id, d);
+                if (e.rho15) { setGroup('m', { obs: Math.round(dsrObsFromRho15(e.rho15, e.temp) * 10) / 10, temp: e.temp, calc: true }); nm += 1; }
+                else if (!(cm && cm.obs))
+                    skipped.push(`${d.slice(8)} morning: ${e.reason}`);
+            }
+            // 2. after decantation: opening stock mixed with the delivery
+            if (!(next[d][tank.id].deliveries || []).length)
+                return;
+            const ca = (next[d][tank.id].density || {}).a;
+            if (ca && ca.obs && !ca.calc && !overwrite)
+                return;
+            const m = dsrMixAfter(next, tank.id, d);
+            if (m.obs) { setGroup('a', { obs: m.obs, temp: m.temp, calc: true, note: m.note }); na += 1; }
+            else
+                skipped.push(`${d.slice(8)} after decantation: ${m.reason}`);
+        });
+        if (nm || na)
+            persistDsrData(next);
+        showMsg((nm || na ? `Filled ${nm} morning and ${na} after-decantation value${nm + na === 1 ? '' : 's'}` : 'Nothing filled') + (skipped.length ? `. Skipped — ${skipped.slice(0, 6).join('; ')}${skipped.length > 6 ? '; …' : ''}` : '') + '.');
+    };
     const in3 = (date, group, den) => [
         React.createElement("td", { key: group + 'd' }, React.createElement(NumInput, { value: (den[group] && den[group].obs) !== undefined ? den[group].obs : '', placeholder: '', onChange: (v) => setDen(date, group, 'obs', v) })),
         React.createElement("td", { key: group + 't' }, React.createElement(NumInput, { value: (den[group] && den[group].temp) !== undefined ? den[group].temp : '', placeholder: '', onChange: (v) => setDen(date, group, 'temp', v) })),
     ];
     const conv = (den, group) => { const g = den[group]; return g ? dsrRho15(g.obs, g.temp) : null; };
+    const show2 = (den, group) => { const v = conv(den, group); const g = den[group]; const txt = (g && g.calc && v !== null ? '\u2248 ' : '') + show(v); return g && g.calc && g.note ? React.createElement("span", { title: g.note, style: { cursor: 'help', borderBottom: '1px dotted currentColor' } }, txt) : txt; };
     const show = (v) => v === null || v === undefined ? '\u2014' : v.toFixed(1);
     const hdr = (t) => React.createElement("th", { key: t }, t);
     return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement(DSRPicker, { tanks, tankId: tank.id, setTankId, month, setMonth }) }),
         React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Density Register \u2014 ${tank.name} \u00B7 ${month}. Type the observed density and temperature; the 15\u00B0C values and the difference are calculated. Invoice, quantity and challan density come from the station's TT receipt report.`),
+        React.createElement("div", { className: "slot-actions", style: { gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 } }, React.createElement("button", { className: "btn btn-primary", onClick: fillMixed }, "Fill densities automatically"), React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 6 } }, React.createElement("input", { type: "checkbox", checked: overwrite, onChange: (e) => setOverwrite(e.target.checked) }), "Also replace values I typed"),
+            React.createElement("span", { className: "empty-hint", style: { padding: 0 } }, fillMsg || "Morning density = the previous day's closing density (its after-decantation value if it had a delivery, else its morning value), at the 9 am tank temperature. After decantation = the tank volume near the decanting time (from the station readings) blended with the decanted volume at its invoice density; hover a \u2248 value to see the sum. Values marked \u2248 are calculated; type over them any time.")),
         React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null,
             React.createElement("tr", null, React.createElement("th", { rowSpan: 2 }, "Date"), React.createElement("th", { colSpan: 3 }, "Morning density observed"), React.createElement("th", { colSpan: 3 }, "As per challan"), React.createElement("th", { colSpan: 3 }, "Observed (receipt)"), React.createElement("th", { rowSpan: 2 }, "Diff (challan \u2212 observed)"), React.createElement("th", { colSpan: 3 }, "After decantation & dispensing 150 L")),
             React.createElement("tr", null, ["Density", "Temp", "At 15\u00B0C", "Invoice no.", "Qty (L)", "Density at 15\u00B0C", "Density", "Temp", "At 15\u00B0C", "Density", "Temp", "At 15\u00B0C"].map(hdr))),
@@ -7079,10 +7245,10 @@ function DSRDensity({ config, dsrData, persistDsrData }) {
                 const challan = del ? del.density : null;
                 const recv = conv(den, 'r');
                 const diff = challan !== null && recv !== null ? challan - recv : null;
-                return React.createElement("tr", { key: d }, React.createElement("td", null, d.slice(8)), ...in3(d, 'm', den), React.createElement("td", { className: "mono" }, show(conv(den, 'm'))),
+                return React.createElement("tr", { key: d }, React.createElement("td", null, d.slice(8)), ...in3(d, 'm', den), React.createElement("td", { className: "mono" }, show2(den, 'm')),
                     React.createElement("td", { className: "mono" }, del ? del.invoiceNo + ((r.deliveries || []).length > 1 ? ` (+${r.deliveries.length - 1})` : '') : '\u2014'), React.createElement("td", { className: "mono" }, del ? fmtNum(r.invoiceQty) : '\u2014'), React.createElement("td", { className: "mono" }, del ? Number(challan).toFixed(1) : '\u2014'),
                     ...in3(d, 'r', den), React.createElement("td", { className: "mono" }, show(recv)), React.createElement("td", { className: "mono" }, diff === null ? '\u2014' : ((diff > 0 ? '+' : '') + diff.toFixed(1))),
-                    ...in3(d, 'a', den), React.createElement("td", { className: "mono" }, show(conv(den, 'a'))));
+                    ...in3(d, 'a', den), React.createElement("td", { className: "mono" }, show2(den, 'a')));
             })))));
 }
 function DSRMapping({ config, persistConfig, showToast }) {
