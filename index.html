@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.11.17-2';
+const APP_BUILD = '2026.11.22-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -6687,8 +6687,9 @@ function dsrRho15(obs, temp) {
     for (let i = 0; i < 40; i++) { const a = dsrAlpha(r); r = o / Math.exp(-a * dT * (1 + 0.8 * a * dT)); }
     return Math.round(r * 10) / 10;
 }
-const DSR_DEFAULTS = { boundaryHour: 9, receiptBasis: 'decanted', pumpTestPerPump: 10 };
-function dsrSettings(config) { return Object.assign({}, DSR_DEFAULTS, (config && config.dsrSettings) || {}); }
+const DSR_DEFAULTS = { boundaryHour: 9, receiptBasis: 'invoice', pumpTestPerPump: 10 };
+// The Receipt column is always the invoice quantity (as in the printed register); the decanted volume is kept alongside for reference only.
+function dsrSettings(config) { return Object.assign({}, DSR_DEFAULTS, (config && config.dsrSettings) || {}, { receiptBasis: 'invoice' }); }
 function dsrAddDays(dateStr, n) { const d = new Date(dateStr + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
 // "08-11-2026 10:22:06" -> "2026-11-08T10:22:06"
 function dsrStationDT(s) { const m = /^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(String(s || '').trim()); return m ? `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}` : null; }
@@ -6797,13 +6798,108 @@ function StationConnCard({ showToast }) {
         result && React.createElement("div", { className: "empty-hint", style: { color: result.ok ? 'var(--green)' : 'var(--red)' } }, result.ok ? result.message : result.error),
         React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Chrome extension: unzip “station-pull-extension”, open chrome://extensions, switch on Developer mode, press Load unpacked and pick that folder. It only talks to local network addresses and only to this tool's page, and it only reads the TT receipt and tank dip reports."));
 }
-function StationPullPanel({ date, boundaryHour, onPulled }) {
+/* ---------- DSR helpers: rows for one business day, applying them, finding days that were never pulled ---------- */
+function dsrRowsFor(plan, tanks) {
+    return STATION_TANKS.map((s) => {
+        const t = (tanks || []).find((x) => Number(x.stationTankNo) === s.no);
+        const dels = plan ? (plan.receipts[s.no] || []) : [];
+        const entered = dels.reduce((a, d) => a + d.entered, 0), decanted = dels.reduce((a, d) => a + d.decanted, 0);
+        return { s, t, dels, entered, decanted, dip: plan ? plan.dips[s.no] : null, opening: plan ? plan.openings[s.no] : null };
+    });
+}
+const dsrTankLabel = (r) => (r.t ? r.t.name : 'not mapped') + ` · station tank ${r.s.no} (${r.s.product})`;
+// Writes one day's pulled figures into a copy of dsrData. Receipt is always the invoice quantity; the decanted volume is kept for reference.
+function dsrApplyDay(dsrData, date, rows, alsoOpening) {
+    const next = Object.assign({}, dsrData);
+    const prev = dsrAddDays(date, -1);
+    let tankCount = 0;
+    rows.forEach((r) => {
+        if (!r.t)
+            return;
+        const cur = Object.assign({}, (next[date] || {})[r.t.id] || {});
+        if (r.dels.length || r.dip) {
+            if (r.dels.length) {
+                cur.receipt = round2(r.entered);
+                cur.decanted = round2(r.decanted);
+                cur.invoiceQty = round2(r.entered);
+                cur.deliveries = r.dels.map((d) => ({ id: d.deliveryId, at: d.at, invoiceNo: d.invoiceNo, truck: d.truck, density: d.density, entered: d.entered, decanted: d.decanted }));
+            }
+            else if (cur.deliveries === undefined && (cur.receipt === undefined || cur.receipt === ''))
+                cur.receipt = 0;
+            if (r.dip) {
+                cur.dipStock = round2(r.dip.volume);
+                cur.dipAt = r.dip.at;
+                cur.dipCm = round2(r.dip.height / 10);
+                cur.water = r.dip.waterVolume;
+            }
+            next[date] = Object.assign({}, (next[date] || {}), { [r.t.id]: cur });
+            tankCount += 1;
+        }
+        if (alsoOpening && r.opening) {
+            const pd = Object.assign({}, (next[prev] || {})[r.t.id] || {});
+            if (pd.dipStock === undefined || pd.dipStock === '') {
+                pd.dipStock = round2(r.opening.volume);
+                pd.dipAt = r.opening.at;
+                pd.dipCm = round2(r.opening.height / 10);
+                next[prev] = Object.assign({}, (next[prev] || {}), { [r.t.id]: pd });
+            }
+        }
+    });
+    return { next, tankCount };
+}
+function dsrPreviewTable(rows, st) {
+    const hh = String(st.boundaryHour).padStart(2, '0');
+    return React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tank", "Deliveries decanted", "Invoice qty", "Decanted", "Receipt to save", `Dip at ${hh}:00 next day`, "Water"].map((h) => React.createElement("th", { key: h }, h)))),
+        React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.s.no }, React.createElement("td", null, dsrTankLabel(r)), React.createElement("td", null, r.dels.length ? r.dels.map((d) => `${d.at.slice(11, 16)} · ${d.truck} · inv ${d.invoiceNo}`).join('; ') : '—'),
+            React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(r.entered) : '—'), React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(r.decanted) : '—'),
+            React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(r.entered) : '0'),
+            React.createElement("td", { className: "mono" }, r.dip ? fmtNum(r.dip.volume) : '—'), React.createElement("td", { className: "mono" }, r.dip && r.dip.waterVolume ? fmtNum(r.dip.waterVolume) + ' L' : '—'))))));
+}
+// Business days that can be pulled but have no saved dip yet: from the first day that has one up to the latest finished day
+// (a day is finished once the next morning's shift-change reading exists).
+function dsrMissingDays(dsrData, boundaryHour) {
+    const has = (d) => Object.keys(dsrData[d] || {}).some((tid) => { const v = (dsrData[d] || {})[tid]; return v && v.dipStock !== undefined && v.dipStock !== ''; });
+    const days = Object.keys(dsrData).filter(has).sort();
+    if (!days.length)
+        return [];
+    const now = new Date();
+    const localToday = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const latest = dsrAddDays(localToday, now.getHours() >= boundaryHour ? -1 : -2);
+    const out = [];
+    for (let d = days[0]; d <= latest && out.length < 31; d = dsrAddDays(d, 1))
+        if (!has(d))
+            out.push(d);
+    return out;
+}
+function StationPullPanel({ date, boundaryHour, onPulled, missing, onPulledMany }) {
     const [conn, setConn] = useState(stationConnLoad());
     const [keep, setKeep] = useState(false);
     const [busy, setBusy] = useState(false);
     const [msg, setMsg] = useState(null);
+    const [prog, setProg] = useState('');
     const [ext] = useStationExtension();
     const upd = (k, v) => setConn((c) => Object.assign({}, c, { [k]: v }));
+    const miss = missing || [];
+    const goMissing = async () => {
+        setBusy(true); setMsg(null);
+        const items = [];
+        let failed = null;
+        for (let i = 0; i < miss.length; i++) {
+            setProg(`Pulling ${fmtDate(miss[i])} (${i + 1} of ${miss.length})\u2026`);
+            const m = await stationBridge('STATION_PULL', { ip: conn.ip, user: conn.user, password: conn.password, date: miss[i], boundaryHour }, 90000);
+            if (!m.ok) { failed = { date: miss[i], text: m.error || 'The pull failed.' }; break; }
+            items.push({ date: miss[i], parsed: { receipts: m.receipts, readings: m.readings, skipped: 0 }, warnings: m.warnings || [] });
+        }
+        setProg(''); setBusy(false);
+        if (keep && items.length)
+            stationConnSave(conn);
+        if (items.length)
+            onPulledMany(items);
+        if (failed)
+            setMsg({ tone: 'red', text: (items.length ? `Pulled ${items.length} day${items.length === 1 ? '' : 's'}, then stopped at ${fmtDate(failed.date)}: ` : `${fmtDate(failed.date)}: `) + failed.text + (items.length ? ' The days pulled so far are in the preview below and can be saved; run the pull again for the rest.' : '') });
+        else
+            setMsg({ tone: 'green', text: `Pulled ${items.length} day${items.length === 1 ? '' : 's'} (${fmtDate(miss[0])} \u2013 ${fmtDate(miss[miss.length - 1])}). Check each day below, then save them all.` });
+    };
     const go = async () => {
         setBusy(true); setMsg(null);
         const m = await stationBridge('STATION_PULL', { ip: conn.ip, user: conn.user, password: conn.password, date, boundaryHour }, 90000);
@@ -6821,7 +6917,10 @@ function StationPullPanel({ date, boundaryHour, onPulled }) {
             React.createElement(Field, { label: "User ID", hint: "only needed if you are not already logged in to the station system" }, React.createElement("input", { className: "text-input", value: conn.user, autoComplete: "off", onChange: (e) => upd('user', e.target.value) })),
             React.createElement(Field, { label: "Password" }, React.createElement("input", { className: "text-input", type: "password", value: conn.password, autoComplete: "new-password", onChange: (e) => upd('password', e.target.value) }))),
         React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 8px' } }, React.createElement("input", { type: "checkbox", checked: keep, onChange: (e) => setKeep(e.target.checked) }), "Save these in Settings on this device (or manage them under Settings → Station automation system)"),
-        React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", disabled: busy || !conn.ip.trim(), onClick: go }, busy ? 'Pulling…' : `Pull ${fmtDate(date)}`)),
+        React.createElement("div", { className: "slot-actions", style: { gap: 8, flexWrap: 'wrap' } },
+            miss.length > 0 && React.createElement("button", { className: "btn btn-primary", disabled: busy || !conn.ip.trim(), onClick: goMissing }, busy && prog ? prog : `Pull all missing days (${miss.length}: ${fmtDate(miss[0])}${miss.length > 1 ? ' \u2013 ' + fmtDate(miss[miss.length - 1]) : ''})`),
+            React.createElement("button", { className: miss.length > 0 ? "btn btn-secondary" : "btn btn-primary", disabled: busy || !conn.ip.trim(), onClick: go }, busy && !prog ? 'Pulling…' : `Pull only ${fmtDate(date)}`)),
+        miss.length === 0 && React.createElement("div", { className: "empty-hint" }, "No missing days \u2014 every finished day since the first saved dip already has its dip stored."),
         msg && React.createElement("div", { className: "empty-hint", style: { color: msg.tone === 'green' ? 'var(--green)' : 'var(--red)' } }, msg.text));
 }
 function DSRTab(props) {
@@ -6847,75 +6946,46 @@ function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, show
     const [text, setText] = useState('');
     const [parsed, setParsed] = useState(null);
     const [alsoOpening, setAlsoOpening] = useState(true);
+    const [multi, setMulti] = useState(null);
+    const missing = useMemo(() => dsrMissingDays(dsrData, st.boundaryHour), [dsrData, st.boundaryHour]);
     const plan = useMemo(() => parsed ? dsrBuildForDate(parsed, date, st.boundaryHour) : null, [parsed, date, st.boundaryHour]);
-    const tankFor = (no) => tanks.find((t) => Number(t.stationTankNo) === no);
-    const readText = () => setParsed(parseStationText(text));
+    const multiPlans = useMemo(() => multi ? multi.map((it) => { const p = dsrBuildForDate(it.parsed, it.date, st.boundaryHour); return { date: it.date, plan: p, rows: dsrRowsFor(p, tanks), warnings: it.warnings || [] }; }) : null, [multi, tanks, st.boundaryHour]);
+    const readText = () => { setMulti(null); setParsed(parseStationText(text)); };
     const saved = dsrData[date] || {};
-    const rows = STATION_TANKS.map((s) => {
-        const t = tankFor(s.no);
-        const dels = plan ? (plan.receipts[s.no] || []) : [];
-        const entered = dels.reduce((a, d) => a + d.entered, 0), decanted = dels.reduce((a, d) => a + d.decanted, 0);
-        return { s, t, dels, entered, decanted, dip: plan ? plan.dips[s.no] : null, opening: plan ? plan.openings[s.no] : null };
-    });
-    const apply = () => {
-        let next = Object.assign({}, dsrData);
-        const prev = dsrAddDays(date, -1);
-        let tankCount = 0;
-        rows.forEach((r) => {
-            if (!r.t)
-                return;
-            const cur = Object.assign({}, (next[date] || {})[r.t.id] || {});
-            if (r.dels.length || r.dip) {
-                const receipt = st.receiptBasis === 'decanted' ? r.decanted : r.entered;
-                if (r.dels.length) {
-                    cur.receipt = round2(receipt);
-                    cur.decanted = round2(r.decanted);
-                    cur.invoiceQty = round2(r.entered);
-                    cur.deliveries = r.dels.map((d) => ({ id: d.deliveryId, at: d.at, invoiceNo: d.invoiceNo, truck: d.truck, density: d.density, entered: d.entered, decanted: d.decanted }));
-                }
-                else if (cur.deliveries === undefined && (cur.receipt === undefined || cur.receipt === ''))
-                    cur.receipt = 0;
-                if (r.dip) {
-                    cur.dipStock = round2(r.dip.volume);
-                    cur.dipAt = r.dip.at;
-                    cur.dipCm = round2(r.dip.height / 10);
-                    cur.water = r.dip.waterVolume;
-                }
-                next[date] = Object.assign({}, (next[date] || {}), { [r.t.id]: cur });
-                tankCount += 1;
-            }
-            if (alsoOpening && r.opening) {
-                const pd = Object.assign({}, (next[prev] || {})[r.t.id] || {});
-                if (pd.dipStock === undefined || pd.dipStock === '') {
-                    pd.dipStock = round2(r.opening.volume);
-                    pd.dipAt = r.opening.at;
-                    pd.dipCm = round2(r.opening.height / 10);
-                    next[prev] = Object.assign({}, (next[prev] || {}), { [r.t.id]: pd });
-                }
-            }
-        });
+    const rows = dsrRowsFor(plan, tanks);
+    const applyMulti = () => {
+        let next = dsrData;
+        let days = 0, tankTotal = 0;
+        multiPlans.forEach((mp) => { const r = dsrApplyDay(next, mp.date, mp.rows, alsoOpening); next = r.next; if (r.tankCount) days += 1; tankTotal += r.tankCount; });
         persistDsrData(next);
-        showToast(`DSR saved for ${fmtDate(date)} — ${tankCount} tank${tankCount === 1 ? '' : 's'}.`);
+        showToast(`DSR saved for ${days} day${days === 1 ? '' : 's'} (${tankTotal} tank record${tankTotal === 1 ? '' : 's'}).`);
+        setMulti(null);
+    };
+    const apply = () => {
+        const r = dsrApplyDay(dsrData, date, rows, alsoOpening);
+        persistDsrData(r.next);
+        showToast(`DSR saved for ${fmtDate(date)} \u2014 ${r.tankCount} tank${r.tankCount === 1 ? '' : 's'}.`);
         setParsed(null);
         setText('');
     };
     const mappedAny = rows.some((r) => r.t);
     const savable = plan && mappedAny && rows.some((r) => r.t && (r.dels.length || r.dip));
-    const tankLabel = (r) => (r.t ? r.t.name : 'not mapped') + ` · station tank ${r.s.no} (${r.s.product})`;
     return React.createElement(React.Fragment, null,
-        React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station data for one day"), React.createElement(CalendarDatePicker, { value: date, onChange: (d) => { setDate(d); setParsed(null); }, maxDate: todayStr() })),
+        React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station data for one day"), React.createElement(CalendarDatePicker, { value: date, onChange: (d) => { setDate(d); setParsed(null); setMulti(null); }, maxDate: todayStr() })),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Business day ${fmtDate(date)} runs from ${String(st.boundaryHour).padStart(2, '0')}:00 to ${String(st.boundaryHour).padStart(2, '0')}:00 the next morning. Receipts are deliveries decanted in that window; Dip Stock is each tank's reading at ${String(st.boundaryHour).padStart(2, '0')}:00 on ${fmtDate(dsrAddDays(date, 1))}. On the station system, open the TT Receipt Report and the Tank Inventory Report, run them for that period, select each table, copy, and paste both here.`),
-            React.createElement(StationPullPanel, { date, boundaryHour: st.boundaryHour, onPulled: (p) => setParsed(p) }),
+            React.createElement(StationPullPanel, { date, boundaryHour: st.boundaryHour, missing, onPulled: (p) => { setMulti(null); setParsed(p); }, onPulledMany: (items) => { setParsed(null); setMulti(items); } }),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 6px' } }, "Or paste the tables by hand:"),
             React.createElement("textarea", { className: "text-input", rows: 6, style: { width: '100%', fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, placeholder: "Paste TT Receipt rows and Tank Inventory rows here…", value: text, onChange: (e) => { setText(e.target.value); setParsed(null); } }),
             React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", disabled: !text.trim(), onClick: readText }, "Read pasted data")),
             parsed && React.createElement("div", { className: "empty-hint" }, `Found ${parsed.receipts.length} delivery line${parsed.receipts.length === 1 ? '' : 's'} and ${parsed.readings.length} tank reading${parsed.readings.length === 1 ? '' : 's'}` + (parsed.skipped ? `; ${parsed.skipped} line${parsed.skipped === 1 ? '' : 's'} not recognised` : '') + '.')),
+        multiPlans && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Preview \u2014 ${multiPlans.length} day${multiPlans.length === 1 ? '' : 's'} pulled`)),
+            multiPlans.map((mp) => React.createElement("div", { key: mp.date, style: { marginBottom: 14 } }, React.createElement("div", { style: { fontWeight: 600, margin: '6px 0' } }, fmtDate(mp.date)), dsrPreviewTable(mp.rows, st),
+                mp.plan.warnings.concat(mp.warnings).map((w, i) => React.createElement("div", { key: i, className: "empty-hint", style: { color: 'var(--amber)' } }, w)))),
+            !multiPlans.some((mp) => mp.rows.some((r) => r.t)) && React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, "No tanks are matched to station tank numbers yet \u2014 open \u201CTank mapping & settings\u201D first."),
+            React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } }, React.createElement("input", { type: "checkbox", checked: alsoOpening, onChange: (e) => setAlsoOpening(e.target.checked) }), `Also save each day's ${String(st.boundaryHour).padStart(2, '0')}:00 reading as the previous day's dip (only where that day has none)`),
+            React.createElement("div", { className: "slot-actions", style: { marginTop: 12, gap: 8 } }, React.createElement("button", { className: "btn btn-primary", disabled: !multiPlans.some((mp) => mp.rows.some((r) => r.t && (r.dels.length || r.dip))), onClick: applyMulti }, `Save all ${multiPlans.length} day${multiPlans.length === 1 ? '' : 's'} to DSR`), React.createElement("button", { className: "btn btn-secondary", onClick: () => setMulti(null) }, "Cancel"))),
         plan && React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Preview — ${fmtDate(date)}`)),
-            React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tank", "Deliveries decanted", "Invoice qty", "Decanted", "Receipt to save", `Dip at ${String(st.boundaryHour).padStart(2, '0')}:00 next day`, "Water"].map((h) => React.createElement("th", { key: h }, h)))),
-                React.createElement("tbody", null, rows.map((r) => React.createElement("tr", { key: r.s.no }, React.createElement("td", null, tankLabel(r)), React.createElement("td", null, r.dels.length ? r.dels.map((d) => `${d.at.slice(11, 16)} · ${d.truck} · inv ${d.invoiceNo}`).join('; ') : '—'),
-                    React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(r.entered) : '—'), React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(r.decanted) : '—'),
-                    React.createElement("td", { className: "mono" }, r.dels.length ? fmtNum(st.receiptBasis === 'decanted' ? r.decanted : r.entered) : '0'),
-                    React.createElement("td", { className: "mono" }, r.dip ? fmtNum(r.dip.volume) : '—'), React.createElement("td", { className: "mono" }, r.dip && r.dip.waterVolume ? fmtNum(r.dip.waterVolume) + ' L' : '—')))))),
+            dsrPreviewTable(rows, st),
             plan.warnings.map((w, i) => React.createElement("div", { key: i, className: "empty-hint", style: { color: 'var(--amber)' } }, w)),
             !mappedAny && React.createElement("div", { className: "empty-hint", style: { color: 'var(--red)' } }, "No tanks are matched to station tank numbers yet — open “Tank mapping & settings” first."),
             React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 } }, React.createElement("input", { type: "checkbox", checked: alsoOpening, onChange: (e) => setAlsoOpening(e.target.checked) }), `Also save the ${String(st.boundaryHour).padStart(2, '0')}:00 reading on ${fmtDate(date)} as ${fmtDate(dsrAddDays(date, -1))}'s dip (only where that day has none) — gives the register its opening stock`),
@@ -7039,7 +7109,7 @@ function DSRMapping({ config, persistConfig, showToast }) {
         React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Settings")),
             React.createElement("div", { className: "form-grid" },
                 React.createElement(Field, { label: "Shift change hour (business day starts/ends)", hint: "Dip Stock = tank reading at this hour the next morning" }, React.createElement("input", { className: "text-input", type: "number", min: 0, max: 23, value: local.boundaryHour, onChange: (e) => setLocal((c) => Object.assign({}, c, { boundaryHour: e.target.value === '' ? '' : Number(e.target.value) })) })),
-                React.createElement(Field, { label: "Receipt column uses", hint: "Decanted = the volume the station system measured going into each tank (default)" }, React.createElement("select", { className: "select-input", value: local.receiptBasis, onChange: (e) => setLocal((c) => Object.assign({}, c, { receiptBasis: e.target.value })) }, React.createElement("option", { value: "decanted" }, "Measured decanted volume"), React.createElement("option", { value: "invoice" }, "Invoice quantity (entered receipt)"))),
+                React.createElement(Field, { label: "Receipt column", hint: "Always the invoice quantity, as in the printed register. The measured decanted volume is kept for reference only." }, React.createElement("div", { className: "mono", style: { padding: "8px 0" } }, "Invoice quantity")),
                 React.createElement(Field, { label: "Pump test per pump per day (L)", hint: "The printed register counts a flat 10 L per pump. Leave blank to use the testing recorded in the daily entries instead." }, React.createElement("input", { className: "text-input", type: "number", min: 0, step: "0.5", value: local.pumpTestPerPump, placeholder: "recorded", onChange: (e) => setLocal((c) => Object.assign({}, c, { pumpTestPerPump: e.target.value === '' ? '' : Number(e.target.value) })) })))));
 }
 const RATES_TT = { '12_Driver': 1200, '20_Driver': 1500, '12_Cleaner': 900, '20_Cleaner': 1000 };
