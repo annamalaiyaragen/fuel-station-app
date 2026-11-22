@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.11.17-1';
+const APP_BUILD = '2026.11.17-2';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -6593,14 +6593,17 @@ function getPrevTankDip(dsrData, dateStr, tankId, masterDefault) {
     }
     return Number(masterDefault) || 0;
 }
-function tankSalesForDate(tank, msLog, dieselLog, date) {
-    let salesByMeter = 0, pumpTest = 0;
+// perPumpTest: litres of pump test counted per pump per day (the printed register uses a flat 10 L per pump). Left blank, the testing
+// recorded in the daily entries is used instead. It is only applied to days that have sales entries.
+function tankSalesForDate(tank, msLog, dieselLog, date, perPumpTest) {
+    let salesByMeter = 0, pumpTest = 0, hasData = false;
     if (tank.productId === 'p_diesel') {
         const dlog = dieselLog.find((r) => r.date === date);
         const segs = dlog === null || dlog === void 0 ? void 0 : dlog.dieselPointSegments;
         if (segs)
             (tank.nozzleIds || []).forEach((nid) => { (segs[nid] || []).forEach((s) => { if (s.diff !== null && s.diff !== undefined) {
                 salesByMeter += s.diff;
+                hasData = true;
                 const net = s.netDiff !== undefined ? s.netDiff : s.diff;
                 pumpTest += (s.diff - net);
             } }); });
@@ -6609,11 +6612,14 @@ function tankSalesForDate(tank, msLog, dieselLog, date) {
         msLog.filter((r) => r.date === date).forEach((r) => { (tank.nozzleIds || []).forEach((nid) => { var _a; const pm = (_a = r.perMeter) === null || _a === void 0 ? void 0 : _a[nid]; if (pm) {
             salesByMeter += pm.diff || 0;
             pumpTest += pm.testing || 0;
+            hasData = true;
         } }); });
     }
+    if (hasData && perPumpTest !== '' && perPumpTest !== undefined && perPumpTest !== null && isFinite(Number(perPumpTest)))
+        pumpTest = Number(perPumpTest) * (tank.nozzleIds || []).length;
     return { salesByMeter: round2(salesByMeter), pumpTest: round2(pumpTest), netSales: round2(salesByMeter - pumpTest) };
 }
-function computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, monthKey) {
+function computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, monthKey, perPumpTest) {
     var _a, _b, _c, _d;
     const [y, m] = monthKey.split('-');
     const daysInMonth = new Date(Number(y), Number(m), 0).getDate();
@@ -6625,7 +6631,7 @@ function computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, monthKey) {
         const opening = getPrevTankDip(dsrData, date, tank.id, 0);
         const receipt = Number((_b = (_a = dsrData[date]) === null || _a === void 0 ? void 0 : _a[tank.id]) === null || _b === void 0 ? void 0 : _b.receipt) || 0;
         const totalStock = round2(opening + receipt);
-        const { salesByMeter, pumpTest, netSales } = tankSalesForDate(tank, msLog, dieselLog, date);
+        const { salesByMeter, pumpTest, netSales } = tankSalesForDate(tank, msLog, dieselLog, date, perPumpTest);
         cumSales = round2(cumSales + netSales);
         const closingStock = round2(totalStock - netSales);
         const dipRaw = (_d = (_c = dsrData[date]) === null || _c === void 0 ? void 0 : _c[tank.id]) === null || _d === void 0 ? void 0 : _d.dipStock;
@@ -6646,7 +6652,7 @@ function DSRReport({ config, msLog, dieselLog, dsrData, persistDsrData }) {
     const [tankId, setTankId] = useState(((_a = tanks[0]) === null || _a === void 0 ? void 0 : _a.id) || '');
     const [month, setMonth] = useState(monthKeyOf(todayStr()));
     const tank = tanks.find((t) => t.id === tankId);
-    const rows = useMemo(() => tank ? computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, month) : [], [tank, msLog, dieselLog, dsrData, month]);
+    const rows = useMemo(() => tank ? computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, month, dsrSettings(config).pumpTestPerPump) : [], [tank, msLog, dieselLog, dsrData, month, config.dsrSettings]);
     const setField = (date, field, value) => {
         var _a;
         persistDsrData(Object.assign(Object.assign({}, dsrData), { [date]: Object.assign(Object.assign({}, (dsrData[date] || {})), { [tankId]: Object.assign(Object.assign({}, (((_a = dsrData[date]) === null || _a === void 0 ? void 0 : _a[tankId]) || {})), { [field]: value }) }) }));
@@ -6681,7 +6687,7 @@ function dsrRho15(obs, temp) {
     for (let i = 0; i < 40; i++) { const a = dsrAlpha(r); r = o / Math.exp(-a * dT * (1 + 0.8 * a * dT)); }
     return Math.round(r * 10) / 10;
 }
-const DSR_DEFAULTS = { boundaryHour: 9, receiptBasis: 'decanted' };
+const DSR_DEFAULTS = { boundaryHour: 9, receiptBasis: 'decanted', pumpTestPerPump: 10 };
 function dsrSettings(config) { return Object.assign({}, DSR_DEFAULTS, (config && config.dsrSettings) || {}); }
 function dsrAddDays(dateStr, n) { const d = new Date(dateStr + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
 // "08-11-2026 10:22:06" -> "2026-11-08T10:22:06"
@@ -6917,7 +6923,7 @@ function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, show
         React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, `Saved for ${fmtDate(date)}`)),
             tanks.length === 0 ? React.createElement("div", { className: "empty-hint" }, "No tanks set up yet.") :
                 React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, ["Tank", "Receipt", "Decanted", "Deliveries", "Dip stock", "Dip taken"].map((h) => React.createElement("th", { key: h }, h)))),
-                    React.createElement("tbody", null, tanks.map((t) => { const d = saved[t.id] || {}; return React.createElement("tr", { key: t.id }, React.createElement("td", null, t.name), React.createElement("td", { className: "mono" }, d.receipt !== undefined && d.receipt !== '' ? fmtNum(d.receipt) : '—'), React.createElement("td", { className: "mono" }, d.decanted !== undefined ? fmtNum(d.decanted) : '—'), React.createElement("td", null, (d.deliveries || []).length ? d.deliveries.map((x) => x.truck + ' ' + x.at.slice(11, 16)).join(', ') : '—'), React.createElement("td", { className: "mono" }, d.dipStock !== undefined && d.dipStock !== '' ? fmtNum(d.dipStock) : '—'), React.createElement("td", null, d.dipAt ? fmtDate(d.dipAt.slice(0, 10)) + ' ' + d.dipAt.slice(11, 16) : '—')); })))),
+                    React.createElement("tbody", null, tanks.map((t) => { const d = saved[t.id] || {}; return React.createElement("tr", { key: t.id }, React.createElement("td", null, t.name), React.createElement("td", { className: "mono" }, d.receipt !== undefined && d.receipt !== '' ? fmtNum(d.receipt) : '—'), React.createElement("td", { className: "mono" }, d.decanted !== undefined ? fmtNum(d.decanted) : '—'), React.createElement("td", null, (d.deliveries || []).length ? d.deliveries.map((x) => (x.truck || (x.invoiceNo ? 'inv ' + x.invoiceNo : 'delivery')) + (x.at && x.source !== 'book' ? ' ' + x.at.slice(11, 16) : '')).join(', ') : '—'), React.createElement("td", { className: "mono" }, d.dipStock !== undefined && d.dipStock !== '' ? fmtNum(d.dipStock) : '—'), React.createElement("td", null, d.dipAt ? fmtDate(d.dipAt.slice(0, 10)) + ' ' + d.dipAt.slice(11, 16) : '—')); })))),
             React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Values here show up in the Register tab, where you can still correct any figure by hand.")));
 }
 function DSRPicker({ tanks, tankId, setTankId, month, setMonth, tankLabel }) {
@@ -7012,15 +7018,15 @@ function DSRDensity({ config, dsrData, persistDsrData }) {
 function DSRMapping({ config, persistConfig, showToast }) {
     const st = dsrSettings(config);
     const tanks = config.tanks || [];
-    const [local, setLocal] = useState({ tanks, boundaryHour: st.boundaryHour, receiptBasis: st.receiptBasis });
-    useEffect(() => { setLocal({ tanks: config.tanks || [], boundaryHour: dsrSettings(config).boundaryHour, receiptBasis: dsrSettings(config).receiptBasis }); }, [config.tanks, config.dsrSettings]);
-    const dirty = JSON.stringify(local.tanks) !== JSON.stringify(config.tanks || []) || local.boundaryHour !== st.boundaryHour || local.receiptBasis !== st.receiptBasis;
+    const [local, setLocal] = useState({ tanks, boundaryHour: st.boundaryHour, receiptBasis: st.receiptBasis, pumpTestPerPump: st.pumpTestPerPump });
+    useEffect(() => { setLocal({ tanks: config.tanks || [], boundaryHour: dsrSettings(config).boundaryHour, receiptBasis: dsrSettings(config).receiptBasis, pumpTestPerPump: dsrSettings(config).pumpTestPerPump }); }, [config.tanks, config.dsrSettings]);
+    const dirty = JSON.stringify(local.tanks) !== JSON.stringify(config.tanks || []) || local.boundaryHour !== st.boundaryHour || local.receiptBasis !== st.receiptBasis || String(local.pumpTestPerPump) !== String(st.pumpTestPerPump);
     const nozzleCount = (t) => (t.nozzleIds || []).length;
     const setNo = (idx, v) => setLocal((c) => Object.assign({}, c, { tanks: c.tanks.map((t, i) => i === idx ? Object.assign({}, t, { stationTankNo: v ? Number(v) : undefined }) : t) }));
     const layoutFields = (l) => ({ pumps: l.pumps.map((p) => ({ no: p.no, nozzleId: p.nozzleId })), nozzleIds: l.pumps.map((p) => p.nozzleId) });
     const createStation = () => setLocal((c) => Object.assign({}, c, { tanks: DSR_LAYOUT.map((l) => Object.assign({ id: uid('tank'), name: l.name, productId: l.productId, stationTankNo: l.stationNo, capacityKL: l.kl }, layoutFields(l))) }));
     const applyLayout = () => setLocal((c) => Object.assign({}, c, { tanks: c.tanks.map((t) => { const l = DSR_LAYOUT.find((x) => x.stationNo === Number(t.stationTankNo)); return l ? Object.assign({}, t, layoutFields(l)) : t; }) }));
-    const save = () => { persistConfig(Object.assign({}, config, { tanks: local.tanks, dsrSettings: { boundaryHour: Math.min(23, Math.max(0, Number(local.boundaryHour) || 0)), receiptBasis: local.receiptBasis } })); showToast('DSR tank mapping and settings saved.'); };
+    const save = () => { persistConfig(Object.assign({}, config, { tanks: local.tanks, dsrSettings: { boundaryHour: Math.min(23, Math.max(0, Number(local.boundaryHour) || 0)), receiptBasis: local.receiptBasis, pumpTestPerPump: local.pumpTestPerPump === '' ? '' : Math.max(0, Number(local.pumpTestPerPump) || 0) } })); showToast('DSR tank mapping and settings saved.'); };
     const productName = (id) => { const p = (config.products || []).find((x) => x.id === id); return p ? p.name : id; };
     return React.createElement(React.Fragment, null,
         React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station tanks → tool tanks"), React.createElement("button", { className: "btn btn-primary", disabled: !dirty, onClick: save }, "Save")),
@@ -7033,7 +7039,8 @@ function DSRMapping({ config, persistConfig, showToast }) {
         React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Settings")),
             React.createElement("div", { className: "form-grid" },
                 React.createElement(Field, { label: "Shift change hour (business day starts/ends)", hint: "Dip Stock = tank reading at this hour the next morning" }, React.createElement("input", { className: "text-input", type: "number", min: 0, max: 23, value: local.boundaryHour, onChange: (e) => setLocal((c) => Object.assign({}, c, { boundaryHour: e.target.value === '' ? '' : Number(e.target.value) })) })),
-                React.createElement(Field, { label: "Receipt column uses", hint: "Decanted = the volume the station system measured going into each tank (default)" }, React.createElement("select", { className: "select-input", value: local.receiptBasis, onChange: (e) => setLocal((c) => Object.assign({}, c, { receiptBasis: e.target.value })) }, React.createElement("option", { value: "decanted" }, "Measured decanted volume"), React.createElement("option", { value: "invoice" }, "Invoice quantity (entered receipt)"))))));
+                React.createElement(Field, { label: "Receipt column uses", hint: "Decanted = the volume the station system measured going into each tank (default)" }, React.createElement("select", { className: "select-input", value: local.receiptBasis, onChange: (e) => setLocal((c) => Object.assign({}, c, { receiptBasis: e.target.value })) }, React.createElement("option", { value: "decanted" }, "Measured decanted volume"), React.createElement("option", { value: "invoice" }, "Invoice quantity (entered receipt)"))),
+                React.createElement(Field, { label: "Pump test per pump per day (L)", hint: "The printed register counts a flat 10 L per pump. Leave blank to use the testing recorded in the daily entries instead." }, React.createElement("input", { className: "text-input", type: "number", min: 0, step: "0.5", value: local.pumpTestPerPump, placeholder: "recorded", onChange: (e) => setLocal((c) => Object.assign({}, c, { pumpTestPerPump: e.target.value === '' ? '' : Number(e.target.value) })) })))));
 }
 const RATES_TT = { '12_Driver': 1200, '20_Driver': 1500, '12_Cleaner': 900, '20_Cleaner': 1000 };
 function ttUid() { return 'tt_' + Math.random().toString(36).slice(2, 10); }
