@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.11.25-4';
+const APP_BUILD = '2026.11.25-5';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -7191,6 +7191,14 @@ function DSRTab(props) {
         sub === 'mapping' && React.createElement(DSRMapping, props));
 }
 // The records generated for the pulled day(s), laid out like the register pages, in the same order: DSR, Meter Readings, Dip & Stock, Density.
+function dsrDefaultShown(dsrData) {
+    const today = dsrLocalToday();
+    const days = Object.keys(dsrData || {}).filter((d) => d < today && Object.keys(dsrData[d] || {}).some((k) => { const r = dsrData[d][k]; return r && r.dipStock !== undefined && r.dipStock !== ''; })).sort();
+    if (!days.length)
+        return null;
+    const d = days[days.length - 1], nx = dsrAddDays(d, 1);
+    return { saved: [d], after: nx <= today ? nx : null };
+}
 function DSRDayResults({ config, msLog, dieselLog, msReadings, dieselData, dsrData, saved, after }) {
     const tanks = config.tanks || [];
     const [pos, setPos] = useState(0);
@@ -7318,7 +7326,7 @@ function DSRDayResults({ config, msLog, dieselLog, msReadings, dieselData, dsrDa
             })));
         note = "The saved day is listed only when this tank had a decantation; the next row is the morning density. ≈ marks a calculated value (hover the after-decantation value for the working).";
     }
-    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Calculated records"), React.createElement("span", { className: "empty-hint", style: { padding: 0 } }, `Page ${Math.min(pos, flat.length - 1) + 1} of ${flat.length} · use ← → to move`)),
+    return React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Calculated records \u2014 " + fmtDate(saved[0]) + (saved.length > 1 ? ' to ' + fmtDate(lastSaved) : '') + (after ? ' (opening ' + fmtDate(after) + ')' : '')), React.createElement("span", { className: "empty-hint", style: { padding: 0 } }, `Page ${Math.min(pos, flat.length - 1) + 1} of ${flat.length} · use ← → to move`)),
         React.createElement("div", { className: "tab-switch" }, regs.map(([r, label]) => React.createElement("button", { key: r, className: cur.reg === r ? 'active' : '', onClick: () => setPos(flat.findIndex((x) => x.reg === r)) }, label))),
         React.createElement("div", { className: "tab-switch", style: { marginTop: 8 } }, all[cur.reg].map((pg, k) => React.createElement("button", { key: k, className: cur.k === k ? 'active' : '', onClick: () => setPos(flat.findIndex((x) => x.reg === cur.reg && x.k === k)) }, pg.label))),
         React.createElement("div", { style: { overflowX: 'auto', marginTop: 10 } }, body),
@@ -7424,7 +7432,7 @@ function DSRDailyEntry({ config, msLog, dieselLog, msReadings, dieselData, dsrDa
             missingObs > 0 && React.createElement("div", { className: "empty-hint", style: { color: 'var(--amber)' } }, `${missingObs} deliver${missingObs === 1 ? 'y has' : 'ies have'} no observed density \u2014 the invoice density will be used for the calculation.`),
             React.createElement("div", { className: "slot-actions", style: { marginTop: 12, gap: 8 } }, React.createElement("button", { className: "btn btn-primary", disabled: !savable || flagged > 0, onClick: generate }, "Calculate & Save"), React.createElement("button", { className: "btn btn-secondary", onClick: () => { setBatch(null); setObsIn({}); } }, "Cancel"))),
         genMsg && React.createElement("div", { className: "empty-hint", style: { color: 'var(--amber)' } }, genMsg),
-        shown && React.createElement(DSRDayResults, { config, msLog, dieselLog, msReadings, dieselData, dsrData, saved: shown.saved, after: shown.after }));
+        !plans && (shown || dsrDefaultShown(dsrData)) && React.createElement(DSRDayResults, { key: ((shown || dsrDefaultShown(dsrData)).saved || []).join(','), config, msLog, dieselLog, msReadings, dieselData, dsrData, saved: (shown || dsrDefaultShown(dsrData)).saved, after: (shown || dsrDefaultShown(dsrData)).after }));
 }
 function DSRPicker({ tanks, tankId, setTankId, month, setMonth, tankLabel }) {
     return React.createElement("div", { className: "btn-group" }, tankLabel !== false && React.createElement("select", { className: "select-input", value: tankId, onChange: (e) => setTankId(e.target.value) }, tanks.map((t) => React.createElement("option", { key: t.id, value: t.id }, t.name))), React.createElement(MonthSelect, { value: month, onChange: setMonth }));
