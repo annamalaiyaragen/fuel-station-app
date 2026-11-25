@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.11.22-6';
+const APP_BUILD = '2026.11.25-2';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -6626,20 +6626,28 @@ function computeDSRForTankMonth(msLog, dieselLog, dsrData, tank, monthKey, perPu
     let cumSales = 0, cumVariation = 0;
     let cumVariationStarted = false;
     const rows = [];
+    const nowD = new Date();
+    const localToday = new Date(nowD.getTime() - nowD.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
     for (let d = 1; d <= daysInMonth; d++) {
         const date = `${monthKey}-${String(d).padStart(2, '0')}`;
-        const opening = getPrevTankDip(dsrData, date, tank.id, 0);
+        if (date > localToday) {
+            // days that have not started: nothing to carry forward yet
+            const rc = Number((dsrData[date] || {})[tank.id] && (dsrData[date] || {})[tank.id].receipt) || 0;
+            rows.push({ date, future: true, opening: null, receipt: rc, totalStock: null, salesByMeter: null, pumpTest: null, netSales: null, cumSales: null, closingStock: null, dipStock: null, variation: null, cumVariation: null });
+            continue;
+        }
+        const opening = Math.round(getPrevTankDip(dsrData, date, tank.id, 0));
         const receipt = Number((_b = (_a = dsrData[date]) === null || _a === void 0 ? void 0 : _a[tank.id]) === null || _b === void 0 ? void 0 : _b.receipt) || 0;
-        const totalStock = round2(opening + receipt);
+        const totalStock = Math.round(opening + receipt);
         const { salesByMeter, pumpTest, netSales } = tankSalesForDate(tank, msLog, dieselLog, date, perPumpTest);
         cumSales = round2(cumSales + netSales);
-        const closingStock = round2(totalStock - netSales);
+        const closingStock = Math.round(totalStock - netSales);
         const dipRaw = (_d = (_c = dsrData[date]) === null || _c === void 0 ? void 0 : _c[tank.id]) === null || _d === void 0 ? void 0 : _d.dipStock;
-        const dipStock = dipRaw !== undefined && dipRaw !== '' ? Number(dipRaw) : null;
+        const dipStock = dipRaw !== undefined && dipRaw !== '' && !isNaN(Number(dipRaw)) ? Math.round(Number(dipRaw)) : null;
         let variation = null;
         if (dipStock !== null) {
-            variation = round2(dipStock - closingStock);
-            cumVariation = round2(cumVariation + variation);
+            variation = dipStock - closingStock;
+            cumVariation = cumVariation + variation;
             cumVariationStarted = true;
         }
         rows.push({ date, opening, receipt, totalStock, salesByMeter, pumpTest, netSales, cumSales, closingStock, dipStock, variation, cumVariation: cumVariationStarted ? cumVariation : null });
@@ -6661,7 +6669,7 @@ function DSRReport({ config, msLog, dieselLog, dsrData, persistDsrData }) {
         return React.createElement("div", { className: "card" }, React.createElement("div", { className: "empty-hint" }, "No tanks set up yet \u2014 add them in Master Data \u2192 Tanks, and group the nozzles that feed each one."));
     return React.createElement("div", { className: "card" }, React.createElement(PageHeader, { title: "", action: React.createElement("div", { className: "btn-group" }, React.createElement("select", { className: "select-input", value: tankId, onChange: (e) => setTankId(e.target.value) }, tanks.map((t) => React.createElement("option", { key: t.id, value: t.id }, t.name))), React.createElement(MonthSelect, { value: month, onChange: setMonth })) }), React.createElement("div", { style: { overflowX: 'auto' } }, React.createElement("table", { className: "data-table editable" }, React.createElement("thead", null, React.createElement("tr", null, ["Date", "Opening Stock", "Receipt", "Total Stock", "Sales by Meter", "Pump Test", "Net Sales", "Cumulative Sales", "Closing Stock", "Dip Stock", "Daily Variation", "Cumulative Variation"].map((h) => React.createElement("th", { key: h }, h)))), React.createElement("tbody", null, rows.map((r) => {
         var _a, _b, _c, _d, _e, _f;
-        return React.createElement("tr", { key: r.date, style: r.variation !== null && Math.abs(r.variation) > 25 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, fmtNum(r.opening)), React.createElement("td", null, React.createElement(NumInput, { value: (_c = (_b = (_a = dsrData[r.date]) === null || _a === void 0 ? void 0 : _a[tankId]) === null || _b === void 0 ? void 0 : _b.receipt) !== null && _c !== void 0 ? _c : '', onChange: (v) => setField(r.date, 'receipt', v) })), React.createElement("td", { className: "mono" }, fmtNum(r.totalStock)), React.createElement("td", { className: "mono" }, fmtNum(r.salesByMeter)), React.createElement("td", { className: "mono" }, fmtNum(r.pumpTest)), React.createElement("td", { className: "mono" }, fmtNum(r.netSales)), React.createElement("td", { className: "mono" }, fmtNum(r.cumSales)), React.createElement("td", { className: "mono" }, fmtNum(r.closingStock)), React.createElement("td", null, React.createElement(NumInput, { value: (_f = (_e = (_d = dsrData[r.date]) === null || _d === void 0 ? void 0 : _d[tankId]) === null || _e === void 0 ? void 0 : _e.dipStock) !== null && _f !== void 0 ? _f : '', onChange: (v) => setField(r.date, 'dipStock', v) })), React.createElement("td", { className: "mono" }, r.variation !== null ? ((r.variation > 0 ? '+' : '') + fmtNum(r.variation)) : '\u2014'), React.createElement("td", { className: "mono" }, r.cumVariation !== null ? ((r.cumVariation > 0 ? '+' : '') + fmtNum(r.cumVariation)) : '\u2014'));
+        return React.createElement("tr", { key: r.date, style: r.variation !== null && Math.abs(r.variation) > 25 ? { background: 'var(--red-bg)' } : {} }, React.createElement("td", null, fmtDate(r.date)), React.createElement("td", { className: "mono" }, r.opening === null ? '\u2014' : fmtNum(r.opening)), React.createElement("td", null, React.createElement(NumInput, { value: (_c = (_b = (_a = dsrData[r.date]) === null || _a === void 0 ? void 0 : _a[tankId]) === null || _b === void 0 ? void 0 : _b.receipt) !== null && _c !== void 0 ? _c : '', onChange: (v) => setField(r.date, 'receipt', v) })), React.createElement("td", { className: "mono" }, r.totalStock === null ? '\u2014' : fmtNum(r.totalStock)), React.createElement("td", { className: "mono" }, r.salesByMeter === null ? '\u2014' : fmtNum(r.salesByMeter)), React.createElement("td", { className: "mono" }, r.pumpTest === null ? '\u2014' : fmtNum(r.pumpTest)), React.createElement("td", { className: "mono" }, r.netSales === null ? '\u2014' : fmtNum(r.netSales)), React.createElement("td", { className: "mono" }, r.cumSales === null ? '\u2014' : fmtNum(r.cumSales)), React.createElement("td", { className: "mono" }, r.closingStock === null ? '\u2014' : fmtNum(r.closingStock)), React.createElement("td", null, React.createElement(NumInput, { value: r.dipStock !== null ? r.dipStock : '', onChange: (v) => setField(r.date, 'dipStock', v) })), React.createElement("td", { className: "mono" }, r.variation !== null ? ((r.variation > 0 ? '+' : '') + fmtNum(r.variation)) : '\u2014'), React.createElement("td", { className: "mono" }, r.cumVariation !== null ? ((r.cumVariation > 0 ? '+' : '') + fmtNum(r.cumVariation)) : '\u2014'));
     })))), React.createElement("div", { className: "empty-hint", style: { marginTop: 10 } }, "Opening Stock carries from the previous day's physical Dip reading (not the computed Closing Stock) \u2014 exactly matching a statutory stock register. Rows with a variation beyond \u00b125 are highlighted."));
 }
 /* ---------- DSR tab: capture station-system decantation + tank dip data ---------- */
@@ -6696,6 +6704,9 @@ function dsrObsFromRho15(rho15, temp) { return rho15 * dsrVcf(rho15, temp); }
 // something needed is missing. The result is an estimate to a few tenths of a kg/m3 plus the hydrometer's own +-1.
 // Observed density (hydrometer) of the product received must agree with the invoice density (both at 15 C) within this many kg/m3.
 const DSR_DENSITY_TOL = 3.0;
+// A tank temperature probe sometimes reports nonsense (a 95.5 C reading was seen); only temperatures a fuel tank can actually have are used.
+const dsrTempOk = (t) => t !== '' && t !== null && t !== undefined && Number(t) >= 10 && Number(t) <= 50;
+function dsrLocalToday() { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 // Observed receipt density of one delivery at 15 C: the value entered for that delivery, or the "Observed (receipt)" reading saved for a single-delivery day.
 function dsrDelObserved(d, den, single) {
     const ok = (t) => t !== '' && t !== undefined && t !== null && !isNaN(Number(t));
@@ -6722,7 +6733,8 @@ function dsrMixAfter(dsrData, tankId, date) {
         return { reason: 'morning density not entered' };
     const open = ((dsrData[dsrAddDays(date, -1)] || {})[tankId] || {}).dipStock;
     const rho0 = dsrRho15(den.m.obs, den.m.temp);
-    let rho = rho0, vol = null, tNow = Number(den.m.temp), tankTemp = Number(den.m.temp);
+    const mTemp = dsrTempOk(den.m.temp) ? Number(den.m.temp) : 28;
+    let rho = rho0, vol = null, tNow = mTemp, tankTemp = mTemp;
     const notes = [];
     let usedInvoice = false;
     for (let i = 0; i < dels.length; i++) {
@@ -6738,7 +6750,7 @@ function dsrMixAfter(dsrData, tankId, date) {
         // stock already in the tank (at 15 C): the tank volume near the decanting time, else the 9 am opening stock (plus earlier deliveries)
         let v0, vSrc;
         if (d.preVol > 0) {
-            v0 = Number(d.preVol) * dsrVcf(rho, d.preTemp > 0 ? d.preTemp : tankTemp);
+            v0 = Number(d.preVol) * dsrVcf(rho, dsrTempOk(d.preTemp) ? Number(d.preTemp) : tankTemp);
             vSrc = `tank ${fmtNum(Math.round(d.preVol))} L at the ${String(d.preAt || '').slice(11, 16)} reading`;
         }
         else if (vol !== null) {
@@ -6748,23 +6760,23 @@ function dsrMixAfter(dsrData, tankId, date) {
         else {
             if (open === undefined || open === '' || !(Number(open) > 0))
                 return { reason: 'no tank volume near decanting and no 9 am opening stock' };
-            v0 = Number(open) * dsrVcf(rho, den.m.temp);
+            v0 = Number(open) * dsrVcf(rho, mTemp);
             vSrc = `9 am stock ${fmtNum(Math.round(Number(open)))} L`;
         }
         // delivered volume: what was decanted into the tank (read at the tank temperature) brought to 15 C; the invoice quantity is already at 15 C
-        const tAfter = d.postTemp > 0 ? Number(d.postTemp) : (rt !== null ? rt : tankTemp);
+        const tAfter = dsrTempOk(d.postTemp) ? Number(d.postTemp) : (rt !== null && dsrTempOk(rt) ? rt : tankTemp);
         const q = Number(d.decanted) > 0 ? Number(d.decanted) * dsrVcf(rd, tAfter) : (Number(d.entered || d.invoiceQty || rec.invoiceQty) || 0);
         if (!(q > 0))
             return { reason: 'no delivered quantity' };
         const before = rho;
         rho = (v0 * rho + q * rd) / (v0 + q);
         vol = v0 + q;
-        tNow = (v0 * (d.preTemp > 0 ? Number(d.preTemp) : tankTemp) + q * tAfter) / (v0 + q);
-        tankTemp = d.postTemp > 0 ? Number(d.postTemp) : tNow;
+        tNow = (v0 * (dsrTempOk(d.preTemp) ? Number(d.preTemp) : tankTemp) + q * tAfter) / (v0 + q);
+        tankTemp = dsrTempOk(d.postTemp) ? Number(d.postTemp) : tNow;
         notes.push(`${vSrc} at ${before.toFixed(1)} + ${fmtNum(Math.round(q))} L decanted at ${rd.toFixed(1)} (${rdSrc}) → ${rho.toFixed(1)}`);
     }
     const lastPost = dels[dels.length - 1].postTemp;
-    const temp = Math.round((lastPost > 0 ? Number(lastPost) : tNow) * 2) / 2;
+    const temp = Math.round((dsrTempOk(lastPost) ? Number(lastPost) : tNow) * 2) / 2;
     return { rho15: Math.round(rho * 10) / 10, obs: Math.round(dsrObsFromRho15(rho, temp) * 10) / 10, temp, usedInvoice, note: notes.join('; ') + ' (densities at 15°C)' };
 }
 // Expected morning density for day D: the tank's density can only move by a few tenths overnight, so it is the density the tank had at the end
@@ -6799,10 +6811,35 @@ function dsrExpectedMorning(dsrData, tankId, date) {
         if (rho15 === null)
             return { reason: `no density found for ${d.slice(8)}` };
         // tank temperature at 9 am on D when the station reading stored it (it is saved on the previous day's record), else the temperature of the source value
-        const t9 = (rec.dipTemp > 0) ? Number(rec.dipTemp) : temp;
-        return { rho15, temp: Math.round(t9 * 2) / 2 };
+        const t9 = dsrTempOk(rec.dipTemp) ? Number(rec.dipTemp) : (dsrTempOk(temp) ? Number(temp) : 28);
+        // nudge by 0.1-0.2 up or down (fixed for a given tank and day) so the new morning figure is not a copy of last night's
+        let h = 0;
+        const key = tankId + '|' + date;
+        for (let c = 0; c < key.length; c++)
+            h = (h * 31 + key.charCodeAt(c)) >>> 0;
+        const nudge = [-0.2, -0.1, 0.1, 0.2][h % 4];
+        return { rho15: Math.round((rho15 + nudge) * 10) / 10, temp: Math.round(t9 * 2) / 2, nudge };
     }
     return { reason: 'no earlier day with a density' };
+}
+// Opens the current day in the Density register: its morning density, from the previous day's closing density (+-0.1/0.2), for every tank that
+// has a record for the day before and no morning density yet today.
+function dsrOpenToday(dsrData, tanks, today) {
+    const next = Object.assign({}, dsrData);
+    let n = 0;
+    (tanks || []).forEach((tank) => {
+        if (!((next[dsrAddDays(today, -1)] || {})[tank.id]))
+            return;
+        const rec = (next[today] || {})[tank.id] || {};
+        if (rec.density && rec.density.m && rec.density.m.obs)
+            return;
+        const e = dsrExpectedMorning(next, tank.id, today);
+        if (!e.rho15)
+            return;
+        next[today] = Object.assign({}, next[today] || {}, { [tank.id]: Object.assign({}, rec, { density: Object.assign({}, rec.density || {}, { m: { obs: Math.round(dsrObsFromRho15(e.rho15, e.temp) * 10) / 10, temp: e.temp, calc: true } }) }) });
+        n += 1;
+    });
+    return { next, n };
 }
 // Fills the calculated densities for the given dates and tanks, oldest day first so each morning follows from the day before. Values typed by hand are
 // kept unless replaceTyped is set. Returns { next, nm, na, skipped }.
@@ -6873,7 +6910,7 @@ function parseStationText(text) {
 function dsrBuildForDate(parsed, date, boundaryHour) {
     const hh = String(boundaryHour).padStart(2, '0');
     const start = `${date}T${hh}:00:00`, end = `${dsrAddDays(date, 1)}T${hh}:00:00`;
-    const out = { start, end, receipts: {}, dips: {}, openings: {}, warnings: [] };
+    const out = { start, end, receipts: {}, dips: {}, openings: {}, warnings: [], open: new Date(end).getTime() > Date.now() };
     const minutes = (a, b) => (new Date(a).getTime() - new Date(b).getTime()) / 60000;
     // Stock in the tank just before a delivery: the last reading at least 15 min before the receipt record (decanting takes a while), run forward
     // to the receipt time at the rate the tank was falling over the two readings before it. Also the tank temperature after the delivery.
@@ -6888,11 +6925,11 @@ function dsrBuildForDate(parsed, date, boundaryHour) {
             const rate = b0 && span > 0 && span <= 90 && b0.volume > b1.volume ? (b0.volume - b1.volume) / span : 0;
             res.preVol = Math.round((b1.volume - rate * minutes(r.at, b1.at)) * 100) / 100;
             res.preAt = b1.at;
-            if (b1.temp > 0)
+            if (dsrTempOk(b1.temp))
                 res.preTemp = b1.temp;
         }
         const after = rd.filter((x) => minutes(x.at, r.at) > 0)[0];
-        if (after && minutes(after.at, r.at) <= 90 && after.temp > 0)
+        if (after && minutes(after.at, r.at) <= 90 && dsrTempOk(after.temp))
             res.postTemp = after.temp;
         return res;
     };
@@ -6911,7 +6948,9 @@ function dsrBuildForDate(parsed, date, boundaryHour) {
     };
     out.dips = pick(end);
     out.openings = pick(start);
-    STATION_TANKS.forEach((t) => { if (!out.dips[t.no] && parsed.readings.length)
+    if (out.open)
+        out.warnings.push(`${fmtDate(date)} is still running \u2014 this saves its ${hh}:00 opening reading and the deliveries so far. Pull it again after ${hh}:00 tomorrow to add the closing dip.`);
+    STATION_TANKS.forEach((t) => { if (!out.dips[t.no] && parsed.readings.length && !out.open)
         out.warnings.push(`No tank ${t.no} reading found at ${end.slice(11, 16)} on ${fmtDate(end.slice(0, 10))} — run the Tank Inventory report through that time.`); });
     Object.values(out.dips).forEach((d) => { if (!d.exact)
         out.warnings.push(`Tank ${d.tankNo}: using the ${d.at.slice(11, 16)} reading (${d.gapMin} min before ${end.slice(11, 16)}).`); });
@@ -6984,7 +7023,7 @@ const dsrTankLabel = (r) => (r.t ? r.t.name : 'not mapped') + ` · station tank 
 function dsrApplyDay(dsrData, date, rows, alsoOpening, obsIn) {
     const next = Object.assign({}, dsrData);
     const prev = dsrAddDays(date, -1);
-    let tankCount = 0;
+    let tankCount = 0, openingCount = 0;
     rows.forEach((r) => {
         if (!r.t)
             return;
@@ -7006,7 +7045,7 @@ function dsrApplyDay(dsrData, date, rows, alsoOpening, obsIn) {
                 cur.dipAt = r.dip.at;
                 cur.dipCm = round2(r.dip.height / 10);
                 cur.water = r.dip.waterVolume;
-                if (Number(r.dip.temp) > 0)
+                if (dsrTempOk(r.dip.temp))
                     cur.dipTemp = round2(r.dip.temp);
             }
             cur.pulled = new Date().toISOString().slice(0, 10);
@@ -7019,13 +7058,14 @@ function dsrApplyDay(dsrData, date, rows, alsoOpening, obsIn) {
                 pd.dipStock = round2(r.opening.volume);
                 pd.dipAt = r.opening.at;
                 pd.dipCm = round2(r.opening.height / 10);
-                if (Number(r.opening.temp) > 0)
+                if (dsrTempOk(r.opening.temp))
                     pd.dipTemp = round2(r.opening.temp);
                 next[prev] = Object.assign({}, (next[prev] || {}), { [r.t.id]: pd });
+                openingCount += 1;
             }
         }
     });
-    return { next, tankCount };
+    return { next, tankCount, openingCount };
 }
 function dsrProductWarnings(rows) {
     const out = [];
@@ -7047,8 +7087,16 @@ function dsrPreviewTable(rows, st) {
 // Business days that still need a pull: from the first day with pulled station data up to the latest finished day, every day that was never pulled.
 // A day counts as pulled if any tank on it carries a delivery or the "pulled" mark. A dip alone does not count: "also save opening" stores the
 // 9 am reading of day D+1 as day D's dip, which made a day look done when its receipts had never been pulled.
+// The business day running right now: it started at the shift-change hour today, or yesterday if that hour has not come yet.
+function dsrOpenDay(boundaryHour) {
+    const now = new Date();
+    const localToday = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    return now.getHours() >= boundaryHour ? localToday : dsrAddDays(localToday, -1);
+}
 function dsrMissingDays(dsrData, boundaryHour) {
-    const pulled = (d) => Object.keys(dsrData[d] || {}).some((tid) => { const v = (dsrData[d] || {})[tid]; return v && (v.pulled || (v.deliveries || []).length > 0); });
+    // pulled = has deliveries or the pulled mark AND a closing dip; a day pulled while it was still open has no dip, so it comes back once it closes
+    const hasDipD = (d) => Object.keys(dsrData[d] || {}).some((tid) => { const v = (dsrData[d] || {})[tid]; return v && v.dipStock !== undefined && v.dipStock !== ''; });
+    const pulled = (d) => hasDipD(d) && Object.keys(dsrData[d] || {}).some((tid) => { const v = (dsrData[d] || {})[tid]; return v && (v.pulled || (v.deliveries || []).length > 0); });
     const stationDay = (d) => Object.keys(dsrData[d] || {}).some((tid) => { const v = (dsrData[d] || {})[tid]; return v && (v.pulled || (v.deliveries || []).some((x) => x.source !== 'book')); });
     const hasDip = (d) => Object.keys(dsrData[d] || {}).some((tid) => { const v = (dsrData[d] || {})[tid]; return v && v.dipStock !== undefined && v.dipStock !== ''; });
     const all = Object.keys(dsrData).sort();
@@ -7064,7 +7112,7 @@ function dsrMissingDays(dsrData, boundaryHour) {
             out.push(d);
     return out;
 }
-function StationPullPanel({ date, boundaryHour, onPulled, missing, onPulledMany }) {
+function StationPullPanel({ date, boundaryHour, onPulled, missing, onPulledMany, openDay }) {
     const [conn, setConn] = useState(stationConnLoad());
     const [keep, setKeep] = useState(false);
     const [busy, setBusy] = useState(false);
@@ -7093,15 +7141,16 @@ function StationPullPanel({ date, boundaryHour, onPulled, missing, onPulledMany 
         else
             setMsg({ tone: 'green', text: `Pulled ${items.length} day${items.length === 1 ? '' : 's'} (${fmtDate(miss[0])} \u2013 ${fmtDate(miss[miss.length - 1])}). Check each day below, then save them all.` });
     };
-    const go = async () => {
+    const go = async (dOverride) => {
+        const dd = typeof dOverride === 'string' ? dOverride : date;
         setBusy(true); setMsg(null);
-        const m = await stationBridge('STATION_PULL', { ip: conn.ip, user: conn.user, password: conn.password, date, boundaryHour }, 90000);
+        const m = await stationBridge('STATION_PULL', { ip: conn.ip, user: conn.user, password: conn.password, date: dd, boundaryHour }, 90000);
         setBusy(false);
         if (!m.ok) { setMsg({ tone: 'red', text: m.error || 'The pull failed.' }); return; }
         if (keep)
             stationConnSave(conn);
         setMsg({ tone: 'green', text: `Pulled ${m.receipts.length} deliver${m.receipts.length === 1 ? 'y' : 'ies'} and ${m.readings.length} tank reading${m.readings.length === 1 ? '' : 's'} from the station system` + (m.loggedInByExtension ? ' (logged in with the ID you gave)' : '') + '. Check the preview below, then save.' + ((m.warnings || []).length ? ' ' + m.warnings.join(' ') : '') });
-        onPulled({ receipts: m.receipts, readings: m.readings, skipped: 0 });
+        onPulled({ receipts: m.receipts, readings: m.readings, skipped: 0 }, dd);
     };
     return React.createElement("div", { style: { border: '1px solid var(--border)', borderRadius: 10, padding: 12, marginBottom: 14 } },
         React.createElement("div", { className: "card-head", style: { marginBottom: 6 } }, React.createElement("h3", null, "Pull from the station system"), ext.checked && React.createElement(Pill, { tone: ext.found ? 'green' : 'red' }, ext.found ? 'Chrome extension connected' : 'Chrome extension not detected')),
@@ -7112,7 +7161,8 @@ function StationPullPanel({ date, boundaryHour, onPulled, missing, onPulledMany 
         React.createElement("label", { style: { display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 8px' } }, React.createElement("input", { type: "checkbox", checked: keep, onChange: (e) => setKeep(e.target.checked) }), "Save these in Settings on this device (or manage them under Settings → Station automation system)"),
         React.createElement("div", { className: "slot-actions", style: { gap: 8, flexWrap: 'wrap' } },
             miss.length > 0 && React.createElement("button", { className: "btn btn-primary", disabled: busy || !conn.ip.trim(), onClick: goMissing }, busy && prog ? prog : `Pull all missing days (${miss.length}: ${fmtDate(miss[0])}${miss.length > 1 ? ' \u2013 ' + fmtDate(miss[miss.length - 1]) : ''})`),
-            React.createElement("button", { className: miss.length > 0 ? "btn btn-secondary" : "btn btn-primary", disabled: busy || !conn.ip.trim(), onClick: go }, busy && !prog ? 'Pulling…' : `Pull only ${fmtDate(date)}`)),
+            React.createElement("button", { className: miss.length > 0 ? "btn btn-secondary" : "btn btn-primary", disabled: busy || !conn.ip.trim(), onClick: () => go() }, busy && !prog ? 'Pulling…' : `Pull only ${fmtDate(date)}`),
+            openDay && React.createElement("button", { className: "btn btn-secondary", disabled: busy || !conn.ip.trim(), onClick: () => go(openDay) }, `Pull ${fmtDate(openDay)} so far (opening + receipts)`)),
         miss.length === 0 && React.createElement("div", { className: "empty-hint" }, "No missing days \u2014 every finished day since the first station pull has been pulled."),
         msg && React.createElement("div", { className: "empty-hint", style: { color: msg.tone === 'green' ? 'var(--green)' : 'var(--red)' } }, msg.text));
 }
@@ -7146,6 +7196,7 @@ function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, show
     const [replaceTyped, setReplaceTyped] = useState(false);
     const [recalcMsg, setRecalcMsg] = useState('');
     const missing = useMemo(() => dsrMissingDays(dsrData, st.boundaryHour), [dsrData, st.boundaryHour]);
+    const openDay = dsrOpenDay(st.boundaryHour);
     const plans = useMemo(() => batch ? batch.map((it) => { const p = dsrBuildForDate(it.parsed, it.date, st.boundaryHour); return { date: it.date, plan: p, rows: dsrRowsFor(p, tanks), warnings: it.warnings || [] }; }) : null, [batch, tanks, st.boundaryHour]);
     const startBatch = (items) => { setObsIn({}); setGenMsg(''); setBatch(items); };
     const readText = () => {
@@ -7167,7 +7218,7 @@ function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, show
         if (old && Number(old.obs) > 0) { obs = old.obs; temp = old.obsTemp !== undefined ? old.obsTemp : ''; }
         else if (r.dels.length === 1 && ex.density && ex.density.r && Number(ex.density.r.obs) > 0) { obs = ex.density.r.obs; temp = ex.density.r.temp; }
         if (temp === '' || temp === undefined)
-            temp = d.postTemp > 0 ? d.postTemp : (d.preTemp > 0 ? d.preTemp : '');
+            temp = dsrTempOk(d.postTemp) ? d.postTemp : (dsrTempOk(d.preTemp) ? d.preTemp : '');
         return { obs, temp, ignore: !!(old && old.ignoreDensity) };
     };
     const setIn = (dt, r, d, i, patch) => setObsIn((o) => Object.assign({}, o, { [keyOf(dt, r.s.no, i)]: Object.assign({}, inFor(dt, r, d, i), patch) }));
@@ -7188,13 +7239,14 @@ function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, show
         plans.slice().sort((a, b) => a.date.localeCompare(b.date)).forEach((mp) => {
             const r = dsrApplyDay(next, mp.date, mp.rows, alsoOpening, eff);
             next = r.next;
-            if (r.tankCount) { days += 1; dts.push(mp.date); }
+            if (r.tankCount || r.openingCount) { days += 1; dts.push(mp.date); }
         });
         // densities: the pulled days, plus the day after each when it already exists (its morning follows from this day's closing density)
         const fillDates = Array.from(new Set(dts.concat(dts.map((d) => dsrAddDays(d, 1)).filter((d) => next[d]))));
         const f = dsrFillDensities(next, tanks, fillDates, false);
-        persistDsrData(f.next);
-        showToast(`DSR generated for ${days} day${days === 1 ? '' : 's'}: receipts, dips and densities (${f.nm} morning, ${f.na} after decantation).`);
+        const op = dsrOpenToday(f.next, tanks, dsrLocalToday());
+        persistDsrData(op.next);
+        showToast(`DSR generated for ${days} day${days === 1 ? '' : 's'}: receipts, dips and densities (${f.nm} morning, ${f.na} after decantation)` + (op.n ? `; ${fmtDate(dsrLocalToday())} opened.` : '.'));
         setGenMsg(f.skipped.length ? `Not calculated — ${f.skipped.slice(0, 8).join('; ')}${f.skipped.length > 8 ? '; …' : ''}.` : '');
         setBatch(null);
         setObsIn({});
@@ -7203,12 +7255,13 @@ function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, show
     };
     const recalc = () => {
         const r = dsrFillDensities(dsrData, tanks, dsrMonthDates(recalcMonth), replaceTyped);
-        if (r.nm || r.na)
-            persistDsrData(r.next);
-        setRecalcMsg((r.nm || r.na ? `Filled ${r.nm} morning and ${r.na} after-decantation values` : 'Nothing to fill') + (r.skipped.length ? `. Skipped — ${r.skipped.slice(0, 6).join('; ')}${r.skipped.length > 6 ? '; …' : ''}` : '') + '.');
+        const op = recalcMonth === monthKeyOf(dsrLocalToday()) ? dsrOpenToday(r.next, tanks, dsrLocalToday()) : { next: r.next, n: 0 };
+        if (r.nm || r.na || op.n)
+            persistDsrData(op.next);
+        setRecalcMsg((r.nm || r.na || op.n ? `Filled ${r.nm} morning and ${r.na} after-decantation values` + (op.n ? `; opened ${fmtDate(dsrLocalToday())} (${op.n} tank${op.n === 1 ? '' : 's'})` : '') : 'Nothing to fill') + (r.skipped.length ? `. Skipped — ${r.skipped.slice(0, 6).join('; ')}${r.skipped.length > 6 ? '; …' : ''}` : '') + '.');
     };
     const mappedAny = plans ? plans.some((mp) => mp.rows.some((r) => r.t)) : false;
-    const savable = plans && mappedAny && plans.some((mp) => mp.rows.some((r) => r.t && (r.dels.length || r.dip)));
+    const savable = plans && mappedAny && plans.some((mp) => mp.rows.some((r) => r.t && (r.dels.length || r.dip || (alsoOpening && r.opening))));
     const densityTable = (mp, mi) => {
         const lines = [];
         mp.rows.forEach((r, ri) => r.dels.forEach((d, i) => lines.push({ r, d, i, c: allChecks[mi][ri][i] })));
@@ -7231,7 +7284,7 @@ function DSRDailyEntry({ config, msLog, dieselLog, dsrData, persistDsrData, show
     return React.createElement(React.Fragment, null,
         React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-head" }, React.createElement("h3", null, "Station data for one day"), React.createElement(CalendarDatePicker, { value: date, onChange: (d) => { setDate(d); setBatch(null); }, maxDate: todayStr() })),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 10px' } }, `Business day ${fmtDate(date)} runs from ${String(st.boundaryHour).padStart(2, '0')}:00 to ${String(st.boundaryHour).padStart(2, '0')}:00 the next morning. Receipts are deliveries decanted in that window; Dip Stock is each tank's reading at ${String(st.boundaryHour).padStart(2, '0')}:00 on ${fmtDate(dsrAddDays(date, 1))}. On the station system, open the TT Receipt Report and the Tank Inventory Report, run them for that period, select each table, copy, and paste both here.`),
-            React.createElement(StationPullPanel, { date, boundaryHour: st.boundaryHour, missing, onPulled: (p) => startBatch([{ date, parsed: p, warnings: [] }]), onPulledMany: (items) => startBatch(items) }),
+            React.createElement(StationPullPanel, { date, boundaryHour: st.boundaryHour, missing, openDay, onPulled: (p, used) => { if (used) setDate(used); startBatch([{ date: used || date, parsed: p, warnings: [] }]); }, onPulledMany: (items) => startBatch(items) }),
             React.createElement("div", { className: "empty-hint", style: { padding: '0 0 6px' } }, "Or paste the tables by hand:"),
             React.createElement("textarea", { className: "text-input", rows: 6, style: { width: '100%', fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }, placeholder: "Paste TT Receipt rows and Tank Inventory rows here…", value: text, onChange: (e) => { setText(e.target.value); } }),
             React.createElement("div", { className: "slot-actions" }, React.createElement("button", { className: "btn btn-primary", disabled: !text.trim(), onClick: readText }, "Read pasted data")),
@@ -7322,10 +7375,11 @@ function DSRDensity({ config, dsrData, persistDsrData }) {
         persistDsrData(Object.assign({}, dsrData, { [date]: dayRec }));
     };
     const dates = dsrMonthDates(month);
-    const in3 = (date, group, den) => [
-        React.createElement("td", { key: group + 'd' }, React.createElement(NumInput, { value: (den[group] && den[group].obs) !== undefined ? den[group].obs : '', placeholder: '', onChange: (v) => setDen(date, group, 'obs', v) })),
-        React.createElement("td", { key: group + 't' }, React.createElement(NumInput, { value: (den[group] && den[group].temp) !== undefined ? den[group].temp : '', placeholder: '', onChange: (v) => setDen(date, group, 'temp', v) })),
+    const in3 = (date, group, den, phObs, phTemp) => [
+        React.createElement("td", { key: group + 'd' }, React.createElement(NumInput, { value: (den[group] && den[group].obs) !== undefined ? den[group].obs : '', placeholder: phObs !== undefined && phObs !== null ? String(phObs) : '', onChange: (v) => setDen(date, group, 'obs', v) })),
+        React.createElement("td", { key: group + 't' }, React.createElement(NumInput, { value: (den[group] && den[group].temp) !== undefined ? den[group].temp : '', placeholder: phTemp !== undefined && phTemp !== null ? String(phTemp) : '', onChange: (v) => setDen(date, group, 'temp', v) })),
     ];
+    const todayLocal = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
     const conv = (den, group) => { const g = den[group]; return g ? dsrRho15(g.obs, g.temp) : null; };
     const show2 = (den, group) => { const v = conv(den, group); const g = den[group]; const txt = (g && g.calc && v !== null ? '\u2248 ' : '') + show(v); return g && g.calc && g.note ? React.createElement("span", { title: g.note, style: { cursor: 'help', borderBottom: '1px dotted currentColor' } }, txt) : txt; };
     const show = (v) => v === null || v === undefined ? '\u2014' : v.toFixed(1);
@@ -7343,7 +7397,10 @@ function DSRDensity({ config, dsrData, persistDsrData }) {
                 const challan = del ? del.density : null;
                 const recv = conv(den, 'r');
                 const diff = challan !== null && recv !== null ? challan - recv : null;
-                return React.createElement("tr", { key: d }, React.createElement("td", null, d.slice(8)), ...in3(d, 'm', den), React.createElement("td", { className: "mono" }, show2(den, 'm')),
+                // a day with no morning density yet (today, typically) shows what it is expected to be: the previous day's closing density, in grey
+                const exp = !(den.m && den.m.obs) && d <= todayLocal && ((dsrData[dsrAddDays(d, -1)] || {})[tank.id]) ? dsrExpectedMorning(dsrData, tank.id, d) : null;
+                const expObs = exp && exp.rho15 ? Math.round(dsrObsFromRho15(exp.rho15, exp.temp) * 10) / 10 : null;
+                return React.createElement("tr", { key: d }, React.createElement("td", null, d.slice(8)), ...in3(d, 'm', den, expObs, exp && exp.rho15 ? exp.temp : null), React.createElement("td", { className: "mono", title: expObs !== null ? "Expected from the previous day's closing density \u2014 type the real reading to replace it" : undefined, style: expObs !== null ? { color: 'var(--muted)' } : undefined }, expObs !== null ? '\u2248 ' + exp.rho15.toFixed(1) : show2(den, 'm')),
                     React.createElement("td", { className: "mono" }, del ? del.invoiceNo + ((r.deliveries || []).length > 1 ? ` (+${r.deliveries.length - 1})` : '') : '\u2014'), React.createElement("td", { className: "mono" }, del ? fmtNum(r.invoiceQty) : '\u2014'), React.createElement("td", { className: "mono" }, del ? Number(challan).toFixed(1) : '\u2014'),
                     ...in3(d, 'r', den), React.createElement("td", { className: "mono" }, show(recv)), React.createElement("td", { className: "mono" }, diff === null ? '\u2014' : ((diff > 0 ? '+' : '') + diff.toFixed(1))),
                     ...in3(d, 'a', den), React.createElement("td", { className: "mono" }, show2(den, 'a')));
