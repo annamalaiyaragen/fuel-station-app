@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.11.25-5';
+const APP_BUILD = '2026.11.26-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -7287,8 +7287,13 @@ function DSRDayResults({ config, msLog, dieselLog, msReadings, dieselData, dsrDa
             const dp = dieselData && dieselData[prev] && dieselData[prev].pointsClosing && dieselData[prev].pointsClosing[nozzleId];
             return dp !== undefined && dp !== '' ? dp : '';
         };
-        body = grid(saved, (t) => dsrTankPumps(t).map((p) => ({ h: `Pump ${p.no || '?'}`, sub: dsrNozzleLabel(config, p.nozzleId), v: (d) => reading(d, p.nozzleId) || dash })));
-        note = "Meter reading at the start of the saved day (the previous day’s closing reading). Blank columns separate the tanks.";
+        // the closing meter reading of each saved day is the one taken on the morning after it
+        const today = dsrLocalToday();
+        let md = saved.map((d) => dsrAddDays(d, 1)).filter((d) => d <= today);
+        if (!md.length)
+            md = [lastSaved];
+        body = grid(md, (t) => dsrTankPumps(t).map((p) => ({ h: `Pump ${p.no || '?'}`, sub: dsrNozzleLabel(config, p.nozzleId), v: (d) => reading(d, p.nozzleId) || dash })));
+        note = `Closing meter reading of ${fmtDate(dsrAddDays(md[0], -1))}${md.length > 1 ? ' onwards' : ''}, taken on the morning of ${fmtDate(md[0])}. Blank columns separate the tanks.`;
     }
     else if (cur.reg === 'dip') {
         const dd = after ? [after] : [lastSaved];
