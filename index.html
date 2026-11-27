@@ -325,7 +325,7 @@ function probeStorageLimit() {
 // Bump APP_BUILD (year.month.day-counter) every time a new version is handed over. It is stamped
 // into every Drive write so a device running an OLDER build can tell newer data exists and stop
 // pushing (instead of overwriting it), and so a device can notice a newer app version is deployed.
-const APP_BUILD = '2026.11.26-1';
+const APP_BUILD = '2026.11.27-1';
 function compareBuild(a, b) {
     const parse = (x) => String(x || '0').split(/[.\-]/).map((n) => parseInt(n, 10) || 0);
     const pa = parse(a), pb = parse(b);
@@ -5827,7 +5827,7 @@ function parseLegacyTabularLines(rawLines) {
 function MonthMultiSelectModal({ selected, monthOptions, onSave, onClose }) {
     const [draft, setDraft] = useState(selected || []);
     const toggle = (m) => setDraft((d) => d.includes(m) ? d.filter((x) => x !== m) : [...d, m]);
-    const rows = monthOptions.map((m) => React.createElement("label", { key: m, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' } },
+    const rows = monthOptions.map((m) => React.createElement("label", { key: m, style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', color: 'var(--text)', fontFamily: 'inherit', fontSize: 14, cursor: 'pointer' } },
         React.createElement("input", { type: "checkbox", checked: draft.includes(m), onChange: () => toggle(m) }), m));
     const modalBox = React.createElement("div", { className: "modal-box", style: { maxWidth: 280, maxHeight: '70vh', overflowY: 'auto' } },
         React.createElement("h3", null, "Select month(s)"),
@@ -5942,7 +5942,7 @@ function BankStatementTab({ config, bankStatements, persistBankStatements, showT
     const monthOptions = React.useMemo(() => {
         const opts = [];
         const now = new Date();
-        for (let i = -24; i <= 3; i++) {
+        for (let i = 0; i >= -24; i--) {
             const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
             const ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
             opts.push(monthLabel(ym));
